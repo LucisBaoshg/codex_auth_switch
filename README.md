@@ -73,7 +73,7 @@ src-tauri/target/release/codex-auth-switch
 - 安装 Node 24 和 Rust stable
 - 运行 `npm test`
 - 构建 `NSIS` Windows 安装包
-- 把生成的安装包作为 workflow artifact 上传
+- 直接把生成的 `.exe` 和 `.sig` 作为 workflow artifact 上传
 
 ## 测试
 

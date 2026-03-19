@@ -44,10 +44,13 @@ jobs:
         run: npm test
 
       - name: Build Windows installer
-        uses: tauri-apps/tauri-action@v0.6.2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run tauri build -- --bundles nsis
+
+      - name: Upload Windows installer artifact
+        uses: actions/upload-artifact@v4
         with:
-          args: --bundles nsis
-          uploadWorkflowArtifacts: true
-          workflowArtifactNamePattern: windows-[arch]-[bundle]
+          name: windows-x64-nsis
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/nsis/*.sig
