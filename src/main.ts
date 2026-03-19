@@ -9,6 +9,7 @@ type ProfileSummary = {
   id: string;
   name: string;
   notes: string;
+  authTypeLabel: string;
   createdAt: string;
   updatedAt: string;
   authHash: string;
@@ -26,6 +27,7 @@ type ProfileDocument = {
   id: string;
   name: string;
   notes: string;
+  authTypeLabel: string;
   createdAt: string;
   updatedAt: string;
   authJson: string;
@@ -39,6 +41,7 @@ type AppSnapshot = {
   targetAuthExists: boolean;
   targetConfigExists: boolean;
   targetUpdatedAt: string | null;
+  targetAuthTypeLabel: string | null;
   activeProfileId: string | null;
   lastSelectedProfileId: string | null;
   lastSwitchProfileId: string | null;
@@ -93,6 +96,7 @@ const mockSnapshot: AppSnapshot = {
   targetAuthExists: true,
   targetConfigExists: true,
   targetUpdatedAt: new Date().toISOString(),
+  targetAuthTypeLabel: "第三方 API",
   activeProfileId: "profile-2",
   lastSelectedProfileId: "profile-2",
   lastSwitchProfileId: "profile-2",
@@ -102,6 +106,7 @@ const mockSnapshot: AppSnapshot = {
       id: "profile-1",
       name: "Work Team",
       notes: "工作主账号，常驻使用。",
+      authTypeLabel: "官方 OAuth",
       createdAt: "2026-03-16T01:00:00Z",
       updatedAt: "2026-03-18T12:20:00Z",
       authHash: "7da2e87f1bc3",
@@ -111,6 +116,7 @@ const mockSnapshot: AppSnapshot = {
       id: "profile-2",
       name: "淘宝 1",
       notes: "主工作账号，额度稳定。",
+      authTypeLabel: "第三方 API",
       createdAt: "2026-03-17T01:00:00Z",
       updatedAt: "2026-03-19T04:12:00Z",
       authHash: "d18ff783cb10",
@@ -208,6 +214,7 @@ function createMockDocument(profile: ProfileSummary): ProfileDocument {
     id: profile.id,
     name: profile.name,
     notes: profile.notes,
+    authTypeLabel: profile.authTypeLabel,
     createdAt: profile.createdAt,
     updatedAt: profile.updatedAt,
     authJson: `{
@@ -506,7 +513,10 @@ function renderCardsPage(snapshot: AppSnapshot): string {
               <p class="card-kicker">Current Codex</p>
               <h2>当前 Codex 配置</h2>
             </div>
-            ${activeProfile ? `<span class="pill pill-active">当前生效</span>` : ""}
+            <div class="card-badges">
+              ${snapshot.targetAuthTypeLabel ? `<span class="pill pill-type">${escapeHtml(snapshot.targetAuthTypeLabel)}</span>` : ""}
+              ${activeProfile ? `<span class="pill pill-active">当前生效</span>` : ""}
+            </div>
           </div>
           <p class="card-note">${escapeHtml(currentConfigNote)}</p>
           <p class="card-date">更新时间：${formatDateTime(snapshot.targetUpdatedAt)}</p>
@@ -534,7 +544,10 @@ function renderCardsPage(snapshot: AppSnapshot): string {
                     <p class="card-kicker">Saved Profile</p>
                     <h2>${escapeHtml(profile.name)}</h2>
                   </div>
-                  ${snapshot.activeProfileId === profile.id ? `<span class="pill pill-active">当前生效</span>` : ""}
+                  <div class="card-badges">
+                    <span class="pill pill-type">${escapeHtml(profile.authTypeLabel)}</span>
+                    ${snapshot.activeProfileId === profile.id ? `<span class="pill pill-active">当前生效</span>` : ""}
+                  </div>
                 </div>
                 <p class="card-note">${escapeHtml(profile.notes || "没有备注")}</p>
                 <p class="card-date">更新时间：${formatDateTime(profile.updatedAt)}</p>

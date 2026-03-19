@@ -1,3 +1,5 @@
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -24,6 +26,7 @@ pub struct ProfileSummary {
     pub id: String,
     pub name: String,
     pub notes: String,
+    pub auth_type_label: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub auth_hash: String,
@@ -36,6 +39,7 @@ pub struct ProfileDocument {
     pub id: String,
     pub name: String,
     pub notes: String,
+    pub auth_type_label: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub auth_json: String,
@@ -59,6 +63,7 @@ pub struct AppSnapshot {
     pub target_auth_exists: bool,
     pub target_config_exists: bool,
     pub target_updated_at: Option<DateTime<Utc>>,
+    pub target_auth_type_label: Option<String>,
     pub active_profile_id: Option<String>,
     pub last_selected_profile_id: Option<String>,
     pub last_switch_profile_id: Option<String>,
@@ -81,6 +86,8 @@ struct ProfileMetadata {
     pub id: String,
     pub name: String,
     pub notes: String,
+    #[serde(default = "unknown_auth_type_label")]
+    pub auth_type_label: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub auth_hash: String,
@@ -199,20 +206,17 @@ impl ProfileManager {
         fs::write(profile_dir.join("auth.json"), input.auth_json)?;
         fs::write(profile_dir.join("config.toml"), input.config_toml)?;
 
-        let metadata = ProfileMetadata {
-            id: profile_id,
-            name: name.to_string(),
-            notes: input.notes.trim().to_string(),
-            created_at: now,
-            updated_at: now,
-            auth_hash: sha256_of_file(profile_dir.join("auth.json"))?,
-            config_hash: sha256_of_file(profile_dir.join("config.toml"))?,
-        };
-
-        fs::write(
-            profile_dir.join("meta.json"),
-            serde_json::to_string_pretty(&metadata)?,
+        let metadata = self.compose_profile_metadata(
+            profile_id,
+            name.to_string(),
+            input.notes.trim().to_string(),
+            now,
+            now,
+            &fs::read_to_string(profile_dir.join("auth.json"))?,
+            &fs::read_to_string(profile_dir.join("config.toml"))?,
         )?;
+
+        self.write_profile_metadata(&profile_dir, &metadata)?;
 
         Ok(ProfileSummary::from(metadata))
     }
@@ -266,6 +270,7 @@ impl ProfileManager {
             id: metadata.id,
             name: metadata.name,
             notes: metadata.notes,
+            auth_type_label: metadata.auth_type_label,
             created_at: metadata.created_at,
             updated_at: metadata.updated_at,
             auth_json,
@@ -292,15 +297,15 @@ impl ProfileManager {
         fs::write(profile_dir.join("auth.json"), input.auth_json)?;
         fs::write(profile_dir.join("config.toml"), input.config_toml)?;
 
-        let metadata = ProfileMetadata {
-            id: existing_metadata.id,
-            name: name.to_string(),
-            notes: input.notes.trim().to_string(),
-            created_at: existing_metadata.created_at,
-            updated_at: Utc::now(),
-            auth_hash: sha256_of_file(profile_dir.join("auth.json"))?,
-            config_hash: sha256_of_file(profile_dir.join("config.toml"))?,
-        };
+        let metadata = self.compose_profile_metadata(
+            existing_metadata.id,
+            name.to_string(),
+            input.notes.trim().to_string(),
+            existing_metadata.created_at,
+            Utc::now(),
+            &fs::read_to_string(profile_dir.join("auth.json"))?,
+            &fs::read_to_string(profile_dir.join("config.toml"))?,
+        )?;
 
         self.write_profile_metadata(&profile_dir, &metadata)?;
         Ok(ProfileSummary::from(metadata))
@@ -340,8 +345,43 @@ impl ProfileManager {
         self.backup_if_exists(&self.target_auth_path(), backup_dir.join("auth.json"))?;
         self.backup_if_exists(&self.target_config_path(), backup_dir.join("config.toml"))?;
 
-        fs::copy(profile_dir.join("auth.json"), self.target_auth_path())?;
-        fs::copy(profile_dir.join("config.toml"), self.target_config_path())?;
+        let current_auth_json = if self.target_auth_path().exists() {
+            Some(fs::read_to_string(self.target_auth_path())?)
+        } else {
+            None
+        };
+        let current_config_toml = if self.target_config_path().exists() {
+            Some(fs::read_to_string(self.target_config_path())?)
+        } else {
+            None
+        };
+
+        if let (Some(current_auth_json), Some(current_config_toml), Some(active_profile)) = (
+            current_auth_json.as_ref(),
+            current_config_toml.as_ref(),
+            self.detect_active_profile()?,
+        ) {
+            if active_profile.id != profile_id {
+                self.sync_runtime_state_to_profile(
+                    &active_profile.id,
+                    current_auth_json,
+                    current_config_toml,
+                )?;
+            }
+        }
+
+        let next_auth_json = fs::read_to_string(profile_dir.join("auth.json"))?;
+        let next_profile_config = fs::read_to_string(profile_dir.join("config.toml"))?;
+        let next_config_toml = match current_config_toml {
+            Some(current_config_toml) => merge_profile_managed_config(
+                &current_config_toml,
+                &next_profile_config,
+            )?,
+            None => managed_config_toml(&next_profile_config)?,
+        };
+
+        fs::write(self.target_auth_path(), next_auth_json)?;
+        fs::write(self.target_config_path(), next_config_toml)?;
 
         let switched_at = Utc::now();
         let mut manager = self.clone_for_mutation();
@@ -362,12 +402,20 @@ impl ProfileManager {
             return Ok(None);
         }
 
-        let auth_hash = sha256_of_file(self.target_auth_path())?;
-        let config_hash = sha256_of_file(self.target_config_path())?;
+        let auth_hash = auth_match_hash(&fs::read_to_string(self.target_auth_path())?)?;
+        let config_hash = managed_config_hash(&fs::read_to_string(self.target_config_path())?)?;
 
         for profile in self.list_profiles()? {
             if profile.auth_hash == auth_hash && profile.config_hash == config_hash {
                 return Ok(Some(profile));
+            }
+        }
+
+        if let Some(last_switch_profile_id) = self.state.last_switch_profile_id.as_deref() {
+            if let Some(profile) = self.load_profile_summary(last_switch_profile_id)? {
+                if profile.auth_hash == auth_hash {
+                    return Ok(Some(profile));
+                }
             }
         }
 
@@ -419,6 +467,7 @@ impl ProfileManager {
             target_auth_exists: self.target_auth_path().exists(),
             target_config_exists: self.target_config_path().exists(),
             target_updated_at: self.resolve_target_updated_at()?,
+            target_auth_type_label: self.resolve_target_auth_type_label()?,
             active_profile_id,
             last_selected_profile_id: self.state.last_selected_profile_id.clone(),
             last_switch_profile_id: self.state.last_switch_profile_id.clone(),
@@ -472,12 +521,70 @@ impl ProfileManager {
         Ok(())
     }
 
+    fn compose_profile_metadata(
+        &self,
+        id: String,
+        name: String,
+        notes: String,
+        created_at: DateTime<Utc>,
+        updated_at: DateTime<Utc>,
+        auth_json: &str,
+        config_toml: &str,
+    ) -> Result<ProfileMetadata, AppError> {
+        Ok(ProfileMetadata {
+            id,
+            name,
+            notes,
+            auth_type_label: detect_auth_type_label(auth_json, config_toml)?,
+            created_at,
+            updated_at,
+            auth_hash: auth_match_hash(auth_json)?,
+            config_hash: managed_config_hash(config_toml)?,
+        })
+    }
+
+    fn sync_runtime_state_to_profile(
+        &self,
+        profile_id: &str,
+        auth_json: &str,
+        config_toml: &str,
+    ) -> Result<(), AppError> {
+        let profile_dir = self.profile_dir(profile_id)?;
+        let existing_metadata = self.read_profile_metadata(&profile_dir)?;
+
+        fs::write(profile_dir.join("auth.json"), auth_json)?;
+        fs::write(profile_dir.join("config.toml"), config_toml)?;
+
+        let metadata = self.compose_profile_metadata(
+            existing_metadata.id,
+            existing_metadata.name,
+            existing_metadata.notes,
+            existing_metadata.created_at,
+            Utc::now(),
+            auth_json,
+            config_toml,
+        )?;
+
+        self.write_profile_metadata(&profile_dir, &metadata)
+    }
+
     fn profile_dir(&self, profile_id: &str) -> Result<PathBuf, AppError> {
         let profile_dir = self.profiles_dir().join(profile_id);
         if !profile_dir.exists() {
             return Err(AppError::ProfileNotFound(profile_id.to_string()));
         }
         Ok(profile_dir)
+    }
+
+    fn load_profile_summary(&self, profile_id: &str) -> Result<Option<ProfileSummary>, AppError> {
+        let profile_dir = self.profiles_dir().join(profile_id);
+        if !profile_dir.exists() {
+            return Ok(None);
+        }
+
+        Ok(Some(ProfileSummary::from(
+            self.read_profile_metadata(&profile_dir)?,
+        )))
     }
 
     fn profiles_dir(&self) -> PathBuf {
@@ -515,6 +622,17 @@ impl ProfileManager {
 
         Ok(timestamps.into_iter().max())
     }
+
+    fn resolve_target_auth_type_label(&self) -> Result<Option<String>, AppError> {
+        if !self.target_auth_path().exists() || !self.target_config_path().exists() {
+            return Ok(None);
+        }
+
+        Ok(Some(detect_auth_type_label(
+            &fs::read_to_string(self.target_auth_path())?,
+            &fs::read_to_string(self.target_config_path())?,
+        )?))
+    }
 }
 
 impl From<ProfileMetadata> for ProfileSummary {
@@ -523,6 +641,7 @@ impl From<ProfileMetadata> for ProfileSummary {
             id: value.id,
             name: value.name,
             notes: value.notes,
+            auth_type_label: value.auth_type_label,
             created_at: value.created_at,
             updated_at: value.updated_at,
             auth_hash: value.auth_hash,
@@ -535,6 +654,10 @@ pub fn default_codex_target_dir() -> Result<PathBuf, AppError> {
     let home_dir = dirs::home_dir()
         .ok_or_else(|| AppError::Message("Unable to resolve the user home directory.".into()))?;
     Ok(home_dir.join(".codex"))
+}
+
+fn unknown_auth_type_label() -> String {
+    "未识别".to_string()
 }
 
 pub fn restart_codex_script() -> Option<&'static str> {
@@ -582,6 +705,19 @@ pub fn restart_codex_app() -> Result<(), AppError> {
     }
 }
 
+const PROFILE_MANAGED_SCALAR_KEYS: &[&str] = &[
+    "model_provider",
+    "model",
+    "review_model",
+    "model_reasoning_effort",
+    "model_context_window",
+    "model_auto_compact_token_limit",
+    "disable_response_storage",
+    "network_access",
+];
+
+const PROFILE_MANAGED_TABLE_KEYS: &[&str] = &["model_providers"];
+
 fn validate_auth_json(contents: &str) -> Result<(), AppError> {
     serde_json::from_str::<serde_json::Value>(contents)
         .map(|_| ())
@@ -594,9 +730,173 @@ fn validate_config_toml(contents: &str) -> Result<(), AppError> {
         .map_err(|error| AppError::InvalidConfigToml(error.to_string()))
 }
 
-fn sha256_of_file(path: PathBuf) -> Result<String, AppError> {
-    let bytes = fs::read(path)?;
-    Ok(sha256_bytes(&bytes))
+fn parse_toml_table(contents: &str) -> Result<toml::map::Map<String, toml::Value>, AppError> {
+    if contents.trim().is_empty() {
+        return Ok(toml::map::Map::new());
+    }
+
+    let parsed = toml::from_str::<toml::Value>(contents)
+        .map_err(|error| AppError::InvalidConfigToml(error.to_string()))?;
+
+    match parsed {
+        toml::Value::Table(table) => Ok(table),
+        _ => Err(AppError::InvalidConfigToml(
+            "config.toml must have a table at the top level.".into(),
+        )),
+    }
+}
+
+fn managed_config_table(
+    table: &toml::map::Map<String, toml::Value>,
+) -> toml::map::Map<String, toml::Value> {
+    let mut managed = toml::map::Map::new();
+
+    for key in PROFILE_MANAGED_SCALAR_KEYS {
+        if let Some(value) = table.get(*key) {
+            managed.insert((*key).to_string(), value.clone());
+        }
+    }
+
+    for key in PROFILE_MANAGED_TABLE_KEYS {
+        if let Some(value) = table.get(*key) {
+            managed.insert((*key).to_string(), value.clone());
+        }
+    }
+
+    managed
+}
+
+fn managed_config_hash(contents: &str) -> Result<String, AppError> {
+    let table = parse_toml_table(contents)?;
+    let serialized = toml::to_string(&toml::Value::Table(managed_config_table(&table)))
+        .map_err(|error| AppError::Message(error.to_string()))?;
+    Ok(sha256_bytes(serialized.as_bytes()))
+}
+
+fn managed_config_toml(contents: &str) -> Result<String, AppError> {
+    let table = parse_toml_table(contents)?;
+    toml::to_string_pretty(&toml::Value::Table(managed_config_table(&table)))
+        .map_err(|error| AppError::Message(error.to_string()))
+}
+
+fn merge_profile_managed_config(
+    current_config_toml: &str,
+    profile_config_toml: &str,
+) -> Result<String, AppError> {
+    let mut current_table = parse_toml_table(current_config_toml)?;
+    let profile_table = parse_toml_table(profile_config_toml)?;
+    let managed_profile = managed_config_table(&profile_table);
+
+    for key in PROFILE_MANAGED_SCALAR_KEYS {
+        current_table.remove(*key);
+    }
+
+    for key in PROFILE_MANAGED_TABLE_KEYS {
+        current_table.remove(*key);
+    }
+
+    for (key, value) in managed_profile {
+        current_table.insert(key, value);
+    }
+
+    toml::to_string_pretty(&toml::Value::Table(current_table))
+        .map_err(|error| AppError::Message(error.to_string()))
+}
+
+fn detect_auth_type_label(auth_json: &str, config_toml: &str) -> Result<String, AppError> {
+    let auth = serde_json::from_str::<serde_json::Value>(auth_json)
+        .map_err(|error| AppError::InvalidAuthJson(error.to_string()))?;
+    let config = parse_toml_table(config_toml)?;
+
+    if auth
+        .get("auth_mode")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| value == "chatgpt")
+        || auth.get("tokens").is_some()
+    {
+        return Ok("官方 OAuth".into());
+    }
+
+    let has_openai_api_key = auth
+        .get("OPENAI_API_KEY")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.trim().is_empty());
+
+    if has_openai_api_key {
+        let has_custom_provider = config
+            .get("model_providers")
+            .and_then(|value| value.as_table())
+            .is_some_and(|providers| {
+                providers.values().any(|provider| {
+                    provider
+                        .as_table()
+                        .and_then(|table| table.get("base_url"))
+                        .is_some()
+                })
+            });
+
+        if has_custom_provider {
+            return Ok("第三方 API".into());
+        }
+
+        return Ok("API Key".into());
+    }
+
+    Ok(unknown_auth_type_label())
+}
+
+fn auth_match_hash(auth_json: &str) -> Result<String, AppError> {
+    let auth = serde_json::from_str::<serde_json::Value>(auth_json)
+        .map_err(|error| AppError::InvalidAuthJson(error.to_string()))?;
+
+    if auth
+        .get("auth_mode")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| value == "chatgpt")
+        || auth.get("tokens").is_some()
+    {
+        if let Some(id_token) = auth
+            .get("tokens")
+            .and_then(|value| value.as_object())
+            .and_then(|tokens| tokens.get("id_token"))
+            .and_then(|value| value.as_str())
+        {
+            if let Some(identity_payload) = oauth_identity_payload(id_token) {
+                return Ok(sha256_bytes(identity_payload.as_bytes()));
+            }
+        }
+    }
+
+    if let Some(api_key) = auth.get("OPENAI_API_KEY").and_then(|value| value.as_str()) {
+        return Ok(sha256_bytes(api_key.as_bytes()));
+    }
+
+    Ok(sha256_bytes(auth_json.as_bytes()))
+}
+
+fn oauth_identity_payload(id_token: &str) -> Option<String> {
+    let payload = id_token.split('.').nth(1)?;
+    let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let json = serde_json::from_slice::<serde_json::Value>(&decoded).ok()?;
+
+    let email = json.get("email").and_then(|value| value.as_str()).unwrap_or("");
+    let auth_section = json.get("https://api.openai.com/auth");
+    let user_id = auth_section
+        .and_then(|section| section.get("chatgpt_user_id"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let account_id = auth_section
+        .and_then(|section| section.get("chatgpt_account_id"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+
+    if email.is_empty() && user_id.is_empty() && account_id.is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        "email={email};user_id={user_id};account_id={account_id}"
+    ))
 }
 
 fn sha256_bytes(bytes: &[u8]) -> String {

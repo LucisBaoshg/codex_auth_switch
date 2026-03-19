@@ -249,6 +249,13 @@ h1 {
   gap: 12px;
 }
 
+.card-badges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .card-kicker {
   margin: 0 0 10px;
   font-size: 0.76rem;
@@ -294,6 +301,11 @@ h1 {
 .pill-active {
   background: var(--success-soft);
   color: #276745;
+}
+
+.pill-type {
+  background: rgba(45, 108, 223, 0.1);
+  color: var(--accent-strong);
 }
 
 .editor-meta {
