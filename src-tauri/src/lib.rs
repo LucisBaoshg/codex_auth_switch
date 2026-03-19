@@ -1,0 +1,132 @@
+pub mod core;
+
+use crate::core::{restart_codex_app, AppSnapshot, ProfileDocument, ProfileInput, ProfileManager};
+use std::path::PathBuf;
+use tauri::{AppHandle, Manager};
+
+fn manager_from_app(app: &AppHandle) -> Result<ProfileManager, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    ProfileManager::load_or_default(app_data_dir).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn load_snapshot(app: AppHandle) -> Result<AppSnapshot, String> {
+    manager_from_app(&app)?
+        .snapshot()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn import_profile(app: AppHandle, payload: ProfileInput) -> Result<AppSnapshot, String> {
+    let manager = manager_from_app(&app)?;
+    manager
+        .import_profile(payload)
+        .map_err(|error| error.to_string())?;
+    manager.snapshot().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn import_from_target_dir(
+    app: AppHandle,
+    name: String,
+    notes: String,
+) -> Result<AppSnapshot, String> {
+    let manager = manager_from_app(&app)?;
+    manager
+        .import_profile_from_target_dir(name, notes)
+        .map_err(|error| error.to_string())?;
+    manager.snapshot().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_target_profile_input(app: AppHandle) -> Result<ProfileInput, String> {
+    manager_from_app(&app)?
+        .get_target_profile_input()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_profile_document(app: AppHandle, profile_id: String) -> Result<ProfileDocument, String> {
+    manager_from_app(&app)?
+        .get_profile_document(&profile_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn update_profile(
+    app: AppHandle,
+    profile_id: String,
+    payload: ProfileInput,
+) -> Result<AppSnapshot, String> {
+    let manager = manager_from_app(&app)?;
+    manager
+        .update_profile(&profile_id, payload)
+        .map_err(|error| error.to_string())?;
+    manager.snapshot().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn switch_profile(app: AppHandle, profile_id: String) -> Result<AppSnapshot, String> {
+    let manager = manager_from_app(&app)?;
+    manager
+        .switch_profile(&profile_id)
+        .map_err(|error| error.to_string())?;
+    manager.snapshot().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn delete_profile(app: AppHandle, profile_id: String) -> Result<AppSnapshot, String> {
+    let mut manager = manager_from_app(&app)?;
+    manager
+        .delete_profile(&profile_id)
+        .map_err(|error| error.to_string())?;
+    manager.snapshot().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_target_dir(app: AppHandle, target_dir: Option<String>) -> Result<AppSnapshot, String> {
+    let mut manager = manager_from_app(&app)?;
+    let next_target_dir = target_dir
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    manager
+        .set_target_dir(next_target_dir)
+        .map_err(|error| error.to_string())?;
+    manager.snapshot().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn open_target_dir(app: AppHandle) -> Result<(), String> {
+    manager_from_app(&app)?
+        .open_target_dir()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn restart_codex() -> Result<(), String> {
+    restart_codex_app().map_err(|error| error.to_string())
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![
+            load_snapshot,
+            import_profile,
+            import_from_target_dir,
+            get_target_profile_input,
+            get_profile_document,
+            update_profile,
+            switch_profile,
+            delete_profile,
+            set_target_dir,
+            open_target_dir,
+            restart_codex
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running Codex Auth Switch");
+}
