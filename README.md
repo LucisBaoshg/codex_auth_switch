@@ -57,6 +57,24 @@ src-tauri/target/release/bundle/macos/Codex Auth Switch.app
 src-tauri/target/release/codex-auth-switch
 ```
 
+## GitHub Actions
+
+仓库包含一个 Windows 打包 workflow：
+
+- [windows-installer.yml](/Volumes/Acer/Dev/codex_auth_switch/.github/workflows/windows-installer.yml)
+
+触发方式：
+
+- 手动在 GitHub Actions 页面点击 `Windows Installer`
+- 或者向 `main` 推送与前端 / Tauri 相关的改动
+
+这个 workflow 会在 `windows-latest` runner 上：
+
+- 安装 Node 24 和 Rust stable
+- 运行 `npm test`
+- 构建 `NSIS` Windows 安装包
+- 把生成的安装包作为 workflow artifact 上传
+
 ## 测试
 
 ```bash
