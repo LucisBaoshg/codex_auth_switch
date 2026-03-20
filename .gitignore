@@ -7,3 +7,7 @@ src-tauri/icons/icon.iconset/
 task_plan.md
 findings.md
 progress.md
+*.p12
+*.pfx
+*.cer
+*.mobileprovision

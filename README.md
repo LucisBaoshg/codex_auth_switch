@@ -62,6 +62,7 @@ src-tauri/target/release/codex-auth-switch
 仓库包含一个 Windows 打包 workflow：
 
 - [windows-installer.yml](/Volumes/Acer/Dev/codex_auth_switch/.github/workflows/windows-installer.yml)
+- [release.yml](/Volumes/Acer/Dev/codex_auth_switch/.github/workflows/release.yml)
 
 触发方式：
 
@@ -74,6 +75,28 @@ src-tauri/target/release/codex-auth-switch
 - 运行 `npm test`
 - 构建 `NSIS` Windows 安装包
 - 直接把生成的 `.exe` 和 `.sig` 作为 workflow artifact 上传
+
+## 发布 Release
+
+如果希望用户直接在 GitHub Releases 页面下载安装包，可以通过推送版本 tag 触发自动发布：
+
+```bash
+git tag v0.1.1
+git push origin v0.1.1
+```
+
+这会触发 [release.yml](/Volumes/Acer/Dev/codex_auth_switch/.github/workflows/release.yml)：
+
+- 在 `windows-latest` 上构建 `NSIS` 安装包
+- 在 `macos-latest` 上构建 `.app` / `.dmg`
+- 自动创建对应版本的 GitHub Release
+- 把生成的 Windows 和 macOS 安装包上传到 Release 附件
+
+如果要启用 macOS 签名，需要在 GitHub repository secrets 中配置：
+
+- `APPLE_CERTIFICATE_P12`：`.p12` 文件的 base64 内容
+- `APPLE_CERTIFICATE_PASSWORD`：导出 `.p12` 时设置的密码
+- `APPLE_SIGNING_IDENTITY`：例如 `Developer ID Application: Tapcash Inc (JB2C84LCBB)`
 
 ## 测试
 
