@@ -272,7 +272,7 @@ fn update_profile_rewrites_saved_contents_and_metadata() {
 
 #[test]
 fn switch_profile_creates_backup_and_updates_target_files() {
-    let (app_dir, target_dir, manager) = temp_manager();
+    let (app_dir, target_dir, mut manager) = temp_manager();
 
     fs::write(
         target_dir.path().join("auth.json"),
@@ -325,7 +325,7 @@ windows_wsl_setup_acknowledged = true
 
 #[test]
 fn detect_active_profile_matches_target_file_contents() {
-    let (_app_dir, _target_dir, manager) = temp_manager();
+    let (_app_dir, _target_dir, mut manager) = temp_manager();
 
     let profile = manager
         .import_profile(ProfileInput {
@@ -349,8 +349,75 @@ fn detect_active_profile_matches_target_file_contents() {
 }
 
 #[test]
-fn switch_profile_syncs_current_auth_and_managed_config_back_to_previous_profile() {
+fn snapshot_auto_imports_current_target_profile_and_creates_marker() {
     let (app_dir, target_dir, manager) = temp_manager();
+
+    fs::write(
+        target_dir.path().join("auth.json"),
+        oauth_auth_json("owner@example.com", "user-1", "tapcash-main-001"),
+    )
+    .expect("seed auth");
+    fs::write(
+        target_dir.path().join("config.toml"),
+        official_config_toml("gpt-5"),
+    )
+    .expect("seed config");
+
+    let snapshot = manager.snapshot().expect("snapshot");
+
+    assert_eq!(snapshot.profiles.len(), 1);
+    assert_eq!(snapshot.profiles[0].name, "tapcash");
+    assert_eq!(snapshot.active_profile_id.as_deref(), Some(snapshot.profiles[0].id.as_str()));
+
+    let marker_path = target_dir.path().join("codex-auth-switch.json");
+    assert!(marker_path.exists());
+
+    let marker: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(marker_path).expect("read marker"))
+            .expect("parse marker");
+    assert_eq!(
+        marker.get("profileId").and_then(|value| value.as_str()),
+        Some(snapshot.profiles[0].id.as_str())
+    );
+
+    let reloaded = ProfileManager::load_or_default(app_dir.path().to_path_buf()).expect("reload");
+    let profiles = reloaded.list_profiles().expect("list profiles");
+    assert_eq!(profiles.len(), 1);
+}
+
+#[test]
+fn snapshot_reuses_existing_profile_instead_of_importing_duplicate() {
+    let (_app_dir, target_dir, manager) = temp_manager();
+
+    let profile = manager
+        .import_profile(ProfileInput {
+            name: "Existing".into(),
+            notes: String::new(),
+            auth_json: oauth_auth_json("owner@example.com", "user-1", "tapcash-main-001"),
+            config_toml: official_config_toml("gpt-5"),
+        })
+        .expect("import");
+
+    fs::write(
+        target_dir.path().join("auth.json"),
+        oauth_auth_json("owner@example.com", "user-1", "tapcash-main-001"),
+    )
+    .expect("seed auth");
+    fs::write(
+        target_dir.path().join("config.toml"),
+        official_config_toml("gpt-5"),
+    )
+    .expect("seed config");
+
+    let snapshot = manager.snapshot().expect("snapshot");
+
+    assert_eq!(snapshot.profiles.len(), 1);
+    assert_eq!(snapshot.active_profile_id.as_deref(), Some(profile.id.as_str()));
+}
+
+#[test]
+fn switch_profile_syncs_current_auth_and_managed_config_back_to_previous_profile() {
+    let (app_dir, target_dir, mut manager) = temp_manager();
 
     let profile_a = manager
         .import_profile(ProfileInput {
@@ -373,7 +440,7 @@ fn switch_profile_syncs_current_auth_and_managed_config_back_to_previous_profile
         .switch_profile(&profile_a.id)
         .expect("switch to first profile");
 
-    let manager = ProfileManager::load_or_default(app_dir.path().to_path_buf())
+    let mut manager = ProfileManager::load_or_default(app_dir.path().to_path_buf())
         .expect("reload manager with updated state");
 
     fs::write(

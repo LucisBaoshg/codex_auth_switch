@@ -277,32 +277,72 @@ async function switchProfile(profileId: string, profileName: string): Promise<vo
   }
 }
 
-async function openEditorForNewProfile(): Promise<void> {
-  state.editor = createEditorState("new");
-  state.view = "editor";
-  render();
+function nativeConfirm(msg: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);backdrop-filter:blur(4px);z-index:9999;display:flex;align-items:center;justify-content:center;transition:all 0.2s;";
+    const box = document.createElement("div");
+    box.style.cssText = "background:var(--bg-panel);border:1px solid var(--border);padding:28px 32px;border-radius:24px;box-shadow:var(--shadow-lg);max-width:320px;text-align:center;color:var(--text-main);transform:scale(0.95);animation:zoomIn 0.2s forwards;";
+    box.innerHTML = `<style>@keyframes zoomIn { to { transform: scale(1); } }</style>
+      <h3 style="margin:0 0 12px;font-size:1.2rem;">安全确认</h3>
+      <p style="margin:0 0 24px;color:var(--text-muted);font-size:0.95rem;line-height:1.5;">${escapeHtml(msg)}</p>
+      <div style="display:flex;gap:12px;justify-content:center;">
+        <button id="btn-cancel" style="flex:1;padding:10px;border:none;border-radius:12px;background:var(--bg-page);color:var(--text-main);cursor:pointer;font-weight:600;border:1px solid var(--border);">手滑了</button>
+        <button id="btn-ok" style="flex:1;padding:10px;border:none;border-radius:12px;background:var(--danger);color:white;cursor:pointer;font-weight:600;box-shadow:0 4px 12px rgba(239,68,68,0.2);">彻底销毁</button>
+      </div>`;
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    
+    document.getElementById("btn-cancel")!.onclick = () => { document.body.removeChild(overlay); resolve(false); };
+    document.getElementById("btn-ok")!.onclick = () => { document.body.removeChild(overlay); resolve(true); };
+  });
 }
 
-async function openEditorForCurrentConfig(): Promise<void> {
-  if (!isTauriRuntime) {
-    state.editor = createEditorFromInput("fromCurrent", createMockCurrentInput());
-    state.view = "editor";
-    render();
+async function deleteProfile(profileId: string, profileName: string): Promise<void> {
+  const confirmed = await nativeConfirm(`确定要销毁「${profileName}」档案吗？此操作无法撤回！`);
+  if (!confirmed) {
     return;
   }
 
   setBusy(true);
   try {
-    const input = await desktopInvoke<ProfileInput>("get_target_profile_input");
-    state.editor = createEditorFromInput("fromCurrent", input);
-    state.view = "editor";
-    clearFlash();
+    if (!isTauriRuntime) {
+      const snapshot = state.snapshot;
+      if (!snapshot) {
+        throw new Error("当前没有可删除的 profile。");
+      }
+      setSnapshot({
+        ...snapshot,
+        profiles: snapshot.profiles.filter((profile) => profile.id !== profileId),
+        activeProfileId: snapshot.activeProfileId === profileId ? null : snapshot.activeProfileId,
+        lastSelectedProfileId:
+          snapshot.lastSelectedProfileId === profileId ? null : snapshot.lastSelectedProfileId,
+        lastSwitchProfileId:
+          snapshot.lastSwitchProfileId === profileId ? null : snapshot.lastSwitchProfileId,
+      });
+    } else {
+      const snapshot = await desktopInvoke<AppSnapshot>("delete_profile", { profileId });
+      setSnapshot(snapshot);
+    }
+
+    if (state.view === "editor" && state.editor.profileId === profileId) {
+      state.view = "cards";
+      state.editor = createEditorState();
+    }
+
+    setFlash("success", `已删除 profile「${profileName}」。`);
   } catch (error) {
     setFlash("error", error instanceof Error ? error.message : String(error));
   } finally {
     state.busy = false;
     render();
   }
+}
+
+async function openEditorForNewProfile(): Promise<void> {
+  state.editor = createEditorState("new");
+  state.view = "editor";
+  render();
 }
 
 async function openEditorForProfile(profileId: string): Promise<void> {
@@ -423,6 +463,8 @@ async function saveEditorProfile(andSwitch: boolean): Promise<void> {
   }
 }
 
+
+
 function formatDateTime(value: string | null): string {
   if (!value) {
     return "还没有";
@@ -460,99 +502,100 @@ function renderCardsPage(snapshot: AppSnapshot): string {
     snapshot.profiles.find((profile) => profile.id === snapshot.activeProfileId) ?? null;
   const currentConfigNote = snapshot.targetAuthExists && snapshot.targetConfigExists
     ? activeProfile
-      ? `当前 Codex 正在使用已保存的 profile「${activeProfile.name}」。`
-      : "当前目录里检测到了 auth.json 与 config.toml，可以保存为新的 profile。"
-    : "当前目录里还没有同时检测到 auth.json 和 config.toml。";
+      ? `目前系统正在平稳运行「${activeProfile.name}」身份配置档案。`
+      : "检测到当前系统的 auth.json 与 config.toml 文件尚未在合集中备份。"
+    : "在当前目录中未检测到完整的 Codex 配置文件。";
 
   return `
     <section class="cards-page" data-page="cards">
-      <div class="cards-toolbar">
-        <button
-          class="button button-ghost"
-          data-role="global-refresh"
-          data-action="refresh"
-          ${state.busy ? "disabled" : ""}
-        >
-          刷新状态
-        </button>
-      </div>
+      <header class="top-nav" data-tauri-drag-region>
+        <div>
+          <h1>Codex Auth Switch</h1>
+          <p>统一管理与快速分发您的环境代理和身份配置。</p>
+        </div>
+        <div class="top-nav-actions">
+
+          <button class="button button-primary" data-role="add-card" data-action="new-profile" ${state.busy ? "disabled" : ""}>
+             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+             加配置
+          </button>
+          <button class="icon-button" title="刷新状态" data-role="global-refresh" data-action="refresh" ${state.busy ? "disabled" : ""}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+          </button>
+        </div>
+      </header>
 
       ${renderFlash()}
 
-      <section class="card-grid">
-        <button class="card add-card" data-role="add-card" data-action="new-profile" ${state.busy ? "disabled" : ""}>
-          <span class="add-card-mark">+</span>
-          <strong>添加 Profile</strong>
-          <p>手动填写名称、备注、auth.json 和 config.toml。</p>
-        </button>
 
-        <article class="card profile-card current-config-card" data-role="current-config-card">
-          <div class="card-head">
-            <div>
-              <p class="card-kicker">Current Codex</p>
-              <h2>当前 Codex 配置</h2>
-            </div>
-            <div class="card-badges">
-              ${snapshot.targetAuthTypeLabel ? `<span class="pill pill-type">${escapeHtml(snapshot.targetAuthTypeLabel)}</span>` : ""}
-              ${activeProfile ? `<span class="pill pill-active">当前生效</span>` : ""}
-            </div>
-          </div>
-          <p class="card-note">${escapeHtml(currentConfigNote)}</p>
-          <p class="card-date">更新时间：${formatDateTime(snapshot.targetUpdatedAt)}</p>
-          <div class="card-actions">
-            <button
-              class="button button-secondary"
-              data-action="save-current-as-profile"
-              ${state.busy || !snapshot.targetAuthExists || !snapshot.targetConfigExists ? "disabled" : ""}
-            >
-              保存为 Profile
-            </button>
-          </div>
-        </article>
 
-        ${snapshot.profiles
-          .map(
-            (profile) => `
-              <article
-                class="card profile-card ${snapshot.activeProfileId === profile.id ? "profile-card-live" : ""}"
-                data-role="profile-card"
-                data-state="${snapshot.activeProfileId === profile.id ? "live" : "idle"}"
-              >
-                <div class="card-head">
-                  <div>
-                    <p class="card-kicker">Saved Profile</p>
+      <section class="grid-container">
+        <h3 class="section-title">已保存的配置文件 (${snapshot.profiles.length})</h3>
+        <div class="card-grid">
+          ${snapshot.profiles.length === 0 ? `
+            <div class="empty-state">
+              <h3>暂无存档记录</h3>
+              <p>点击右上角的 "加配置" 录入您的第一套 Profile 集合吧！</p>
+            </div>
+          ` : ""}
+          ${[...snapshot.profiles]
+              .sort((a, b) => {
+                if (a.id === snapshot.activeProfileId) return -1;
+                if (b.id === snapshot.activeProfileId) return 1;
+                return 0;
+              })
+            .map(
+              (profile) => `
+                <article
+                  class="card profile-card ${snapshot.activeProfileId === profile.id ? "profile-card-live" : ""}"
+                  data-role="profile-card"
+                  data-state="${snapshot.activeProfileId === profile.id ? "live" : "idle"}"
+                >
+                  ${snapshot.activeProfileId === profile.id ? `<div class="card-glow"></div>` : ""}
+                  <div class="card-head">
                     <h2>${escapeHtml(profile.name)}</h2>
-                  </div>
-                  <div class="card-badges">
                     <span class="pill pill-type">${escapeHtml(profile.authTypeLabel)}</span>
-                    ${snapshot.activeProfileId === profile.id ? `<span class="pill pill-active">当前生效</span>` : ""}
                   </div>
-                </div>
-                <p class="card-note">${escapeHtml(profile.notes || "没有备注")}</p>
-                <p class="card-date">更新时间：${formatDateTime(profile.updatedAt)}</p>
-                <div class="card-actions">
-                  <button
-                    class="button ${snapshot.activeProfileId === profile.id ? "button-secondary" : "button-primary"}"
-                    data-action="switch"
-                    data-id="${profile.id}"
-                    data-name="${escapeHtml(profile.name)}"
-                    ${state.busy ? "disabled" : ""}
-                  >
-                    ${snapshot.activeProfileId === profile.id ? "当前已生效" : "切换到当前"}
-                  </button>
-                  <button
-                    class="button button-ghost"
-                    data-action="view-profile-details"
-                    data-id="${profile.id}"
-                    ${state.busy ? "disabled" : ""}
-                  >
-                    查看详情
-                  </button>
-                </div>
-              </article>
-            `,
-          )
-          .join("")}
+                  <p class="card-note" style="${!profile.notes ? 'opacity:0.5;font-style:italic;' : ''}">${escapeHtml(profile.notes || "暂无备注")}</p>
+                  <p class="card-date">更新于：${formatDateTime(profile.updatedAt)}</p>
+                  
+                  <div class="card-actions-overlay">
+                    <button
+                      class="button ${snapshot.activeProfileId === profile.id ? "button-active" : "button-secondary"}"
+                      data-action="switch"
+                      data-id="${profile.id}"
+                      data-name="${escapeHtml(profile.name)}"
+                      ${state.busy ? "disabled" : ""}
+                    >
+                      ${snapshot.activeProfileId === profile.id ? "当前运行中" : "应用此配置"}
+                    </button>
+                    <div class="card-secondary-actions">
+                      <button
+                        class="icon-button"
+                        title="查看文件详细内容"
+                        data-action="view-profile-details"
+                        data-id="${profile.id}"
+                        ${state.busy ? "disabled" : ""}
+                      >
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+                      </button>
+                      <button
+                        class="icon-button text-red"
+                        title="销毁"
+                        data-action="delete-profile"
+                        data-id="${profile.id}"
+                        data-name="${escapeHtml(profile.name)}"
+                        ${state.busy ? "disabled" : ""}
+                      >
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+                      </button>
+                    </div>
+                  </div>
+                </article>
+              `,
+            )
+            .join("")}
+        </div>
       </section>
     </section>
   `;
@@ -579,7 +622,8 @@ function renderEditorPage(): string {
       <header class="editor-header">
         <div class="editor-header-left">
           <button class="button button-ghost" data-action="back-to-cards" ${state.busy ? "disabled" : ""}>
-            返回卡片页
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+            返回卡片网格
           </button>
           <div>
             <p class="eyebrow">Profile Detail</p>
@@ -592,17 +636,20 @@ function renderEditorPage(): string {
             existing
               ? `
                 <button class="button button-secondary" data-action="save-editor" ${state.busy ? "disabled" : ""}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:2px;"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
                   保存修改
                 </button>
               `
               : `
                 <button class="button button-secondary" data-action="save-editor" ${state.busy ? "disabled" : ""}>
-                  创建 Profile
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:2px;"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                  创建配置
                 </button>
               `
           }
           <button class="button button-primary" data-action="save-and-switch" ${state.busy ? "disabled" : ""}>
-            ${existing ? "保存并切换" : "创建并切换"}
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:2px;"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+            ${existing ? "保存并立即启动" : "创建并立即启动"}
           </button>
         </div>
       </header>
@@ -723,12 +770,12 @@ function bindEvents(): void {
         await refreshSnapshot();
       } else if (action === "new-profile") {
         await openEditorForNewProfile();
-      } else if (action === "save-current-as-profile") {
-        await openEditorForCurrentConfig();
       } else if (action === "view-profile-details" && button.dataset.id) {
         await openEditorForProfile(button.dataset.id);
       } else if (action === "switch" && button.dataset.id && button.dataset.name) {
         await switchProfile(button.dataset.id, button.dataset.name);
+      } else if (action === "delete-profile" && button.dataset.id && button.dataset.name) {
+        await deleteProfile(button.dataset.id, button.dataset.name);
       } else if (action === "back-to-cards") {
         state.view = "cards";
         render();
@@ -736,6 +783,17 @@ function bindEvents(): void {
         await saveEditorProfile(false);
       } else if (action === "save-and-switch") {
         await saveEditorProfile(true);
+      } else if (action === "restart-codex") {
+        state.busy = true; render();
+        try {
+          await desktopInvoke("restart_codex");
+          setFlash("success", "Codex 程序已被拉起重启指令！");
+        } catch (error) {
+          console.error("重启 Codex 失败", error);
+          setFlash("error", "通过 AppleScript 触发重启失败，或者目标程序未执行！");
+        } finally {
+          state.busy = false; render();
+        }
       }
     });
   });

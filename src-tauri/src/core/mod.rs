@@ -84,6 +84,15 @@ struct StateFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct TargetMarkerFile {
+    pub profile_id: String,
+    pub auth_hash: String,
+    pub config_hash: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ProfileMetadata {
     pub id: String,
     pub name: String,
@@ -198,7 +207,8 @@ impl ProfileManager {
         }
 
         validate_auth_json(&input.auth_json)?;
-        validate_config_toml(&input.config_toml)?;
+        let normalized_config = repair_illegal_config_toml(&input.config_toml);
+        validate_config_toml(&normalized_config)?;
 
         let now = Utc::now();
         let profile_id = Uuid::new_v4().to_string();
@@ -206,7 +216,7 @@ impl ProfileManager {
         fs::create_dir_all(&profile_dir)?;
 
         fs::write(profile_dir.join("auth.json"), input.auth_json)?;
-        fs::write(profile_dir.join("config.toml"), input.config_toml)?;
+        fs::write(profile_dir.join("config.toml"), &normalized_config)?;
 
         let metadata = self.compose_profile_metadata(
             profile_id,
@@ -291,13 +301,14 @@ impl ProfileManager {
         }
 
         validate_auth_json(&input.auth_json)?;
-        validate_config_toml(&input.config_toml)?;
+        let normalized_config = repair_illegal_config_toml(&input.config_toml);
+        validate_config_toml(&normalized_config)?;
 
         let profile_dir = self.profile_dir(profile_id)?;
         let existing_metadata = self.read_profile_metadata(&profile_dir)?;
 
         fs::write(profile_dir.join("auth.json"), input.auth_json)?;
-        fs::write(profile_dir.join("config.toml"), input.config_toml)?;
+        fs::write(profile_dir.join("config.toml"), &normalized_config)?;
 
         let metadata = self.compose_profile_metadata(
             existing_metadata.id,
@@ -327,12 +338,99 @@ impl ProfileManager {
         if self.state.last_switch_profile_id.as_deref() == Some(profile_id) {
             self.state.last_switch_profile_id = None;
         }
+        if self
+            .read_target_marker()?
+            .is_some_and(|marker| marker.profile_id == profile_id)
+        {
+            self.clear_target_marker()?;
+        }
 
         self.persist_state()?;
         Ok(())
     }
 
-    pub fn switch_profile(&self, profile_id: &str) -> Result<SwitchResult, AppError> {
+    pub fn fix_session_database_and_configs(&self) -> Result<(), AppError> {
+        let target_dir = default_codex_target_dir()?;
+        let target_config = target_dir.join("config.toml");
+        let mut active_provider = "openai".to_string();
+
+        if target_config.exists() {
+            if let Ok(content) = fs::read_to_string(&target_config) {
+                // FIRST: Self repair if illegal openai provider is used
+                let repaired = repair_illegal_config_toml(&content);
+                if repaired != content {
+                    let _ = fs::write(&target_config, &repaired);
+                }
+
+                for line in repaired.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("model_provider") && trimmed.contains('=') {
+                        if let Some(start) = trimmed.find('"').or_else(|| trimmed.find('\'')) {
+                            if let Some(end) = trimmed.rfind('"').or_else(|| trimmed.rfind('\'')) {
+                                if start < end {
+                                    active_provider = trimmed[start + 1..end].to_string();
+                                }
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        let profiles_dir = self.profiles_dir();
+        if profiles_dir.exists() {
+            if let Ok(entries) = fs::read_dir(profiles_dir) {
+                for entry in entries.flatten() {
+                    let config_path = entry.path().join("config.toml");
+                    if config_path.exists() {
+                        if let Ok(content) = fs::read_to_string(&config_path) {
+                            let repaired = repair_illegal_config_toml(&content);
+                            if repaired != content {
+                                let _ = fs::write(&config_path, &repaired);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #[cfg(unix)]
+        {
+            // 1. Fix SQLite Database (Scan all state_*.sqlite dynamically)
+            if let Ok(entries) = fs::read_dir(&target_dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    if name_str.starts_with("state_") && name_str.ends_with(".sqlite") {
+                        let sql = format!("UPDATE threads SET model_provider = '{}';", active_provider.replace("'", "''"));
+                        let _ = Command::new("sqlite3")
+                            .arg(entry.path())
+                            .arg(&sql)
+                            .status();
+                    }
+                }
+            }
+
+            // 2. Fix all JSONL session files 
+            let sessions_dir = target_dir.join("sessions");
+            let archived_dir = target_dir.join("archived_sessions");
+            
+            for dir in &[sessions_dir, archived_dir] {
+                if dir.exists() {
+                    let _ = Command::new("bash")
+                        .arg("-c")
+                        .arg(format!("find \"{}\" -type f -name '*.jsonl' -exec sed -i '' -e 's/\"model_provider\":\"[^\"]*\"/\"model_provider\":\"{}\"/g' {{}} +", dir.display(), active_provider.replace("'", "\\'")))
+                        .status();
+                }
+            }
+        }
+        
+        Ok(())
+    }
+
+    pub fn switch_profile(&mut self, profile_id: &str) -> Result<SwitchResult, AppError> {
+        self.ensure_target_profile_registered()?;
         let profile_dir = self.profile_dir(profile_id)?;
         fs::create_dir_all(&self.target_dir)?;
 
@@ -382,15 +480,23 @@ impl ProfileManager {
             None => managed_config_toml(&next_profile_config)?,
         };
 
-        fs::write(self.target_auth_path(), next_auth_json)?;
-        fs::write(self.target_config_path(), next_config_toml)?;
+        fs::write(self.target_auth_path(), &next_auth_json)?;
+        fs::write(self.target_config_path(), &next_config_toml)?;
 
         let switched_at = Utc::now();
-        let mut manager = self.clone_for_mutation();
-        manager.state.last_selected_profile_id = Some(profile_id.to_string());
-        manager.state.last_switch_profile_id = Some(profile_id.to_string());
-        manager.state.last_switched_at = Some(switched_at);
-        manager.persist_state()?;
+        self.state.last_selected_profile_id = Some(profile_id.to_string());
+        self.state.last_switch_profile_id = Some(profile_id.to_string());
+        self.state.last_switched_at = Some(switched_at);
+        self.persist_target_marker(TargetMarkerFile {
+            profile_id: profile_id.to_string(),
+            auth_hash: auth_match_hash(&next_auth_json)?,
+            config_hash: managed_config_hash(&next_config_toml)?,
+            updated_at: switched_at,
+        })?;
+        self.persist_state()?;
+
+        // 自动触发一次底层的全域会话搬迁，使得每次 Switch 后无需手动点击按钮也能享受会话无缝流转
+        let _ = self.fix_session_database_and_configs();
 
         Ok(SwitchResult {
             profile_id: profile_id.to_string(),
@@ -406,6 +512,14 @@ impl ProfileManager {
 
         let auth_hash = auth_match_hash(&fs::read_to_string(self.target_auth_path())?)?;
         let config_hash = managed_config_hash(&fs::read_to_string(self.target_config_path())?)?;
+
+        if let Some(marker) = self.read_target_marker()? {
+            if marker.auth_hash == auth_hash && marker.config_hash == config_hash {
+                if let Some(profile) = self.load_profile_summary(&marker.profile_id)? {
+                    return Ok(Some(profile));
+                }
+            }
+        }
 
         for profile in self.list_profiles()? {
             if profile.auth_hash == auth_hash && profile.config_hash == config_hash {
@@ -459,22 +573,24 @@ impl ProfileManager {
     }
 
     pub fn snapshot(&self) -> Result<AppSnapshot, AppError> {
+        let mut manager = self.clone_for_mutation();
+        manager.ensure_target_profile_registered()?;
         let default_target_dir = default_codex_target_dir()?;
-        let active_profile_id = self.detect_active_profile()?.map(|profile| profile.id);
+        let active_profile_id = manager.detect_active_profile()?.map(|profile| profile.id);
 
         Ok(AppSnapshot {
-            target_dir: self.target_dir.to_string_lossy().to_string(),
-            using_default_target_dir: self.target_dir == default_target_dir,
-            target_exists: self.target_dir.exists(),
-            target_auth_exists: self.target_auth_path().exists(),
-            target_config_exists: self.target_config_path().exists(),
-            target_updated_at: self.resolve_target_updated_at()?,
-            target_auth_type_label: self.resolve_target_auth_type_label()?,
+            target_dir: manager.target_dir.to_string_lossy().to_string(),
+            using_default_target_dir: manager.target_dir == default_target_dir,
+            target_exists: manager.target_dir.exists(),
+            target_auth_exists: manager.target_auth_path().exists(),
+            target_config_exists: manager.target_config_path().exists(),
+            target_updated_at: manager.resolve_target_updated_at()?,
+            target_auth_type_label: manager.resolve_target_auth_type_label()?,
             active_profile_id,
-            last_selected_profile_id: self.state.last_selected_profile_id.clone(),
-            last_switch_profile_id: self.state.last_switch_profile_id.clone(),
-            last_switched_at: self.state.last_switched_at.clone(),
-            profiles: self.list_profiles()?,
+            last_selected_profile_id: manager.state.last_selected_profile_id.clone(),
+            last_switch_profile_id: manager.state.last_switch_profile_id.clone(),
+            last_switched_at: manager.state.last_switched_at.clone(),
+            profiles: manager.list_profiles()?,
         })
     }
 
@@ -597,6 +713,10 @@ impl ProfileManager {
         self.app_data_dir.join("backups")
     }
 
+    fn target_marker_path(&self) -> PathBuf {
+        self.target_dir.join("codex-auth-switch.json")
+    }
+
     fn state_path(&self) -> PathBuf {
         self.app_data_dir.join("state.json")
     }
@@ -634,6 +754,94 @@ impl ProfileManager {
             &fs::read_to_string(self.target_auth_path())?,
             &fs::read_to_string(self.target_config_path())?,
         )?))
+    }
+
+    fn read_target_marker(&self) -> Result<Option<TargetMarkerFile>, AppError> {
+        let marker_path = self.target_marker_path();
+        if !marker_path.exists() {
+            return Ok(None);
+        }
+
+        Ok(Some(serde_json::from_str::<TargetMarkerFile>(&fs::read_to_string(marker_path)?)?))
+    }
+
+    fn persist_target_marker(&self, marker: TargetMarkerFile) -> Result<(), AppError> {
+        fs::create_dir_all(&self.target_dir)?;
+        fs::write(
+            self.target_marker_path(),
+            serde_json::to_string_pretty(&marker)?,
+        )?;
+        Ok(())
+    }
+
+    fn clear_target_marker(&self) -> Result<(), AppError> {
+        let marker_path = self.target_marker_path();
+        if marker_path.exists() {
+            fs::remove_file(marker_path)?;
+        }
+        Ok(())
+    }
+
+    fn ensure_target_profile_registered(&mut self) -> Result<(), AppError> {
+        if !self.target_auth_path().exists() || !self.target_config_path().exists() {
+            self.clear_target_marker()?;
+            return Ok(());
+        }
+
+        let auth_json = fs::read_to_string(self.target_auth_path())?;
+        let config_toml = fs::read_to_string(self.target_config_path())?;
+        let auth_hash = auth_match_hash(&auth_json)?;
+        let config_hash = managed_config_hash(&config_toml)?;
+
+        if let Some(marker) = self.read_target_marker()? {
+            if marker.auth_hash == auth_hash && marker.config_hash == config_hash {
+                if self.load_profile_summary(&marker.profile_id)?.is_some() {
+                    return Ok(());
+                }
+            }
+        }
+
+        for profile in self.list_profiles()? {
+            if profile.auth_hash == auth_hash && profile.config_hash == config_hash {
+                self.persist_target_marker(TargetMarkerFile {
+                    profile_id: profile.id,
+                    auth_hash,
+                    config_hash,
+                    updated_at: Utc::now(),
+                })?;
+                return Ok(());
+            }
+        }
+
+        if let Some(last_switch_profile_id) = self.state.last_switch_profile_id.as_deref() {
+            if let Some(profile) = self.load_profile_summary(last_switch_profile_id)? {
+                if profile.auth_hash == auth_hash {
+                    self.persist_target_marker(TargetMarkerFile {
+                        profile_id: profile.id,
+                        auth_hash,
+                        config_hash,
+                        updated_at: Utc::now(),
+                    })?;
+                    return Ok(());
+                }
+            }
+        }
+
+        let imported = self.import_profile(ProfileInput {
+            name: suggested_profile_name(&auth_json, &config_toml)?,
+            notes: "自动从当前 Codex 配置生成".into(),
+            auth_json,
+            config_toml,
+        })?;
+
+        self.persist_target_marker(TargetMarkerFile {
+            profile_id: imported.id,
+            auth_hash: imported.auth_hash,
+            config_hash: imported.config_hash,
+            updated_at: Utc::now(),
+        })?;
+
+        Ok(())
     }
 }
 
@@ -675,6 +883,19 @@ end if"#)
         None
     }
 }
+
+pub fn repair_illegal_config_toml(config_toml: &str) -> String {
+    if config_toml.contains("[model_providers.openai]") {
+        config_toml
+            .replace("[model_providers.openai]", "[model_providers.openai_custom]")
+            .replace("model_provider = \"openai\"", "model_provider = \"openai_custom\"")
+            .replace("model_provider = 'openai'", "model_provider = 'openai_custom'")
+    } else {
+        config_toml.to_string()
+    }
+}
+
+
 
 pub fn restart_codex_app() -> Result<(), AppError> {
     #[cfg(target_os = "macos")]
@@ -899,6 +1120,41 @@ fn oauth_identity_payload(id_token: &str) -> Option<String> {
     Some(format!(
         "email={email};user_id={user_id};account_id={account_id}"
     ))
+}
+
+fn oauth_account_id(auth_json: &str) -> Option<String> {
+    let auth = serde_json::from_str::<serde_json::Value>(auth_json).ok()?;
+    auth.get("tokens")
+        .and_then(|value| value.as_object())
+        .and_then(|tokens| tokens.get("id_token"))
+        .and_then(|value| value.as_str())
+        .and_then(|id_token| {
+            let payload = id_token.split('.').nth(1)?;
+            let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
+            let json = serde_json::from_slice::<serde_json::Value>(&decoded).ok()?;
+            json.get("https://api.openai.com/auth")
+                .and_then(|section| section.get("chatgpt_account_id"))
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string())
+        })
+}
+
+fn suggested_profile_name(auth_json: &str, config_toml: &str) -> Result<String, AppError> {
+    let auth_type_label = detect_auth_type_label(auth_json, config_toml)?;
+
+    if auth_type_label == "官方 OAuth" {
+        if let Some(account_id) = oauth_account_id(auth_json) {
+            if let Some(segment) = account_id
+                .split(['-', '_'])
+                .find(|segment| !segment.trim().is_empty())
+            {
+                return Ok(segment.to_string());
+            }
+            return Ok(account_id);
+        }
+    }
+
+    Ok(format!("{auth_type_label} 当前配置"))
 }
 
 fn sha256_bytes(bytes: &[u8]) -> String {

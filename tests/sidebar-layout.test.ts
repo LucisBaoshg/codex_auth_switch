@@ -45,8 +45,12 @@ test("renders a card-only profile gallery without a left sidebar", async () => {
   expect(
     document.querySelector('[data-role="current-config-card"] [data-action="refresh"]'),
   ).toBeNull();
+  expect(
+    document.querySelector('[data-role="current-config-card"] [data-action="save-current-as-profile"]'),
+  ).toBeNull();
   expect(document.querySelector('[data-role="profile-card"][data-state="live"]')).not.toBeNull();
   expect(document.querySelectorAll("[data-role='profile-card']").length).toBeGreaterThan(0);
+  expect(document.querySelectorAll('[data-action="delete-profile"]').length).toBeGreaterThan(0);
 });
 
 test("opens the editor flow when clicking the add-profile card", async () => {
@@ -147,4 +151,76 @@ test("opens the detail editor when clicking view-details on a profile card", asy
   expect(document.querySelector('[data-page="editor"]')).not.toBeNull();
   expect(document.querySelector("#editor-auth-json")).not.toBeNull();
   expect(document.querySelector("#editor-config-toml")).not.toBeNull();
+});
+
+test("deletes a saved profile after confirmation", async () => {
+  const initialSnapshot = {
+    targetDir: "/Users/example/.codex",
+    usingDefaultTargetDir: true,
+    targetExists: true,
+    targetAuthExists: true,
+    targetConfigExists: true,
+    targetUpdatedAt: "2026-03-20T00:00:00Z",
+    targetAuthTypeLabel: "第三方 API",
+    activeProfileId: "profile-2",
+    lastSelectedProfileId: "profile-2",
+    lastSwitchProfileId: "profile-2",
+    lastSwitchedAt: "2026-03-20T00:00:00Z",
+    profiles: [
+      {
+        id: "profile-1",
+        name: "Work Team",
+        notes: "工作主账号，常驻使用。",
+        authTypeLabel: "官方 OAuth",
+        createdAt: "2026-03-16T01:00:00Z",
+        updatedAt: "2026-03-18T12:20:00Z",
+        authHash: "7da2e87f1bc3",
+        configHash: "92ca2d10aa51",
+      },
+      {
+        id: "profile-2",
+        name: "淘宝 1",
+        notes: "主工作账号，额度稳定。",
+        authTypeLabel: "第三方 API",
+        createdAt: "2026-03-17T01:00:00Z",
+        updatedAt: "2026-03-19T04:12:00Z",
+        authHash: "d18ff783cb10",
+        configHash: "c450c91961af",
+      },
+    ],
+  };
+
+  const deletedSnapshot = {
+    ...initialSnapshot,
+    profiles: initialSnapshot.profiles.filter((profile) => profile.id !== "profile-1"),
+  };
+
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "load_snapshot") {
+      return initialSnapshot;
+    }
+    if (command === "delete_profile") {
+      return deletedSnapshot;
+    }
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+  vi.stubGlobal("confirm", vi.fn(() => true));
+
+  await import("../src/main");
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="delete-profile"][data-id="profile-1"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+  await flushUi();
+
+  expect(window.confirm).toHaveBeenCalled();
+  expect(invokeMock).toHaveBeenCalledWith("delete_profile", { profileId: "profile-1" });
+  expect(document.querySelectorAll("[data-role='profile-card']")).toHaveLength(1);
 });

@@ -14,7 +14,10 @@ fn manager_from_app(app: &AppHandle) -> Result<ProfileManager, String> {
 
 #[tauri::command]
 fn load_snapshot(app: AppHandle) -> Result<AppSnapshot, String> {
-    manager_from_app(&app)?
+    let manager = manager_from_app(&app)?;
+    // 在程序初次获取快照或用户手动刷新时，主动牵引/同步一次会话数据库，保证启动即对齐
+    let _ = manager.fix_session_database_and_configs();
+    manager
         .snapshot()
         .map_err(|error| error.to_string())
 }
@@ -70,7 +73,7 @@ fn update_profile(
 
 #[tauri::command]
 fn switch_profile(app: AppHandle, profile_id: String) -> Result<AppSnapshot, String> {
-    let manager = manager_from_app(&app)?;
+    let mut manager = manager_from_app(&app)?;
     manager
         .switch_profile(&profile_id)
         .map_err(|error| error.to_string())?;
@@ -111,6 +114,12 @@ fn restart_codex() -> Result<(), String> {
     restart_codex_app().map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn fix_session_database(app: tauri::AppHandle) -> Result<(), String> {
+    let manager = manager_from_app(&app)?;
+    manager.fix_session_database_and_configs().map_err(|error| error.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -125,7 +134,8 @@ pub fn run() {
             delete_profile,
             set_target_dir,
             open_target_dir,
-            restart_codex
+            restart_codex,
+            fix_session_database
         ])
         .run(tauri::generate_context!())
         .expect("error while running Codex Auth Switch");
