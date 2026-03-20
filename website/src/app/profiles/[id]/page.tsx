@@ -59,7 +59,7 @@ export default function ProfileDetailPage({ params }: { params: Promise<{ id: st
     setSaving(true);
     try {
       const res = await fetch(`/api/profiles/${id}`, {
-        method: "PATCH",
+        method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: editName, description: editDesc }),
       });
