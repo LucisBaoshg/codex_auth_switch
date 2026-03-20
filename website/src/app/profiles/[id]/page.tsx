@@ -2,6 +2,7 @@
 
 import { useEffect, useState, use } from "react";
 import Link from "next/link";
+import { withBasePath } from "@/lib/base-path";
 
 interface Profile {
   id: string;
@@ -25,7 +26,7 @@ export default function ProfileDetailPage({ params }: { params: Promise<{ id: st
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    fetch(`/api/profiles/${id}`)
+    fetch(withBasePath(`/api/profiles/${id}`))
       .then((res) => res.json())
       .then(async (data) => {
         setProfile(data);
@@ -36,7 +37,7 @@ export default function ProfileDetailPage({ params }: { params: Promise<{ id: st
           const contents: Record<string, string> = {};
           for (const file of data.files) {
             try {
-              const fileRes = await fetch(`/api/profiles/${id}/${file}`);
+              const fileRes = await fetch(withBasePath(`/api/profiles/${id}/${file}`));
               contents[file] = await fileRes.text();
             } catch (err) {
               contents[file] = "无法读取文件内容";
@@ -176,7 +177,7 @@ export default function ProfileDetailPage({ params }: { params: Promise<{ id: st
                   {copied === fileName ? "已复制!" : "复制"}
                 </button>
                 <a
-                  href={`/api/profiles/${profile.id}/${fileName}`}
+                  href={withBasePath(`/api/profiles/${profile.id}/${fileName}`)}
                   download={fileName}
                   className="px-3 py-1.5 text-xs font-medium rounded-md bg-indigo-100 text-indigo-700 hover:bg-indigo-200 dark:bg-indigo-500/20 dark:text-indigo-300 dark:hover:bg-indigo-500/30 transition-colors text-center active:scale-95"
                 >

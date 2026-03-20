@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { withBasePath } from "@/lib/base-path";
 
 interface Profile {
   id: string;
@@ -24,7 +25,7 @@ export default function ProfilesPage() {
   const [configContent, setConfigContent] = useState("");
 
   useEffect(() => {
-    fetch("/api/profiles")
+    fetch(withBasePath("/api/profiles"))
       .then((res) => res.json())
       .then((data) => {
         setProfiles(data);
@@ -49,7 +50,7 @@ export default function ProfilesPage() {
     formData.append("file2", file2);
 
     try {
-      const res = await fetch("/api/profiles", {
+      const res = await fetch(withBasePath("/api/profiles"), {
         method: "POST",
         body: formData,
       });
