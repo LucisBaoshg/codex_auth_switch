@@ -59,7 +59,7 @@ export default function ProfileDetailPage({ params }: { params: Promise<{ id: st
     if (!editName.trim()) return;
     setSaving(true);
     try {
-      const res = await fetch(`/api/profiles/${id}`, {
+      const res = await fetch(withBasePath(`/api/profiles/${id}`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: editName, description: editDesc }),
