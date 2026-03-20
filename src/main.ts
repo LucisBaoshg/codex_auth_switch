@@ -268,20 +268,7 @@ async function switchProfile(profileId: string, profileName: string): Promise<vo
     state.selectedProfileId = profileId;
     state.view = "cards";
     setSnapshot(snapshot);
-    setFlash("success", `已切换到 ${profileName}`);
-  } catch (error) {
-    setFlash("error", error instanceof Error ? error.message : String(error));
-  } finally {
-    state.busy = false;
-    render();
-  }
-}
-
-async function restartCodex(): Promise<void> {
-  setBusy(true);
-  try {
-    await desktopInvoke("restart_codex");
-    setFlash("success", "Codex.app 已开始重启。");
+    setFlash("success", `${profileName} profile 切换成功，请重启 Codex 使用。`);
   } catch (error) {
     setFlash("error", error instanceof Error ? error.message : String(error));
   } finally {
@@ -487,14 +474,6 @@ function renderCardsPage(snapshot: AppSnapshot): string {
           ${state.busy ? "disabled" : ""}
         >
           刷新状态
-        </button>
-        <button
-          class="button button-ghost"
-          data-role="global-restart"
-          data-action="restart-codex"
-          ${state.busy ? "disabled" : ""}
-        >
-          重启 Codex
         </button>
       </div>
 
@@ -746,8 +725,6 @@ function bindEvents(): void {
         await openEditorForNewProfile();
       } else if (action === "save-current-as-profile") {
         await openEditorForCurrentConfig();
-      } else if (action === "restart-codex") {
-        await restartCodex();
       } else if (action === "view-profile-details" && button.dataset.id) {
         await openEditorForProfile(button.dataset.id);
       } else if (action === "switch" && button.dataset.id && button.dataset.name) {

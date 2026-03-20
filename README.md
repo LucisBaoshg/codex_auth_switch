@@ -96,7 +96,7 @@ git push origin v0.1.1
 
 - `APPLE_CERTIFICATE_P12`：`.p12` 文件的 base64 内容
 - `APPLE_CERTIFICATE_PASSWORD`：导出 `.p12` 时设置的密码
-- `APPLE_SIGNING_IDENTITY`：例如 `Developer ID Application: Tapcash Inc (JB2C84LCBB)`
+- `APPLE_SIGNING_IDENTITY`：你的 Developer ID Application 签名身份，例如 `Developer ID Application: Your Company Name (TEAMID)`
 
 ## 测试
 
