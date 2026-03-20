@@ -96,6 +96,45 @@ export default function Home() {
           </div>
         </div>
       </section>
+
+      {/* Detailed Instructions Section */}
+      <section className="mx-auto max-w-5xl rounded-2xl border border-neutral-200 bg-white/50 p-8 shadow-sm dark:border-white/10 dark:bg-black/20 backdrop-blur-md transition-colors mt-8">
+        <h2 className="text-2xl font-bold text-neutral-900 dark:text-white mb-6 border-b border-neutral-200 dark:border-white/10 pb-4 transition-colors">
+          💡 后续配置指令
+        </h2>
+        
+        <div className="space-y-8">
+          <div className="flex gap-4 sm:gap-6">
+            <div className="flex-shrink-0 mt-1">
+              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 font-bold dark:bg-indigo-500/20 dark:text-indigo-300 ring-1 ring-inset ring-indigo-200 dark:ring-indigo-500/30">
+                A
+              </div>
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-2 transition-colors">获取目标授权凭证</h3>
+              <p className="text-neutral-600 dark:text-neutral-400 leading-relaxed transition-colors">
+                该资源中心的主要目的是提供跨团队的 Profiles 共享分发。<br className="hidden sm:block" />请前往内部流转专区：<a href="http://sub2api.ite.tapcash.com/codex/profiles" target="_blank" className="font-mono text-indigo-600 hover:text-indigo-500 hover:underline dark:text-indigo-400 dark:hover:text-indigo-300">http://sub2api.ite.tapcash.com/codex/profiles</a>。<br/>
+                找到您所需环境的共享卡片进入，将上面的 <code>auth.json</code> 或 <code>config.toml</code> 配置文本<strong>直接复制</strong>到剪贴板。
+              </p>
+            </div>
+          </div>
+
+          <div className="flex gap-4 sm:gap-6">
+            <div className="flex-shrink-0 mt-1">
+              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-100 text-emerald-700 font-bold dark:bg-emerald-500/20 dark:text-emerald-300 ring-1 ring-inset ring-emerald-200 dark:ring-emerald-500/30">
+                B
+              </div>
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-2 transition-colors">在本地一键应用切换</h3>
+              <p className="text-neutral-600 dark:text-neutral-400 leading-relaxed transition-colors">
+                打开您刚安装好的 <strong>Codex Auth Switch</strong> 桌面客户端。<br className="hidden sm:block" />
+                在桌面程序内，将刚刚复制出的配置信息直接粘贴进去配置位中，即可让环境自动应用，实现一键无缝账号切换。
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
     </main>
   );
 }
