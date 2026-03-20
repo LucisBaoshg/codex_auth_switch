@@ -62,7 +62,7 @@ src-tauri/target/release/codex-auth-switch
 仓库包含一个 Windows 打包 workflow：
 
 - [windows-installer.yml](/Volumes/Acer/Dev/codex_auth_switch/.github/workflows/windows-installer.yml)
-- [release.yml](/Volumes/Acer/Dev/codex_auth_switch/.github/workflows/release.yml)
+- [publish-release.yml](/Volumes/Acer/Dev/codex_auth_switch/.github/workflows/publish-release.yml)
 
 触发方式：
 
@@ -85,7 +85,7 @@ git tag v0.1.1
 git push origin v0.1.1
 ```
 
-这会触发 [release.yml](/Volumes/Acer/Dev/codex_auth_switch/.github/workflows/release.yml)：
+这会触发 [publish-release.yml](/Volumes/Acer/Dev/codex_auth_switch/.github/workflows/publish-release.yml)：
 
 - 在 `windows-latest` 上构建 `NSIS` 安装包
 - 在 `macos-latest` 上构建 `.app` / `.dmg`
