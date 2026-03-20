@@ -50,9 +50,26 @@ export default function ProfileDetailPage({ params }: { params: Promise<{ id: st
   }, [id]);
 
   const handleCopy = (fileName: string, content: string) => {
-    navigator.clipboard.writeText(content);
+    // navigator.clipboard requires HTTPS; fallback for HTTP/Mac
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(content).catch(() => fallbackCopy(content));
+    } else {
+      fallbackCopy(content);
+    }
     setCopied(fileName);
     setTimeout(() => setCopied(null), 2000);
+  };
+
+  const fallbackCopy = (content: string) => {
+    const textarea = document.createElement("textarea");
+    textarea.value = content;
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    document.execCommand("copy");
+    document.body.removeChild(textarea);
   };
 
   const handleSaveEdit = async () => {
