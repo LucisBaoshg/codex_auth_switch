@@ -299,7 +299,7 @@ function nativeConfirm(msg: string): Promise<boolean> {
 }
 
 async function deleteProfile(profileId: string, profileName: string): Promise<void> {
-  const confirmed = await nativeConfirm(`确定要销毁「${profileName}」档案吗？此操作无法撤回！`);
+  const confirmed = window.confirm(`确定要销毁「${profileName}」档案吗？此操作无法撤回！`);
   if (!confirmed) {
     return;
   }
@@ -500,11 +500,6 @@ function renderFlash(): string {
 function renderCardsPage(snapshot: AppSnapshot): string {
   const activeProfile =
     snapshot.profiles.find((profile) => profile.id === snapshot.activeProfileId) ?? null;
-  const currentConfigNote = snapshot.targetAuthExists && snapshot.targetConfigExists
-    ? activeProfile
-      ? `目前系统正在平稳运行「${activeProfile.name}」身份配置档案。`
-      : "检测到当前系统的 auth.json 与 config.toml 文件尚未在合集中备份。"
-    : "在当前目录中未检测到完整的 Codex 配置文件。";
 
   return `
     <section class="cards-page" data-page="cards">
@@ -514,11 +509,6 @@ function renderCardsPage(snapshot: AppSnapshot): string {
           <p>统一管理与快速分发您的环境代理和身份配置。</p>
         </div>
         <div class="top-nav-actions">
-
-          <button class="button button-primary" data-role="add-card" data-action="new-profile" ${state.busy ? "disabled" : ""}>
-             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-             加配置
-          </button>
           <button class="icon-button" title="刷新状态" data-role="global-refresh" data-action="refresh" ${state.busy ? "disabled" : ""}>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
           </button>
@@ -527,15 +517,30 @@ function renderCardsPage(snapshot: AppSnapshot): string {
 
       ${renderFlash()}
 
-
-
       <section class="grid-container">
         <h3 class="section-title">已保存的配置文件 (${snapshot.profiles.length})</h3>
         <div class="card-grid">
+          <button class="card add-profile-card" data-role="add-card" data-action="new-profile" ${state.busy ? "disabled" : ""}>
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            加配置
+          </button>
+          <article class="card current-config-card" data-role="current-config-card">
+            <div class="card-head">
+              <h2>${activeProfile ? escapeHtml(activeProfile.name) : "未知配置"}</h2>
+              ${activeProfile ? `<span class="pill pill-type">${escapeHtml(activeProfile.authTypeLabel)}</span>` : ""}
+            </div>
+            <p class="card-note">${
+              snapshot.targetAuthExists && snapshot.targetConfigExists
+                ? activeProfile
+                  ? escapeHtml(`目前系统正在平稳运行「${activeProfile.name}」身份配置档案。`)
+                  : "检测到当前系统的 auth.json 与 config.toml 文件尚未在合集中备份。"
+                : "在当前目录中未检测到完整的 Codex 配置文件。"
+            }</p>
+          </article>
           ${snapshot.profiles.length === 0 ? `
             <div class="empty-state">
               <h3>暂无存档记录</h3>
-              <p>点击右上角的 "加配置" 录入您的第一套 Profile 集合吧！</p>
+              <p>点击 "加配置" 录入您的第一套 Profile 集合吧！</p>
             </div>
           ` : ""}
           ${[...snapshot.profiles]
