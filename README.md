@@ -57,6 +57,14 @@ src-tauri/target/release/bundle/macos/Codex Auth Switch.app
 src-tauri/target/release/codex-auth-switch
 ```
 
+如果你在本机做 macOS release 构建，建议优先用下面这条命令：
+
+```bash
+APPLE_SIGNING_IDENTITY="Developer ID Application: Your Company Name (TEAMID)" npm run build:mac:release-local
+```
+
+这个脚本会优先使用系统自带的 `/usr/bin/xattr`，避免 Homebrew 版本的 `xattr` 与 Tauri bundler 参数不兼容。
+
 ## GitHub Actions
 
 仓库包含一个 Windows 打包 workflow：
