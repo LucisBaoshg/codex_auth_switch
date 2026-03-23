@@ -25,6 +25,11 @@ export default function ProfileDetailPage({ params }: { params: Promise<{ id: st
   const [editDesc, setEditDesc] = useState("");
   const [saving, setSaving] = useState(false);
 
+  // File edit states
+  const [editingFile, setEditingFile] = useState<string | null>(null);
+  const [editFileContent, setEditFileContent] = useState<string>("");
+  const [savingFile, setSavingFile] = useState(false);
+
   useEffect(() => {
     fetch(withBasePath(`/api/profiles/${id}`))
       .then((res) => res.json())
@@ -90,6 +95,27 @@ export default function ProfileDetailPage({ params }: { params: Promise<{ id: st
       console.error(err);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleSaveFile = async (fileName: string) => {
+    setSavingFile(true);
+    try {
+      const res = await fetch(withBasePath(`/api/profiles/${id}/${fileName}`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: editFileContent }),
+      });
+      if (res.ok) {
+        setFileContents((prev) => ({ ...prev, [fileName]: editFileContent }));
+        setEditingFile(null);
+      } else {
+        console.error("Failed to save file");
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setSavingFile(false);
     }
   };
 
@@ -187,25 +213,62 @@ export default function ProfileDetailPage({ params }: { params: Promise<{ id: st
             <div className="flex items-center justify-between px-6 py-4 border-b border-neutral-200 bg-neutral-100 dark:bg-black/40 dark:border-white/10 transition-colors">
               <span className="font-mono text-sm text-neutral-700 dark:text-neutral-300 transition-colors">{fileName}</span>
               <div className="flex items-center gap-3">
-                <button
-                  onClick={() => handleCopy(fileName, fileContents[fileName] || "")}
-                  className="px-3 py-1.5 text-xs font-medium rounded-md bg-neutral-200 hover:bg-neutral-300 text-neutral-800 dark:bg-white/5 dark:hover:bg-white/10 dark:text-white transition-colors text-center min-w-[70px] active:scale-95"
-                >
-                  {copied === fileName ? "已复制!" : "复制"}
-                </button>
-                <a
-                  href={withBasePath(`/api/profiles/${profile.id}/${fileName}`)}
-                  download={fileName}
-                  className="px-3 py-1.5 text-xs font-medium rounded-md bg-indigo-100 text-indigo-700 hover:bg-indigo-200 dark:bg-indigo-500/20 dark:text-indigo-300 dark:hover:bg-indigo-500/30 transition-colors text-center active:scale-95"
-                >
-                  下载
-                </a>
+                {editingFile === fileName ? (
+                  <>
+                    <button
+                      onClick={() => setEditingFile(null)}
+                      className="px-3 py-1.5 text-xs font-medium rounded-md bg-neutral-200 hover:bg-neutral-300 text-neutral-800 dark:bg-white/5 dark:hover:bg-white/10 dark:text-white transition-colors text-center active:scale-95"
+                    >
+                      取消
+                    </button>
+                    <button
+                      onClick={() => handleSaveFile(fileName)}
+                      disabled={savingFile}
+                      className="px-3 py-1.5 text-xs font-medium rounded-md bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors text-center active:scale-95"
+                    >
+                      {savingFile ? "保存中..." : "保存修改"}
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      onClick={() => {
+                        setEditingFile(fileName);
+                        setEditFileContent(fileContents[fileName] || "");
+                      }}
+                      className="px-3 py-1.5 text-xs font-medium rounded-md bg-neutral-200 hover:bg-neutral-300 text-neutral-800 dark:bg-white/5 dark:hover:bg-white/10 dark:text-white transition-colors text-center active:scale-95"
+                    >
+                      修改
+                    </button>
+                    <button
+                      onClick={() => handleCopy(fileName, fileContents[fileName] || "")}
+                      className="px-3 py-1.5 text-xs font-medium rounded-md bg-neutral-200 hover:bg-neutral-300 text-neutral-800 dark:bg-white/5 dark:hover:bg-white/10 dark:text-white transition-colors text-center min-w-[70px] active:scale-95"
+                    >
+                      {copied === fileName ? "已复制!" : "复制"}
+                    </button>
+                    <a
+                      href={withBasePath(`/api/profiles/${profile.id}/${fileName}`)}
+                      download={fileName}
+                      className="px-3 py-1.5 text-xs font-medium rounded-md bg-indigo-100 text-indigo-700 hover:bg-indigo-200 dark:bg-indigo-500/20 dark:text-indigo-300 dark:hover:bg-indigo-500/30 transition-colors text-center active:scale-95"
+                    >
+                      下载
+                    </a>
+                  </>
+                )}
               </div>
             </div>
             <div className="p-6 overflow-x-auto max-h-[400px] overflow-y-auto custom-scrollbar">
-              <pre className="text-xs font-mono text-neutral-600 dark:text-neutral-400 whitespace-pre-wrap break-words transition-colors">
-                {fileContents[fileName] || "加载内容中..."}
-              </pre>
+              {editingFile === fileName ? (
+                <textarea
+                  value={editFileContent}
+                  onChange={(e) => setEditFileContent(e.target.value)}
+                  className="w-full min-h-[300px] p-4 text-sm font-mono text-neutral-800 bg-neutral-50 border border-neutral-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:bg-neutral-900 dark:border-neutral-700 dark:text-neutral-200 transition-colors resize-y custom-scrollbar"
+                />
+              ) : (
+                <pre className="text-xs font-mono text-neutral-600 dark:text-neutral-400 whitespace-pre-wrap break-words transition-colors">
+                  {fileContents[fileName] || "加载内容中..."}
+                </pre>
+              )}
             </div>
           </div>
         ))}
