@@ -31,7 +31,8 @@
     "icon": ["icons/icon.png", "icons/icon.icns", "icons/icon.ico"],
     "category": "DeveloperTool",
     "macOS": {
-      "bundleVersion": "1"
+      "bundleVersion": "1",
+      "infoPlist": "Info.plist"
     }
   }
 }
