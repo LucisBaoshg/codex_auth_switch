@@ -80,9 +80,9 @@ export default function Home() {
               <div className="mb-6 flex h-12 w-12 items-center justify-center rounded-xl bg-purple-100 text-purple-700 ring-1 ring-inset ring-purple-200 dark:bg-purple-500/20 dark:text-purple-300 dark:ring-purple-500/30 shrink-0 transition-colors">
                 <span className="text-xl font-bold">3</span>
               </div>
-              <h3 className="mb-3 text-xl font-semibold text-neutral-900 dark:text-white transition-colors">使用与分享 Profiles</h3>
+              <h3 className="mb-3 text-xl font-semibold text-neutral-900 dark:text-white transition-colors">一键同步到桌面客户端</h3>
               <p className="mb-8 text-neutral-600 dark:text-neutral-400 flex-1 transition-colors">
-                进入分享区浏览团队内部配置，复制到您的客户端中无缝完成账号切换，或上传新配置。
+                打开 Codex Auth Switch 客户端，进入「☁️ 网络共享库」页面，浏览团队配置并点击「一键下载并应用」，即可完成账号切换。
               </p>
               <Link
                 href="/profiles"
@@ -112,10 +112,9 @@ export default function Home() {
               </div>
             </div>
             <div>
-              <h3 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-2 transition-colors">获取目标授权凭证</h3>
+              <h3 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-2 transition-colors">下载并安装 Codex 桌面版</h3>
               <p className="text-neutral-600 dark:text-neutral-400 leading-relaxed transition-colors">
-                本资源分发中心收录了团队维护的各类环境配置。请点击上方进入<a href="/profiles" className="font-medium text-indigo-600 hover:text-indigo-500 hover:underline dark:text-indigo-400 dark:hover:text-indigo-300">Profiles 分享区</a>，选择您所需的业务环境卡片。<br className="hidden sm:block" />
-                在详情页下方找到对应的配置文件（如 <code>auth.json</code> 或 <code>config.toml</code>），点击【复制】按钮，将配置参数保存至系统剪贴板。
+                前往 <a href="https://chatgpt.com/codex" target="_blank" className="font-medium text-indigo-600 hover:underline dark:text-indigo-400">chatgpt.com/codex</a> 下载并安装官方 ChatGPT Codex 桌面客户端。该客户端目前支持 macOS 和 Windows 系统。
               </p>
             </div>
           </div>
@@ -127,10 +126,14 @@ export default function Home() {
               </div>
             </div>
             <div>
-              <h3 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-2 transition-colors">启动桌面客户端</h3>
+              <h3 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-2 transition-colors">安装 Codex Auth Switch 客户端</h3>
               <p className="text-neutral-600 dark:text-neutral-400 leading-relaxed transition-colors">
-                在您的计算机上，找到并运行已安装好的 <strong>Codex Auth Switch</strong> 独立桌面应用程序。
+                前往 <a href="https://github.com/LucisBaoshg/codex_auth_switch/releases" target="_blank" className="font-medium text-indigo-600 hover:underline dark:text-indigo-400">GitHub Releases</a> 下载最新版 Codex Auth Switch：
               </p>
+              <ul className="mt-2 space-y-1 text-sm text-neutral-600 dark:text-neutral-400 list-disc list-inside">
+                <li><strong>macOS</strong>：下载 <code className="bg-neutral-100 dark:bg-white/10 px-1 rounded">.dmg</code> 文件，打开后拖拽到「应用程序」文件夹即可安装。</li>
+                <li><strong>Windows</strong>：下载 <code className="bg-neutral-100 dark:bg-white/10 px-1 rounded">.exe</code> 文件，双击运行安装程序，按提示完成安装。</li>
+              </ul>
             </div>
           </div>
 
@@ -141,10 +144,24 @@ export default function Home() {
               </div>
             </div>
             <div>
-              <h3 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-2 transition-colors">应用环境配置</h3>
+              <h3 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-2 transition-colors">在客户端中同步网络共享配置</h3>
               <p className="text-neutral-600 dark:text-neutral-400 leading-relaxed transition-colors">
-                在客户端主界面对应的输入框内，粘贴第 1 步中复制的相关配置文本，随后点击确认应用。<br className="hidden sm:block" />
-                系统服务进程将在后台自动接管并完成底层的参数覆写工作。配置生效后，您即可直接进入该 AI 服务平台开展工作。
+                启动 Codex Auth Switch，点击顶部的「☁️ 网络共享库」标签页。客户端会自动拉取本平台发布的所有共享配置，找到您需要的配置条目，点击「一键下载并应用」按钮，确认提示后即可完成账号切换。<br className="hidden sm:block" />
+                <span className="text-sm mt-1 block">无需手动复制粘贴任何文本，客户端会自动完成全部参数同步与写入。</span>
+              </p>
+            </div>
+          </div>
+
+          <div className="flex gap-4 sm:gap-6">
+            <div className="flex-shrink-0 mt-1">
+              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-orange-100 text-orange-700 font-bold dark:bg-orange-500/20 dark:text-orange-300 ring-1 ring-inset ring-orange-200 dark:ring-orange-500/30">
+                4
+              </div>
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-2 transition-colors">重启 Codex 使配置生效</h3>
+              <p className="text-neutral-600 dark:text-neutral-400 leading-relaxed transition-colors">
+                配置应用完成后，完全关闭并重新启动 ChatGPT Codex 桌面端，新账号配置即刻生效，可直接投入使用。
               </p>
             </div>
           </div>
