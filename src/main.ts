@@ -291,18 +291,22 @@ async function switchProfile(profileId: string, profileName: string): Promise<vo
   }
 }
 
-function nativeConfirm(msg: string): Promise<boolean> {
+function nativeConfirm(msg: string, okText = "确定", isDanger = false): Promise<boolean> {
   return new Promise((resolve) => {
     const overlay = document.createElement("div");
     overlay.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);backdrop-filter:blur(4px);z-index:9999;display:flex;align-items:center;justify-content:center;transition:all 0.2s;";
     const box = document.createElement("div");
     box.style.cssText = "background:var(--bg-panel);border:1px solid var(--border);padding:28px 32px;border-radius:24px;box-shadow:var(--shadow-lg);max-width:320px;text-align:center;color:var(--text-main);transform:scale(0.95);animation:zoomIn 0.2s forwards;";
+    
+    const okColor = isDanger ? "var(--danger)" : "var(--accent)";
+    const okShadow = isDanger ? "rgba(239,68,68,0.2)" : "rgba(99,102,241,0.2)";
+
     box.innerHTML = `<style>@keyframes zoomIn { to { transform: scale(1); } }</style>
-      <h3 style="margin:0 0 12px;font-size:1.2rem;">安全确认</h3>
+      <h3 style="margin:0 0 12px;font-size:1.2rem;">提示</h3>
       <p style="margin:0 0 24px;color:var(--text-muted);font-size:0.95rem;line-height:1.5;">${escapeHtml(msg)}</p>
       <div style="display:flex;gap:12px;justify-content:center;">
-        <button id="btn-cancel" style="flex:1;padding:10px;border:none;border-radius:12px;background:var(--bg-page);color:var(--text-main);cursor:pointer;font-weight:600;border:1px solid var(--border);">手滑了</button>
-        <button id="btn-ok" style="flex:1;padding:10px;border:none;border-radius:12px;background:var(--danger);color:white;cursor:pointer;font-weight:600;box-shadow:0 4px 12px rgba(239,68,68,0.2);">彻底销毁</button>
+        <button id="btn-cancel" style="flex:1;padding:10px;border:none;border-radius:12px;background:var(--bg-page);color:var(--text-main);cursor:pointer;font-weight:600;border:1px solid var(--border);">取消</button>
+        <button id="btn-ok" style="flex:1;padding:10px;border:none;border-radius:12px;background:${okColor};color:white;cursor:pointer;font-weight:600;box-shadow:0 4px 12px ${okShadow};">${escapeHtml(okText)}</button>
       </div>`;
     overlay.appendChild(box);
     document.body.appendChild(overlay);
@@ -313,7 +317,7 @@ function nativeConfirm(msg: string): Promise<boolean> {
 }
 
 async function deleteProfile(profileId: string, profileName: string): Promise<void> {
-  const confirmed = window.confirm(`确定要销毁「${profileName}」档案吗？此操作无法撤回！`);
+  const confirmed = await nativeConfirm(`确定要销毁「${profileName}」档案吗？此操作无法撤回！`, "彻底销毁", true);
   if (!confirmed) {
     return;
   }
@@ -493,7 +497,7 @@ async function fetchNetworkProfiles(): Promise<void> {
 }
 
 async function downloadAndApplyNetworkProfile(networkProfileId: string, profileName: string): Promise<void> {
-  const confirmed = window.confirm(`确定要下载并应用网络配置「${profileName}」吗？操作后可能覆盖当前运行的身份。`);
+  const confirmed = await nativeConfirm(`确定要下载网络配置「${profileName}」吗？\n如果同名配置已存在，将会生效使用并覆盖运行中环境。`, "下载并应用", false);
   if (!confirmed) return;
 
   setBusy(true);
