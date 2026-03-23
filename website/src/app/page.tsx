@@ -12,7 +12,7 @@ export default function Home() {
           Codex Auth Switch
         </h1>
         <p className="text-lg md:text-xl text-neutral-600 dark:text-neutral-400 max-w-2xl mx-auto leading-relaxed transition-colors">
-          统一管理与分享您的 Codex 配置。快速切换身份配置，与团队无缝协作。
+          在您的 Codex 账号额度不够时，提供团队共享账号的一键快速切换方案，彻底免去手动配置底层文件的繁琐步骤。
         </p>
       </section>
 
@@ -56,8 +56,9 @@ export default function Home() {
                 <span className="text-xl font-bold">2</span>
               </div>
               <h3 className="mb-3 text-xl font-semibold text-neutral-900 dark:text-white transition-colors">安装本项目客户端</h3>
-              <p className="mb-8 text-neutral-600 dark:text-neutral-400 flex-1 transition-colors">
-                下载安装 codex_auth_switch 的最新发行版，用于执行账号凭证的无缝切换。
+              <p className="mb-8 text-neutral-600 dark:text-neutral-400 flex-1 transition-colors whitespace-pre-line">
+                下载安装 Codex Auth Switch 的最新客户端发行版。{"\n"}
+                <span className="text-sm">Mac 请下载 <strong>.dmg</strong> 结尾的文件，Windows 请下载 <strong>.exe</strong> 结尾的文件。</span>
               </p>
               <a
                 href="https://github.com/LucisBaoshg/codex_auth_switch/releases"
@@ -100,21 +101,21 @@ export default function Home() {
       {/* Detailed Instructions Section */}
       <section className="mx-auto max-w-5xl rounded-2xl border border-neutral-200 bg-white/50 p-8 shadow-sm dark:border-white/10 dark:bg-black/20 backdrop-blur-md transition-colors mt-8">
         <h2 className="text-2xl font-bold text-neutral-900 dark:text-white mb-6 border-b border-neutral-200 dark:border-white/10 pb-4 transition-colors">
-          💡 后续配置指令
+          💡 完整使用教程
         </h2>
         
         <div className="space-y-8">
           <div className="flex gap-4 sm:gap-6">
             <div className="flex-shrink-0 mt-1">
               <div className="flex h-8 w-8 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 font-bold dark:bg-indigo-500/20 dark:text-indigo-300 ring-1 ring-inset ring-indigo-200 dark:ring-indigo-500/30">
-                A
+                1
               </div>
             </div>
             <div>
               <h3 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-2 transition-colors">获取目标授权凭证</h3>
               <p className="text-neutral-600 dark:text-neutral-400 leading-relaxed transition-colors">
-                该资源中心的主要目的是提供跨团队的 Profiles 共享分发。<br className="hidden sm:block" />请前往内部流转专区：<a href="http://sub2api.ite.tapcash.com/codex/profiles" target="_blank" className="font-mono text-indigo-600 hover:text-indigo-500 hover:underline dark:text-indigo-400 dark:hover:text-indigo-300">http://sub2api.ite.tapcash.com/codex/profiles</a>。<br/>
-                找到您所需环境的共享卡片进入，将上面的 <code>auth.json</code> 或 <code>config.toml</code> 配置文本<strong>直接复制</strong>到剪贴板。
+                本资源分发中心收录了团队维护的各类环境配置。请点击上方进入<a href="/profiles" className="font-medium text-indigo-600 hover:text-indigo-500 hover:underline dark:text-indigo-400 dark:hover:text-indigo-300">Profiles 分享区</a>，选择您所需的业务环境卡片。<br className="hidden sm:block" />
+                在详情页下方找到对应的配置文件（如 <code>auth.json</code> 或 <code>config.toml</code>），点击【复制】按钮，将配置参数保存至系统剪贴板。
               </p>
             </div>
           </div>
@@ -122,14 +123,28 @@ export default function Home() {
           <div className="flex gap-4 sm:gap-6">
             <div className="flex-shrink-0 mt-1">
               <div className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-100 text-emerald-700 font-bold dark:bg-emerald-500/20 dark:text-emerald-300 ring-1 ring-inset ring-emerald-200 dark:ring-emerald-500/30">
-                B
+                2
               </div>
             </div>
             <div>
-              <h3 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-2 transition-colors">在本地一键应用切换</h3>
+              <h3 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-2 transition-colors">启动桌面客户端</h3>
               <p className="text-neutral-600 dark:text-neutral-400 leading-relaxed transition-colors">
-                打开您刚安装好的 <strong>Codex Auth Switch</strong> 桌面客户端。<br className="hidden sm:block" />
-                在桌面程序内，将刚刚复制出的配置信息直接粘贴进去配置位中，即可让环境自动应用，实现一键无缝账号切换。
+                在您的计算机上，找到并运行已安装好的 <strong>Codex Auth Switch</strong> 独立桌面应用程序。
+              </p>
+            </div>
+          </div>
+
+          <div className="flex gap-4 sm:gap-6">
+            <div className="flex-shrink-0 mt-1">
+              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-purple-100 text-purple-700 font-bold dark:bg-purple-500/20 dark:text-purple-300 ring-1 ring-inset ring-purple-200 dark:ring-purple-500/30">
+                3
+              </div>
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-2 transition-colors">应用环境配置</h3>
+              <p className="text-neutral-600 dark:text-neutral-400 leading-relaxed transition-colors">
+                在客户端主界面对应的输入框内，粘贴第 1 步中复制的相关配置文本，随后点击确认应用。<br className="hidden sm:block" />
+                系统服务进程将在后台自动接管并完成底层的参数覆写工作。配置生效后，您即可直接进入该 AI 服务平台开展工作。
               </p>
             </div>
           </div>
