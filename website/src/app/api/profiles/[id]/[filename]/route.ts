@@ -2,6 +2,16 @@ import { NextRequest, NextResponse } from "next/server";
 import { promises as fs } from "fs";
 import path from "path";
 
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+};
+
+export async function OPTIONS() {
+  return new NextResponse(null, { headers: corsHeaders });
+}
+
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string; filename: string }> }
@@ -26,11 +36,12 @@ export async function GET(
       headers: {
         "Content-Type": contentType,
         "Cache-Control": "public, max-age=31536000, immutable",
+        ...corsHeaders,
       },
     });
   } catch (error) {
     console.error("File download error:", error);
-    return NextResponse.json({ error: "File not found" }, { status: 404 });
+    return NextResponse.json({ error: "File not found" }, { status: 404, headers: corsHeaders });
   }
 }
 
@@ -49,14 +60,14 @@ export async function POST(
     const { content } = await request.json();
     
     if (content === undefined) {
-      return NextResponse.json({ error: "Content is required" }, { status: 400 });
+      return NextResponse.json({ error: "Content is required" }, { status: 400, headers: corsHeaders });
     }
 
     await fs.writeFile(filePath, content, "utf-8");
 
-    return NextResponse.json({ success: true });
+    return NextResponse.json({ success: true }, { headers: corsHeaders });
   } catch (error) {
     console.error("File write error:", error);
-    return NextResponse.json({ error: "Failed to write file" }, { status: 500 });
+    return NextResponse.json({ error: "Failed to write file" }, { status: 500, headers: corsHeaders });
   }
 }

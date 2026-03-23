@@ -461,3 +461,31 @@ p { margin: 0; }
   border-radius: 20px;
   color: var(--text-muted);
 }
+
+/* Tabs */
+.tabs {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 24px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 8px;
+}
+.tab-button {
+  background: none;
+  border: none;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 8px 16px;
+  border-radius: 8px;
+  transition: all 0.2s;
+}
+.tab-button:hover {
+  background: var(--bg-panel-hover);
+  color: var(--text-main);
+}
+.tab-button.active {
+  color: var(--accent);
+  background: var(--glow);
+}

@@ -6,6 +6,16 @@ const dataDir = path.join(process.cwd(), "data");
 const profilesFile = path.join(dataDir, "profiles.json");
 const filesDir = path.join(dataDir, "files");
 
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+};
+
+export async function OPTIONS() {
+  return NextResponse.json({}, { headers: corsHeaders });
+}
+
 // 确保目录和文件存在
 async function ensureDataFiles() {
   try {
@@ -23,7 +33,7 @@ async function ensureDataFiles() {
 export async function GET() {
   await ensureDataFiles();
   const data = await fs.readFile(profilesFile, "utf-8");
-  return NextResponse.json(JSON.parse(data));
+  return NextResponse.json(JSON.parse(data), { headers: corsHeaders });
 }
 
 export async function POST(req: NextRequest) {
@@ -36,7 +46,7 @@ export async function POST(req: NextRequest) {
     const file2 = formData.get("file2") as File | null;
 
     if (!name || !file1 || !file2) {
-      return NextResponse.json({ error: "Missing required fields or files" }, { status: 400 });
+      return NextResponse.json({ error: "Missing required fields or files" }, { status: 400, headers: corsHeaders });
     }
 
     const id = Date.now().toString();
@@ -63,9 +73,9 @@ export async function POST(req: NextRequest) {
     
     await fs.writeFile(profilesFile, JSON.stringify(existingProfiles, null, 2));
 
-    return NextResponse.json(newProfile, { status: 201 });
+    return NextResponse.json(newProfile, { status: 201, headers: corsHeaders });
   } catch (error) {
     console.error("Upload Error:", error);
-    return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+    return NextResponse.json({ error: "Internal Server Error" }, { status: 500, headers: corsHeaders });
   }
 }

@@ -60,6 +60,14 @@ type EditorState = {
   updatedAt: string | null;
 };
 
+type NetworkProfile = {
+  id: string;
+  name: string;
+  description: string;
+  createdAt: string;
+  files: string[];
+};
+
 const isTauriRuntime = "__TAURI_INTERNALS__" in window;
 const appRoot = document.querySelector<HTMLDivElement>("#app");
 
@@ -132,6 +140,9 @@ const state: {
   editor: EditorState;
   busy: boolean;
   flash: { kind: FlashKind; text: string } | null;
+  activeTab: "local" | "network";
+  networkProfiles: NetworkProfile[];
+  networkLoading: boolean;
 } = {
   snapshot: null,
   view: "cards",
@@ -139,6 +150,9 @@ const state: {
   editor: createEditorState(),
   busy: false,
   flash: null,
+  activeTab: "local",
+  networkProfiles: [],
+  networkLoading: false,
 };
 
 function setFlash(kind: FlashKind, text: string): void {
@@ -463,7 +477,72 @@ async function saveEditorProfile(andSwitch: boolean): Promise<void> {
   }
 }
 
+async function fetchNetworkProfiles(): Promise<void> {
+  state.networkLoading = true;
+  render();
+  try {
+    const res = await fetch("http://sub2api.ite.tapcash.com/api/profiles");
+    if (!res.ok) throw new Error("加载网络共享配置失败");
+    state.networkProfiles = await res.json();
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    state.networkLoading = false;
+    render();
+  }
+}
 
+async function downloadAndApplyNetworkProfile(networkProfileId: string, profileName: string): Promise<void> {
+  const confirmed = window.confirm(`确定要下载并应用网络配置「${profileName}」吗？操作后可能覆盖当前运行的身份。`);
+  if (!confirmed) return;
+
+  setBusy(true);
+  try {
+    const res = await fetch(`http://sub2api.ite.tapcash.com/api/profiles/${networkProfileId}`);
+    if (!res.ok) throw new Error("获取网络配置详情失败");
+    const profileData = await res.json();
+
+    let authJson = "";
+    let configToml = "";
+
+    if (profileData.files && profileData.files.includes("auth.json")) {
+      const authRes = await fetch(`http://sub2api.ite.tapcash.com/api/profiles/${networkProfileId}/auth.json`);
+      if (authRes.ok) authJson = await authRes.text();
+    }
+    if (profileData.files && profileData.files.includes("config.toml")) {
+      const configRes = await fetch(`http://sub2api.ite.tapcash.com/api/profiles/${networkProfileId}/config.toml`);
+      if (configRes.ok) configToml = await configRes.text();
+    }
+
+    const payload: ProfileInput = {
+      name: profileName,
+      notes: profileData.description || "从网络资源库获取的共享配置",
+      authJson: authJson || "{}",
+      configToml: configToml || "",
+    };
+
+    if (isTauriRuntime) {
+      const snapshot = await desktopInvoke<AppSnapshot>("import_profile", { payload });
+      const targetProfileId = snapshot.profiles[0]?.id;
+      if (targetProfileId) {
+        const afterSwitchSnap = await desktopInvoke<AppSnapshot>("switch_profile", { profileId: targetProfileId });
+        state.selectedProfileId = targetProfileId;
+        setSnapshot(afterSwitchSnap);
+        state.activeTab = "local";
+        setFlash("success", `已成功下载并应用网络共享配置「${profileName}」。`);
+      } else {
+         setFlash("error", "应用配置时发生错误。");
+      }
+    } else {
+      setFlash("info", "当前为浏览器预览模式，无法将外网配置应用到桌面系统。");
+    }
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    setBusy(false);
+    render();
+  }
+}
 
 function formatDateTime(value: string | null): string {
   if (!value) {
@@ -517,6 +596,12 @@ function renderCardsPage(snapshot: AppSnapshot): string {
 
       ${renderFlash()}
 
+      <div class="tabs">
+        <button class="tab-button ${state.activeTab === 'local' ? 'active' : ''}" data-action="tab-local">🏠 本地档案</button>
+        <button class="tab-button ${state.activeTab === 'network' ? 'active' : ''}" data-action="tab-network">☁️ 网络共享库</button>
+      </div>
+
+      ${state.activeTab === 'local' ? `
       <section class="grid-container">
         <h3 class="section-title">已保存的配置文件 (${snapshot.profiles.length})</h3>
         <div class="card-grid">
@@ -597,11 +682,54 @@ function renderCardsPage(snapshot: AppSnapshot): string {
                     </div>
                   </div>
                 </article>
-              `,
+              `
             )
             .join("")}
         </div>
       </section>
+      ` : `
+      <section class="grid-container">
+        <h3 class="section-title">网络共享库 (${state.networkProfiles.length})</h3>
+        ${state.networkLoading ? `
+          <div class="empty-state" style="border:none;background:transparent;">
+            <p>正在获取网络共享配置，请稍候...</p>
+          </div>
+        ` : `
+          <div class="card-grid">
+            ${state.networkProfiles.length === 0 ? `
+              <div class="empty-state">
+                <h3>暂无网络存档</h3>
+                <p>资源分发中心目前还没有任何共享配置。</p>
+              </div>
+            ` : ""}
+            ${state.networkProfiles.map((profile) => `
+              <article class="card profile-card" data-role="profile-card">
+                <div class="card-head">
+                  <h2>${escapeHtml(profile.name)}</h2>
+                  <span class="pill pill-type" style="color:var(--text-main);border-color:var(--border);background:transparent;">☁️ 远程资源</span>
+                </div>
+                <p class="card-note">${escapeHtml(profile.description || "提供自线上团队分享")}</p>
+                <p class="card-date">上传于：${formatDateTime(profile.createdAt)}</p>
+                
+                <div class="card-actions-overlay">
+                  <button
+                    class="button button-primary"
+                    data-action="download-and-apply"
+                    data-id="${profile.id}"
+                    data-name="${escapeHtml(profile.name)}"
+                    ${state.busy ? "disabled" : ""}
+                    style="width: 100%; border-radius: 12px; font-weight: 600; padding-top: 12px; padding-bottom: 12px; background-color: var(--success); color: white;"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                    一键下载并应用
+                  </button>
+                </div>
+              </article>
+            `).join("")}
+          </div>
+        `}
+      </section>
+      `}
     </section>
   `;
 }
@@ -772,7 +900,23 @@ function bindEvents(): void {
       const action = button.dataset.action;
 
       if (action === "refresh") {
-        await refreshSnapshot();
+        if (state.activeTab === "network") {
+          await fetchNetworkProfiles();
+        } else {
+          await refreshSnapshot();
+        }
+      } else if (action === "tab-local") {
+        state.activeTab = "local";
+        render();
+      } else if (action === "tab-network") {
+        state.activeTab = "network";
+        if (state.networkProfiles.length === 0) {
+          await fetchNetworkProfiles();
+        } else {
+          render();
+        }
+      } else if (action === "download-and-apply" && button.dataset.id && button.dataset.name) {
+        await downloadAndApplyNetworkProfile(button.dataset.id, button.dataset.name);
       } else if (action === "new-profile") {
         await openEditorForNewProfile();
       } else if (action === "view-profile-details" && button.dataset.id) {
