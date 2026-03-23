@@ -481,7 +481,7 @@ async function fetchNetworkProfiles(): Promise<void> {
   state.networkLoading = true;
   render();
   try {
-    const res = await fetch("http://sub2api.ite.tapcash.com/api/profiles");
+    const res = await fetch("http://sub2api.ite.tapcash.com/codex/api/profiles");
     if (!res.ok) throw new Error("加载网络共享配置失败");
     state.networkProfiles = await res.json();
   } catch (error) {
@@ -498,7 +498,7 @@ async function downloadAndApplyNetworkProfile(networkProfileId: string, profileN
 
   setBusy(true);
   try {
-    const res = await fetch(`http://sub2api.ite.tapcash.com/api/profiles/${networkProfileId}`);
+    const res = await fetch(`http://sub2api.ite.tapcash.com/codex/api/profiles/${networkProfileId}`);
     if (!res.ok) throw new Error("获取网络配置详情失败");
     const profileData = await res.json();
 
@@ -506,11 +506,11 @@ async function downloadAndApplyNetworkProfile(networkProfileId: string, profileN
     let configToml = "";
 
     if (profileData.files && profileData.files.includes("auth.json")) {
-      const authRes = await fetch(`http://sub2api.ite.tapcash.com/api/profiles/${networkProfileId}/auth.json`);
+      const authRes = await fetch(`http://sub2api.ite.tapcash.com/codex/api/profiles/${networkProfileId}/auth.json`);
       if (authRes.ok) authJson = await authRes.text();
     }
     if (profileData.files && profileData.files.includes("config.toml")) {
-      const configRes = await fetch(`http://sub2api.ite.tapcash.com/api/profiles/${networkProfileId}/config.toml`);
+      const configRes = await fetch(`http://sub2api.ite.tapcash.com/codex/api/profiles/${networkProfileId}/config.toml`);
       if (configRes.ok) configToml = await configRes.text();
     }
 
