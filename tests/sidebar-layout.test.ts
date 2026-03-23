@@ -209,18 +209,26 @@ test("deletes a saved profile after confirmation", async () => {
     configurable: true,
     value: {},
   });
-  vi.stubGlobal("confirm", vi.fn(() => true));
 
   await import("../src/main");
   await flushUi();
 
+  // Click the delete button — this opens the custom DOM confirm dialog (nativeConfirm)
   document
     .querySelector<HTMLButtonElement>('[data-action="delete-profile"][data-id="profile-1"]')
     ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
   await flushUi();
 
-  expect(window.confirm).toHaveBeenCalled();
+  // Click the "确定" / OK button inside the nativeConfirm overlay
+  const okBtn = document.querySelector<HTMLButtonElement>("#btn-ok");
+  expect(okBtn).not.toBeNull();
+  okBtn?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+  await flushUi();
+  await flushUi();
+
   expect(invokeMock).toHaveBeenCalledWith("delete_profile", { profileId: "profile-1" });
   expect(document.querySelectorAll("[data-role='profile-card']")).toHaveLength(1);
 });
+
