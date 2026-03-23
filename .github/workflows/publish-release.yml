@@ -28,6 +28,15 @@ jobs:
         with:
           ref: ${{ github.event.inputs.ref || github.ref }}
 
+      - name: Sync version from tag
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag_name || github.ref_name }}"
+          VERSION="${TAG#v}"
+          echo "Setting version to $VERSION"
+          sed -i "s/^version = .*/version = \"$VERSION\"/" src-tauri/Cargo.toml
+          node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync('package.json')); p.version='$VERSION'; fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n');"
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -66,6 +75,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Sync version from tag
+        run: |
+          TAG="${{ github.event.inputs.tag_name || github.ref_name }}"
+          VERSION="${TAG#v}"
+          echo "Setting version to $VERSION"
+          sed -i '' "s/^version = .*/version = \"$VERSION\"/" src-tauri/Cargo.toml
+          node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync('package.json')); p.version='$VERSION'; fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n');"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
