@@ -95,12 +95,32 @@ pub struct InstallLocationStatus {
     pub message: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSyncResult {
+    pub synced: usize,
+    pub imported: usize,
+    pub updated: usize,
+    pub profiles: Vec<ProfileSummary>,
+}
+
 #[derive(Debug, Deserialize)]
 struct GithubLatestRelease {
     tag_name: String,
     html_url: String,
     published_at: Option<String>,
     name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteProfileRecord {
+    id: String,
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -127,6 +147,8 @@ struct ProfileMetadata {
     pub id: String,
     pub name: String,
     pub notes: String,
+    #[serde(default)]
+    pub remote_profile_id: Option<String>,
     #[serde(default = "unknown_auth_type_label")]
     pub auth_type_label: String,
     pub created_at: DateTime<Utc>,
@@ -255,6 +277,7 @@ impl ProfileManager {
             profile_id,
             name.to_string(),
             input.notes.trim().to_string(),
+            None,
             now,
             now,
             &fs::read_to_string(profile_dir.join("auth.json"))?,
@@ -350,6 +373,7 @@ impl ProfileManager {
             existing_metadata.id,
             name.to_string(),
             input.notes.trim().to_string(),
+            existing_metadata.remote_profile_id.clone(),
             existing_metadata.created_at,
             Utc::now(),
             &fs::read_to_string(profile_dir.join("auth.json"))?,
@@ -358,6 +382,80 @@ impl ProfileManager {
 
         self.write_profile_metadata(&profile_dir, &metadata)?;
         Ok(ProfileSummary::from(metadata))
+    }
+
+    pub fn resolve_profile_selector(&self, selector: &str) -> Result<ProfileSummary, AppError> {
+        let selector = selector.trim();
+        if selector.is_empty() {
+            return Err(AppError::Message(
+                "Profile selector cannot be empty.".into(),
+            ));
+        }
+
+        if let Some(profile) = self.load_profile_summary(selector)? {
+            return Ok(profile);
+        }
+
+        let matches = self
+            .list_profiles()?
+            .into_iter()
+            .filter(|profile| profile.name == selector)
+            .collect::<Vec<_>>();
+
+        match matches.as_slice() {
+            [profile] => Ok(profile.clone()),
+            [] => Err(AppError::ProfileNotFound(selector.to_string())),
+            _ => Err(AppError::Message(format!(
+                "Multiple profiles matched `{selector}`. Use the profile id instead."
+            ))),
+        }
+    }
+
+    pub fn sync_remote_profiles(&self, profiles_url: &str) -> Result<RemoteSyncResult, AppError> {
+        let profiles_url = normalize_remote_profiles_url(profiles_url);
+        let remote_profiles = fetch_remote_profile_index(&profiles_url)?;
+        let mut synced_profiles = Vec::new();
+        let mut imported = 0;
+        let mut updated = 0;
+
+        for remote_profile in remote_profiles {
+            let detail_url = format!("{profiles_url}/{}", remote_profile.id);
+            let detail = fetch_remote_profile_detail(&detail_url)?;
+
+            if !detail.files.iter().any(|file| file == "auth.json")
+                || !detail.files.iter().any(|file| file == "config.toml")
+            {
+                continue;
+            }
+
+            let auth_json = fetch_remote_text_file(&format!("{detail_url}/auth.json"))?;
+            let config_toml = fetch_remote_text_file(&format!("{detail_url}/config.toml"))?;
+
+            let payload = ProfileInput {
+                name: detail.name.clone(),
+                notes: detail.description.clone(),
+                auth_json,
+                config_toml,
+            };
+
+            let profile =
+                if let Some(existing) = self.find_profile_metadata_by_remote_id(&detail.id)? {
+                    updated += 1;
+                    self.update_profile(&existing.id, payload)?
+                } else {
+                    imported += 1;
+                    self.import_remote_profile(&detail.id, payload)?
+                };
+
+            synced_profiles.push(profile);
+        }
+
+        Ok(RemoteSyncResult {
+            synced: synced_profiles.len(),
+            imported,
+            updated,
+            profiles: synced_profiles,
+        })
     }
 
     pub fn delete_profile(&mut self, profile_id: &str) -> Result<(), AppError> {
@@ -734,6 +832,7 @@ impl ProfileManager {
         id: String,
         name: String,
         notes: String,
+        remote_profile_id: Option<String>,
         created_at: DateTime<Utc>,
         updated_at: DateTime<Utc>,
         auth_json: &str,
@@ -743,6 +842,7 @@ impl ProfileManager {
             id,
             name,
             notes,
+            remote_profile_id,
             auth_type_label: detect_auth_type_label(auth_json, config_toml)?,
             created_at,
             updated_at,
@@ -759,10 +859,8 @@ impl ProfileManager {
     ) -> Result<(), AppError> {
         let profile_dir = self.profile_dir(profile_id)?;
         let existing_metadata = self.read_profile_metadata(&profile_dir)?;
-        let normalized_config = normalize_config_toml_for_auth(
-            auth_json,
-            &repair_illegal_config_toml(config_toml),
-        )?;
+        let normalized_config =
+            normalize_config_toml_for_auth(auth_json, &repair_illegal_config_toml(config_toml))?;
 
         fs::write(profile_dir.join("auth.json"), auth_json)?;
         fs::write(profile_dir.join("config.toml"), &normalized_config)?;
@@ -771,6 +869,7 @@ impl ProfileManager {
             existing_metadata.id,
             existing_metadata.name,
             existing_metadata.notes,
+            existing_metadata.remote_profile_id.clone(),
             existing_metadata.created_at,
             Utc::now(),
             auth_json,
@@ -797,6 +896,48 @@ impl ProfileManager {
         Ok(Some(ProfileSummary::from(
             self.read_profile_metadata(&profile_dir)?,
         )))
+    }
+
+    fn find_profile_metadata_by_remote_id(
+        &self,
+        remote_profile_id: &str,
+    ) -> Result<Option<ProfileMetadata>, AppError> {
+        if !self.profiles_dir().exists() {
+            return Ok(None);
+        }
+
+        for entry in fs::read_dir(self.profiles_dir())? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+
+            let meta_path = entry.path().join("meta.json");
+            if !meta_path.exists() {
+                continue;
+            }
+
+            let metadata =
+                serde_json::from_str::<ProfileMetadata>(&fs::read_to_string(meta_path)?)?;
+            if metadata.remote_profile_id.as_deref() == Some(remote_profile_id) {
+                return Ok(Some(metadata));
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn import_remote_profile(
+        &self,
+        remote_profile_id: &str,
+        input: ProfileInput,
+    ) -> Result<ProfileSummary, AppError> {
+        let imported = self.import_profile(input)?;
+        let profile_dir = self.profile_dir(&imported.id)?;
+        let mut metadata = self.read_profile_metadata(&profile_dir)?;
+        metadata.remote_profile_id = Some(remote_profile_id.to_string());
+        self.write_profile_metadata(&profile_dir, &metadata)?;
+        Ok(ProfileSummary::from(metadata))
     }
 
     fn profiles_dir(&self) -> PathBuf {
@@ -956,6 +1097,72 @@ impl From<ProfileMetadata> for ProfileSummary {
     }
 }
 
+fn normalize_remote_profiles_url(input: &str) -> String {
+    let trimmed = input.trim().trim_end_matches('/');
+    if trimmed.ends_with("/profiles") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/profiles")
+    }
+}
+
+fn remote_request(url: &str) -> ureq::Request {
+    let mut request = ureq::get(url).set("User-Agent", "codex-auth-switch-cli");
+    if let Ok(token) = std::env::var("CODEX_AUTH_SWITCH_REMOTE_TOKEN") {
+        let header_value = format!("Bearer {}", token.trim());
+        request = request.set("Authorization", &header_value);
+    }
+    request
+}
+
+fn fetch_remote_profile_index(url: &str) -> Result<Vec<RemoteProfileRecord>, AppError> {
+    let response = remote_request(&normalize_remote_profiles_url(url))
+        .call()
+        .map_err(|error| AppError::Message(format!("Failed to fetch remote profiles: {error}")))?;
+
+    response
+        .into_json::<Vec<RemoteProfileRecord>>()
+        .map_err(|error| AppError::Message(format!("Failed to parse remote profiles: {error}")))
+}
+
+fn fetch_remote_profile_detail(url: &str) -> Result<RemoteProfileRecord, AppError> {
+    let response = remote_request(url).call().map_err(|error| {
+        AppError::Message(format!("Failed to fetch remote profile detail: {error}"))
+    })?;
+
+    response
+        .into_json::<RemoteProfileRecord>()
+        .map_err(|error| {
+            AppError::Message(format!("Failed to parse remote profile detail: {error}"))
+        })
+}
+
+fn fetch_remote_text_file(url: &str) -> Result<String, AppError> {
+    let response = remote_request(url)
+        .call()
+        .map_err(|error| AppError::Message(format!("Failed to fetch remote file: {error}")))?;
+
+    response
+        .into_string()
+        .map_err(|error| AppError::Message(format!("Failed to read remote file: {error}")))
+}
+
+pub fn default_cli_app_data_dir() -> Result<PathBuf, AppError> {
+    if let Ok(path) = std::env::var("CODEX_AUTH_SWITCH_APP_DATA_DIR") {
+        let path = path.trim();
+        if !path.is_empty() {
+            return Ok(PathBuf::from(path));
+        }
+    }
+
+    let base_dir = dirs::data_local_dir()
+        .or_else(dirs::data_dir)
+        .or_else(dirs::home_dir)
+        .ok_or_else(|| AppError::Message("Unable to resolve the CLI app data directory.".into()))?;
+
+    Ok(base_dir.join("com.lucifer.codex-auth-switch"))
+}
+
 pub fn default_codex_target_dir() -> Result<PathBuf, AppError> {
     let home_dir = dirs::home_dir()
         .ok_or_else(|| AppError::Message("Unable to resolve the user home directory.".into()))?;
@@ -1002,8 +1209,7 @@ pub fn check_install_location() -> Result<InstallLocationStatus, AppError> {
 fn install_location_status_for_path(path: &Path) -> InstallLocationStatus {
     #[cfg(target_os = "macos")]
     {
-        let install_root = macos_app_bundle_root(path)
-            .unwrap_or_else(|| path.to_path_buf());
+        let install_root = macos_app_bundle_root(path).unwrap_or_else(|| path.to_path_buf());
         let system_applications = Path::new("/Applications");
         let user_applications = dirs::home_dir().map(|home| home.join("Applications"));
         let in_valid_applications_dir = install_root.starts_with(system_applications)
@@ -1232,12 +1438,10 @@ mod tests {
 
         assert!(!status.update_safe);
         assert!(status.requires_applications_install);
-        assert!(
-            status
-                .message
-                .as_deref()
-                .is_some_and(|message| message.contains("Applications"))
-        );
+        assert!(status
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("Applications")));
     }
 }
 

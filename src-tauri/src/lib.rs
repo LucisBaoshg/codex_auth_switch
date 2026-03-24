@@ -2,8 +2,8 @@ pub mod core;
 
 use crate::core::{
     check_for_update, check_install_location as resolve_install_location, open_url,
-    restart_codex_app, AppSnapshot,
-    InstallLocationStatus, ProfileDocument, ProfileInput, ProfileManager, UpdateCheckResult,
+    restart_codex_app, AppSnapshot, InstallLocationStatus, ProfileDocument, ProfileInput,
+    ProfileManager, UpdateCheckResult,
 };
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
