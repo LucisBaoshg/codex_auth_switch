@@ -28,9 +28,12 @@ jobs:
           - name: Windows
             platform: windows-latest
             args: --bundles nsis
-          - name: macOS
+          - name: macOS Apple Silicon
             platform: macos-latest
-            args: --bundles app,dmg
+            args: --target aarch64-apple-darwin --bundles app,dmg
+          - name: macOS Intel
+            platform: macos-15-intel
+            args: --target x86_64-apple-darwin --bundles app,dmg
 
     steps:
       - name: Checkout repository
