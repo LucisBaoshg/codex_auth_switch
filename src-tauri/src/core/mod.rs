@@ -86,6 +86,15 @@ pub struct UpdateCheckResult {
     pub release_name: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallLocationStatus {
+    pub update_safe: bool,
+    pub requires_applications_install: bool,
+    pub install_path: String,
+    pub message: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct GithubLatestRelease {
     tag_name: String,
@@ -985,6 +994,69 @@ pub fn check_for_update() -> Result<UpdateCheckResult, AppError> {
     })
 }
 
+pub fn check_install_location() -> Result<InstallLocationStatus, AppError> {
+    let exe_path = std::env::current_exe()?;
+    Ok(install_location_status_for_path(&exe_path))
+}
+
+fn install_location_status_for_path(path: &Path) -> InstallLocationStatus {
+    #[cfg(target_os = "macos")]
+    {
+        let install_root = macos_app_bundle_root(path)
+            .unwrap_or_else(|| path.to_path_buf());
+        let system_applications = Path::new("/Applications");
+        let user_applications = dirs::home_dir().map(|home| home.join("Applications"));
+        let in_valid_applications_dir = install_root.starts_with(system_applications)
+            || user_applications
+                .as_ref()
+                .is_some_and(|applications| install_root.starts_with(applications));
+
+        if in_valid_applications_dir {
+            return InstallLocationStatus {
+                update_safe: true,
+                requires_applications_install: false,
+                install_path: install_root.display().to_string(),
+                message: None,
+            };
+        }
+
+        return InstallLocationStatus {
+            update_safe: false,
+            requires_applications_install: true,
+            install_path: install_root.display().to_string(),
+            message: Some(
+                "当前应用不在 Applications 文件夹中。请先将 Codex Auth Switch 拖到 Applications 后再重新打开，然后再执行更新。".into(),
+            ),
+        };
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        InstallLocationStatus {
+            update_safe: true,
+            requires_applications_install: false,
+            install_path: path.display().to_string(),
+            message: None,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_app_bundle_root(path: &Path) -> Option<PathBuf> {
+    let mut current = Some(path);
+    while let Some(candidate) = current {
+        if candidate
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("app"))
+        {
+            return Some(candidate.to_path_buf());
+        }
+        current = candidate.parent();
+    }
+    None
+}
+
 fn normalize_version_string(version: &str) -> String {
     version
         .trim()
@@ -1134,6 +1206,38 @@ pub fn restart_codex_app() -> Result<(), AppError> {
         Err(AppError::Message(
             "Restart Codex is currently only supported on macOS.".into(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::install_location_status_for_path;
+    use std::path::Path;
+
+    #[test]
+    fn install_location_check_accepts_system_applications_bundle() {
+        let status = install_location_status_for_path(Path::new(
+            "/Applications/Codex Auth Switch.app/Contents/MacOS/Codex Auth Switch",
+        ));
+
+        assert!(status.update_safe);
+        assert!(!status.requires_applications_install);
+    }
+
+    #[test]
+    fn install_location_check_flags_non_applications_bundle() {
+        let status = install_location_status_for_path(Path::new(
+            "/Users/lucifer/Downloads/Codex Auth Switch.app/Contents/MacOS/Codex Auth Switch",
+        ));
+
+        assert!(!status.update_safe);
+        assert!(status.requires_applications_install);
+        assert!(
+            status
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("Applications"))
+        );
     }
 }
 

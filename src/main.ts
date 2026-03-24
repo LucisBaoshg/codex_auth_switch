@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { check as checkForAppUpdate } from "@tauri-apps/plugin-updater";
 import "./styles.css";
 
@@ -57,6 +58,13 @@ type UpdateCheckResult = {
   releaseUrl: string;
   publishedAt: string | null;
   releaseName: string | null;
+};
+
+type InstallLocationStatus = {
+  updateSafe: boolean;
+  requiresApplicationsInstall: boolean;
+  installPath: string;
+  message: string | null;
 };
 
 type EditorState = {
@@ -153,6 +161,7 @@ const state: {
   activeTab: "local" | "network";
   networkProfiles: NetworkProfile[];
   networkLoading: boolean;
+  appVersion: string | null;
   update: {
     checking: boolean;
     lastResult: UpdateCheckResult | null;
@@ -167,6 +176,7 @@ const state: {
   activeTab: "local",
   networkProfiles: [],
   networkLoading: false,
+  appVersion: null,
   update: {
     checking: false,
     lastResult: null,
@@ -289,6 +299,22 @@ async function refreshSnapshot(): Promise<void> {
     setFlash("error", error instanceof Error ? error.message : String(error));
   } finally {
     state.busy = false;
+    render();
+  }
+}
+
+async function loadAppVersion(): Promise<void> {
+  if (!isTauriRuntime) {
+    state.appVersion = "preview";
+    render();
+    return;
+  }
+
+  try {
+    state.appVersion = await getVersion();
+  } catch {
+    state.appVersion = null;
+  } finally {
     render();
   }
 }
@@ -575,6 +601,17 @@ async function checkForUpdate(): Promise<void> {
   state.update.checking = true;
   render();
   try {
+    const installLocation = await desktopInvoke<InstallLocationStatus>("check_install_location");
+    if (!installLocation.updateSafe) {
+      state.update.lastResult = null;
+      setFlash(
+        "error",
+        installLocation.message ??
+          "当前安装位置不支持应用内更新。请先将应用移动到标准安装目录后再重试。",
+      );
+      return;
+    }
+
     const update = await checkForAppUpdate();
     if (!update) {
       state.update.lastResult = null;
@@ -622,7 +659,15 @@ async function checkForUpdate(): Promise<void> {
 
     setFlash("success", "更新已安装完成。请重新打开应用进入新版本。");
   } catch (error) {
-    setFlash("error", error instanceof Error ? error.message : String(error));
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.toLowerCase().includes("cross-device link")) {
+      setFlash(
+        "error",
+        "更新失败：当前应用不在标准安装目录中。请先将 Codex Auth Switch 拖到 Applications 文件夹后重新打开，再执行更新。",
+      );
+    } else {
+      setFlash("error", message);
+    }
   } finally {
     state.update.checking = false;
     render();
@@ -664,20 +709,47 @@ function renderFlash(): string {
 function renderCardsPage(snapshot: AppSnapshot): string {
   const activeProfile =
     snapshot.profiles.find((profile) => profile.id === snapshot.activeProfileId) ?? null;
+  const hasPendingUpdate = state.update.lastResult?.hasUpdate ?? false;
+  const currentVersionText = state.update.lastResult?.currentVersion ?? state.appVersion ?? "--";
+  const updateLabelText = hasPendingUpdate ? "发现新版本" : "当前版本";
+  const updateVersionText = hasPendingUpdate
+    ? `v${state.update.lastResult?.latestVersion ?? "--"}`
+    : `v${currentVersionText}`;
+  const updateActionText = state.update.checking
+    ? "检查中…"
+    : hasPendingUpdate
+      ? "立即更新"
+      : "检查更新";
+  const updateHint = hasPendingUpdate
+    ? `当前 v${currentVersionText}，点击下载并安装`
+    : "通过 GitHub Release 获取最新安装包";
+  const updateEntryClass = hasPendingUpdate
+    ? "version-update-entry version-update-entry-available"
+    : "version-update-entry";
 
   return `
     <section class="cards-page" data-page="cards">
       <header class="top-nav" data-tauri-drag-region>
-        <div>
+        <div class="top-nav-copy">
           <h1>Codex Auth Switch</h1>
           <p>统一管理与快速分发您的环境代理和身份配置。</p>
         </div>
-        <div class="top-nav-actions">
-          <button class="icon-button" title="刷新状态" data-role="global-refresh" data-action="refresh" ${state.busy ? "disabled" : ""}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
-          </button>
-          <button class="icon-button" title="检查更新" data-role="check-update" data-action="check-update" ${state.busy || state.update.checking ? "disabled" : ""}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></svg>
+        <div class="top-nav-actions" style="align-items: center;">
+          <button
+            class="${updateEntryClass}"
+            title="检查更新"
+            data-role="update-entry"
+            data-action="check-update"
+            ${state.busy || state.update.checking ? "disabled" : ""}
+          >
+            <span class="version-update-copy">
+              <span class="version-update-label">${escapeHtml(updateLabelText)}</span>
+              <strong>${escapeHtml(updateVersionText)}</strong>
+            </span>
+            <span class="version-update-action">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"></polyline></svg>
+              ${escapeHtml(updateActionText)}
+            </span>
           </button>
         </div>
       </header>
@@ -691,25 +763,18 @@ function renderCardsPage(snapshot: AppSnapshot): string {
 
       ${state.activeTab === 'local' ? `
       <section class="grid-container">
-        <h3 class="section-title">已保存的配置文件 (${snapshot.profiles.length})</h3>
+        <div class="section-header">
+          <h3 class="section-title">已保存的配置文件 (${snapshot.profiles.length})</h3>
+          <button class="icon-button section-refresh-button" title="刷新状态" data-role="global-refresh" data-action="refresh" ${state.busy ? "disabled" : ""}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+          </button>
+        </div>
         <div class="card-grid">
           <button class="card add-profile-card" data-role="add-card" data-action="new-profile" ${state.busy ? "disabled" : ""}>
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
             加配置
           </button>
-          <article class="card current-config-card" data-role="current-config-card">
-            <div class="card-head">
-              <h2>${activeProfile ? escapeHtml(activeProfile.name) : "未知配置"}</h2>
-              ${activeProfile ? `<span class="pill pill-type">${escapeHtml(activeProfile.authTypeLabel)}</span>` : ""}
-            </div>
-            <p class="card-note">${
-              snapshot.targetAuthExists && snapshot.targetConfigExists
-                ? activeProfile
-                  ? escapeHtml(`目前系统正在平稳运行「${activeProfile.name}」身份配置档案。`)
-                  : "检测到当前系统的 auth.json 与 config.toml 文件尚未在合集中备份。"
-                : "在当前目录中未检测到完整的 Codex 配置文件。"
-            }</p>
-          </article>
+
           ${snapshot.profiles.length === 0 ? `
             <div class="empty-state">
               <h3>暂无存档记录</h3>
@@ -729,25 +794,29 @@ function renderCardsPage(snapshot: AppSnapshot): string {
                   data-role="profile-card"
                   data-state="${snapshot.activeProfileId === profile.id ? "live" : "idle"}"
                 >
-                  ${snapshot.activeProfileId === profile.id ? `<div class="card-glow"></div>` : ""}
                   <div class="card-head">
                     <h2>${escapeHtml(profile.name)}</h2>
-                    <span class="pill pill-type">${escapeHtml(profile.authTypeLabel)}</span>
+                    <div style="display: flex; gap: 8px; align-items: center;">
+                      ${snapshot.activeProfileId === profile.id ? `
+                        <div class="status-badge">
+                          <div class="status-dot status-dot-pulse"></div>
+                          <span>Active</span>
+                        </div>
+                      ` : ""}
+                      <span class="pill pill-type">${escapeHtml(profile.authTypeLabel)}</span>
+                    </div>
                   </div>
                   <p class="card-note" style="${!profile.notes ? 'opacity:0.5;font-style:italic;' : ''}">${escapeHtml(profile.notes || "暂无备注")}</p>
-                  <p class="card-date">更新于：${formatDateTime(profile.updatedAt)}</p>
                   
                   <div class="card-actions-overlay">
-                    <button
-                      class="button ${snapshot.activeProfileId === profile.id ? "button-active" : "button-secondary"}"
-                      data-action="switch"
-                      data-id="${profile.id}"
-                      data-name="${escapeHtml(profile.name)}"
-                      ${state.busy ? "disabled" : ""}
-                    >
-                      ${snapshot.activeProfileId === profile.id ? "当前运行中" : "应用此配置"}
-                    </button>
-                    <div class="card-secondary-actions">
+                    <div style="display: flex; flex-direction: column; gap: 4px; flex-grow: 1;">
+                      <p class="card-date">更新于：${formatDateTime(profile.updatedAt)}</p>
+                      ${snapshot.activeProfileId === profile.id 
+                        ? `<div class="env-active-label"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg> 环境生效中</div>` 
+                        : `<button class="button button-secondary" style="width:100%" data-action="switch" data-id="${profile.id}" data-name="${escapeHtml(profile.name)}" ${state.busy ? "disabled" : ""}>应用此配置</button>`}
+                    </div>
+                    
+                    <div class="card-secondary-actions" style="align-self: flex-end; padding-bottom: 2px;">
                       <button
                         class="icon-button"
                         title="查看文件详细内容"
@@ -777,7 +846,12 @@ function renderCardsPage(snapshot: AppSnapshot): string {
       </section>
       ` : `
       <section class="grid-container">
-        <h3 class="section-title">网络共享库 (${state.networkProfiles.length})</h3>
+        <div class="section-header">
+          <h3 class="section-title">网络共享库 (${state.networkProfiles.length})</h3>
+          <button class="icon-button section-refresh-button" title="刷新状态" data-role="global-refresh" data-action="refresh" ${state.busy ? "disabled" : ""}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+          </button>
+        </div>
         ${state.networkLoading ? `
           <div class="empty-state" style="border:none;background:transparent;">
             <p>正在获取网络共享配置，请稍候...</p>
@@ -797,20 +871,22 @@ function renderCardsPage(snapshot: AppSnapshot): string {
                   <span class="pill pill-type" style="color:var(--text-main);border-color:var(--border);background:transparent;">☁️ 远程资源</span>
                 </div>
                 <p class="card-note">${escapeHtml(profile.description || "提供自线上团队分享")}</p>
-                <p class="card-date">上传于：${formatDateTime(profile.createdAt)}</p>
                 
                 <div class="card-actions-overlay">
-                  <button
-                    class="button button-primary"
-                    data-action="download-and-apply"
-                    data-id="${profile.id}"
-                    data-name="${escapeHtml(profile.name)}"
-                    ${state.busy ? "disabled" : ""}
-                    style="width: 100%; border-radius: 12px; font-weight: 600; padding-top: 12px; padding-bottom: 12px; background-color: var(--success); color: white;"
-                  >
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-                    一键下载并应用
-                  </button>
+                  <div style="display: flex; flex-direction: column; gap: 4px; flex-grow: 1;">
+                    <p class="card-date">上传于：${formatDateTime(profile.createdAt)}</p>
+                    <button
+                      class="button button-primary"
+                      data-action="download-and-apply"
+                      data-id="${profile.id}"
+                      data-name="${escapeHtml(profile.name)}"
+                      ${state.busy ? "disabled" : ""}
+                      style="width: 100%;"
+                    >
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                      安装并应用
+                    </button>
+                  </div>
                 </div>
               </article>
             `).join("")}
@@ -1039,4 +1115,5 @@ function bindEvents(): void {
 }
 
 render();
+void loadAppVersion();
 void refreshSnapshot();

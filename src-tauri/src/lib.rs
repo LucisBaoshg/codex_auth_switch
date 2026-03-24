@@ -1,8 +1,9 @@
 pub mod core;
 
 use crate::core::{
-    check_for_update, open_url, restart_codex_app, AppSnapshot, ProfileDocument, ProfileInput,
-    ProfileManager, UpdateCheckResult,
+    check_for_update, check_install_location as resolve_install_location, open_url,
+    restart_codex_app, AppSnapshot,
+    InstallLocationStatus, ProfileDocument, ProfileInput, ProfileManager, UpdateCheckResult,
 };
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
@@ -133,6 +134,11 @@ fn open_update_page(url: String) -> Result<(), String> {
     open_url(&url).map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn check_install_location() -> Result<InstallLocationStatus, String> {
+    resolve_install_location().map_err(|error| error.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -151,7 +157,8 @@ pub fn run() {
             restart_codex,
             fix_session_database,
             check_update,
-            open_update_page
+            open_update_page,
+            check_install_location
         ])
         .run(tauri::generate_context!())
         .expect("error while running Codex Auth Switch");
