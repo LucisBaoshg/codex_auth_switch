@@ -1,6 +1,6 @@
 [package]
 name = "codex-auth-switch"
-version = "1.4.0"
+version = "1.4.1"
 description = "A desktop utility for switching between Codex auth profiles"
 authors = ["Codex"]
 edition = "2021"
