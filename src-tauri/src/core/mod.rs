@@ -1,6 +1,8 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::{DateTime, Utc};
+use rusqlite::Connection;
+use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -71,6 +73,25 @@ pub struct AppSnapshot {
     pub last_switch_profile_id: Option<String>,
     pub last_switched_at: Option<DateTime<Utc>>,
     pub profiles: Vec<ProfileSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCheckResult {
+    pub has_update: bool,
+    pub current_version: String,
+    pub latest_version: String,
+    pub release_url: String,
+    pub published_at: Option<String>,
+    pub release_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubLatestRelease {
+    tag_name: String,
+    html_url: String,
+    published_at: Option<String>,
+    name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -207,7 +228,10 @@ impl ProfileManager {
         }
 
         validate_auth_json(&input.auth_json)?;
-        let normalized_config = repair_illegal_config_toml(&input.config_toml);
+        let normalized_config = normalize_config_toml_for_auth(
+            &input.auth_json,
+            &repair_illegal_config_toml(&input.config_toml),
+        )?;
         validate_config_toml(&normalized_config)?;
 
         let now = Utc::now();
@@ -301,7 +325,10 @@ impl ProfileManager {
         }
 
         validate_auth_json(&input.auth_json)?;
-        let normalized_config = repair_illegal_config_toml(&input.config_toml);
+        let normalized_config = normalize_config_toml_for_auth(
+            &input.auth_json,
+            &repair_illegal_config_toml(&input.config_toml),
+        )?;
         validate_config_toml(&normalized_config)?;
 
         let profile_dir = self.profile_dir(profile_id)?;
@@ -350,14 +377,25 @@ impl ProfileManager {
     }
 
     pub fn fix_session_database_and_configs(&self) -> Result<(), AppError> {
-        let target_dir = default_codex_target_dir()?;
+        let target_dir = self.target_dir.clone();
         let target_config = target_dir.join("config.toml");
+        let target_auth = target_dir.join("auth.json");
         let mut active_provider = "openai".to_string();
 
         if target_config.exists() {
             if let Ok(content) = fs::read_to_string(&target_config) {
-                // FIRST: Self repair if illegal openai provider is used
-                let repaired = repair_illegal_config_toml(&content);
+                let repaired = if target_auth.exists() {
+                    match fs::read_to_string(&target_auth) {
+                        Ok(auth_json) => normalize_config_toml_for_auth(
+                            &auth_json,
+                            &repair_illegal_config_toml(&content),
+                        )
+                        .unwrap_or_else(|_| repair_illegal_config_toml(&content)),
+                        Err(_) => repair_illegal_config_toml(&content),
+                    }
+                } else {
+                    repair_illegal_config_toml(&content)
+                };
                 if repaired != content {
                     let _ = fs::write(&target_config, &repaired);
                 }
@@ -383,9 +421,21 @@ impl ProfileManager {
             if let Ok(entries) = fs::read_dir(profiles_dir) {
                 for entry in entries.flatten() {
                     let config_path = entry.path().join("config.toml");
+                    let auth_path = entry.path().join("auth.json");
                     if config_path.exists() {
                         if let Ok(content) = fs::read_to_string(&config_path) {
-                            let repaired = repair_illegal_config_toml(&content);
+                            let repaired = if auth_path.exists() {
+                                match fs::read_to_string(&auth_path) {
+                                    Ok(auth_json) => normalize_config_toml_for_auth(
+                                        &auth_json,
+                                        &repair_illegal_config_toml(&content),
+                                    )
+                                    .unwrap_or_else(|_| repair_illegal_config_toml(&content)),
+                                    Err(_) => repair_illegal_config_toml(&content),
+                                }
+                            } else {
+                                repair_illegal_config_toml(&content)
+                            };
                             if repaired != content {
                                 let _ = fs::write(&config_path, &repaired);
                             }
@@ -395,38 +445,68 @@ impl ProfileManager {
             }
         }
 
-        #[cfg(unix)]
-        {
-            // 1. Fix SQLite Database (Scan all state_*.sqlite dynamically)
-            if let Ok(entries) = fs::read_dir(&target_dir) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name();
-                    let name_str = name.to_string_lossy();
-                    if name_str.starts_with("state_") && name_str.ends_with(".sqlite") {
-                        let sql = format!("UPDATE threads SET model_provider = '{}';", active_provider.replace("'", "''"));
-                        let _ = Command::new("sqlite3")
-                            .arg(entry.path())
-                            .arg(&sql)
-                            .status();
-                    }
-                }
-            }
+        self.update_session_databases(&target_dir, &active_provider);
+        self.update_session_jsonl(&target_dir, &active_provider);
 
-            // 2. Fix all JSONL session files 
-            let sessions_dir = target_dir.join("sessions");
-            let archived_dir = target_dir.join("archived_sessions");
-            
-            for dir in &[sessions_dir, archived_dir] {
-                if dir.exists() {
-                    let _ = Command::new("bash")
-                        .arg("-c")
-                        .arg(format!("find \"{}\" -type f -name '*.jsonl' -exec sed -i '' -e 's/\"model_provider\":\"[^\"]*\"/\"model_provider\":\"{}\"/g' {{}} +", dir.display(), active_provider.replace("'", "\\'")))
-                        .status();
+        Ok(())
+    }
+
+    fn update_session_databases(&self, target_dir: &Path, provider: &str) {
+        if let Ok(entries) = fs::read_dir(target_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if !name_str.starts_with("state_") || !name_str.ends_with(".sqlite") {
+                    continue;
+                }
+
+                if let Ok(conn) = Connection::open(entry.path()) {
+                    let _ = conn.execute("UPDATE threads SET model_provider = ?1", [provider]);
                 }
             }
         }
-        
-        Ok(())
+    }
+
+    fn update_session_jsonl(&self, target_dir: &Path, provider: &str) {
+        let sessions_dir = target_dir.join("sessions");
+        let archived_dir = target_dir.join("archived_sessions");
+
+        for dir in [sessions_dir, archived_dir] {
+            self.update_jsonl_dir(&dir, provider);
+        }
+    }
+
+    fn update_jsonl_dir(&self, dir: &Path, provider: &str) {
+        if !dir.exists() {
+            return;
+        }
+
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(current) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&current) else {
+                continue;
+            };
+
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+
+                if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                    continue;
+                }
+
+                let Ok(content) = fs::read_to_string(&path) else {
+                    continue;
+                };
+                let updated = replace_model_provider_values(&content, provider);
+                if updated != content {
+                    let _ = fs::write(&path, updated);
+                }
+            }
+        }
     }
 
     pub fn switch_profile(&mut self, profile_id: &str) -> Result<SwitchResult, AppError> {
@@ -473,10 +553,9 @@ impl ProfileManager {
         let next_auth_json = fs::read_to_string(profile_dir.join("auth.json"))?;
         let next_profile_config = fs::read_to_string(profile_dir.join("config.toml"))?;
         let next_config_toml = match current_config_toml {
-            Some(current_config_toml) => merge_profile_managed_config(
-                &current_config_toml,
-                &next_profile_config,
-            )?,
+            Some(current_config_toml) => {
+                merge_profile_managed_config(&current_config_toml, &next_profile_config)?
+            }
             None => managed_config_toml(&next_profile_config)?,
         };
 
@@ -624,7 +703,9 @@ impl ProfileManager {
 
     fn read_profile_metadata(&self, profile_dir: &Path) -> Result<ProfileMetadata, AppError> {
         let meta_path = profile_dir.join("meta.json");
-        Ok(serde_json::from_str::<ProfileMetadata>(&fs::read_to_string(meta_path)?)?)
+        Ok(serde_json::from_str::<ProfileMetadata>(
+            &fs::read_to_string(meta_path)?,
+        )?)
     }
 
     fn write_profile_metadata(
@@ -669,9 +750,13 @@ impl ProfileManager {
     ) -> Result<(), AppError> {
         let profile_dir = self.profile_dir(profile_id)?;
         let existing_metadata = self.read_profile_metadata(&profile_dir)?;
+        let normalized_config = normalize_config_toml_for_auth(
+            auth_json,
+            &repair_illegal_config_toml(config_toml),
+        )?;
 
         fs::write(profile_dir.join("auth.json"), auth_json)?;
-        fs::write(profile_dir.join("config.toml"), config_toml)?;
+        fs::write(profile_dir.join("config.toml"), &normalized_config)?;
 
         let metadata = self.compose_profile_metadata(
             existing_metadata.id,
@@ -680,7 +765,7 @@ impl ProfileManager {
             existing_metadata.created_at,
             Utc::now(),
             auth_json,
-            config_toml,
+            &normalized_config,
         )?;
 
         self.write_profile_metadata(&profile_dir, &metadata)
@@ -762,7 +847,9 @@ impl ProfileManager {
             return Ok(None);
         }
 
-        Ok(Some(serde_json::from_str::<TargetMarkerFile>(&fs::read_to_string(marker_path)?)?))
+        Ok(Some(serde_json::from_str::<TargetMarkerFile>(
+            &fs::read_to_string(marker_path)?,
+        )?))
     }
 
     fn persist_target_marker(&self, marker: TargetMarkerFile) -> Result<(), AppError> {
@@ -866,6 +953,69 @@ pub fn default_codex_target_dir() -> Result<PathBuf, AppError> {
     Ok(home_dir.join(".codex"))
 }
 
+pub fn check_for_update() -> Result<UpdateCheckResult, AppError> {
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let api_url = "https://api.github.com/repos/LucisBaoshg/codex_auth_switch/releases/latest";
+
+    let response = ureq::get(api_url)
+        .set("Accept", "application/vnd.github+json")
+        .set("User-Agent", "codex-auth-switch")
+        .call()
+        .map_err(|error| AppError::Message(format!("检查更新失败：{error}")))?;
+
+    let release: GithubLatestRelease = response
+        .into_json()
+        .map_err(|error| AppError::Message(format!("解析更新信息失败：{error}")))?;
+
+    let latest_version = normalize_version_string(&release.tag_name);
+    let current_semver = Version::parse(&current_version).ok();
+    let latest_semver = Version::parse(&latest_version).ok();
+    let has_update = match (current_semver, latest_semver) {
+        (Some(current), Some(latest)) => latest > current,
+        _ => latest_version != current_version,
+    };
+
+    Ok(UpdateCheckResult {
+        has_update,
+        current_version,
+        latest_version,
+        release_url: release.html_url,
+        published_at: release.published_at,
+        release_name: release.name,
+    })
+}
+
+fn normalize_version_string(version: &str) -> String {
+    version
+        .trim()
+        .trim_start_matches('v')
+        .trim_start_matches('V')
+        .to_string()
+}
+
+pub fn open_url(url: &str) -> Result<(), AppError> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err(AppError::Message("仅允许打开 http/https 链接。".into()));
+    }
+
+    #[cfg(target_os = "macos")]
+    let status = Command::new("open").arg(url).status()?;
+
+    #[cfg(target_os = "windows")]
+    let status = Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .status()?;
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let status = Command::new("xdg-open").arg(url).status()?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(AppError::Message("无法打开更新页面。".into()))
+    }
+}
+
 fn unknown_auth_type_label() -> String {
     "未识别".to_string()
 }
@@ -873,9 +1023,11 @@ fn unknown_auth_type_label() -> String {
 pub fn restart_codex_script() -> Option<&'static str> {
     #[cfg(target_os = "macos")]
     {
-        Some(r#"if application "Codex" is running then
+        Some(
+            r#"if application "Codex" is running then
   tell application "Codex" to quit
-end if"#)
+end if"#,
+        )
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -887,15 +1039,74 @@ end if"#)
 pub fn repair_illegal_config_toml(config_toml: &str) -> String {
     if config_toml.contains("[model_providers.openai]") {
         config_toml
-            .replace("[model_providers.openai]", "[model_providers.openai_custom]")
-            .replace("model_provider = \"openai\"", "model_provider = \"openai_custom\"")
-            .replace("model_provider = 'openai'", "model_provider = 'openai_custom'")
+            .replace(
+                "[model_providers.openai]",
+                "[model_providers.openai_custom]",
+            )
+            .replace(
+                "model_provider = \"openai\"",
+                "model_provider = \"openai_custom\"",
+            )
+            .replace(
+                "model_provider = 'openai'",
+                "model_provider = 'openai_custom'",
+            )
     } else {
         config_toml.to_string()
     }
 }
 
+fn replace_model_provider_values(content: &str, provider: &str) -> String {
+    let key = "\"model_provider\"";
+    let mut output = String::with_capacity(content.len());
+    let mut index = 0;
 
+    while let Some(pos) = content[index..].find(key) {
+        let abs = index + pos;
+        output.push_str(&content[index..abs]);
+        output.push_str(key);
+        index = abs + key.len();
+
+        let rest = &content[index..];
+        let Some(colon_pos) = rest.find(':') else {
+            output.push_str(rest);
+            return output;
+        };
+        output.push_str(&rest[..colon_pos + 1]);
+        index += colon_pos + 1;
+
+        let bytes = content.as_bytes();
+        while index < content.len() && bytes[index].is_ascii_whitespace() {
+            output.push(bytes[index] as char);
+            index += 1;
+        }
+
+        if index < content.len() && bytes[index] == b'"' {
+            output.push('"');
+            index += 1;
+            while index < content.len() {
+                let byte = bytes[index];
+                if byte == b'\\' {
+                    index = (index + 2).min(content.len());
+                    continue;
+                }
+                if byte == b'"' {
+                    index += 1;
+                    break;
+                }
+                index += 1;
+            }
+            output.push_str(provider);
+            output.push('"');
+        } else {
+            output.push_str(&content[index..]);
+            return output;
+        }
+    }
+
+    output.push_str(&content[index..]);
+    output
+}
 
 pub fn restart_codex_app() -> Result<(), AppError> {
     #[cfg(target_os = "macos")]
@@ -905,9 +1116,7 @@ pub fn restart_codex_app() -> Result<(), AppError> {
 
         let quit_status = Command::new("osascript").arg("-e").arg(script).status()?;
         if !quit_status.success() {
-            return Err(AppError::Message(
-                "Failed to ask Codex.app to quit.".into(),
-            ));
+            return Err(AppError::Message("Failed to ask Codex.app to quit.".into()));
         }
 
         thread::sleep(Duration::from_millis(700));
@@ -940,6 +1149,26 @@ const PROFILE_MANAGED_SCALAR_KEYS: &[&str] = &[
 ];
 
 const PROFILE_MANAGED_TABLE_KEYS: &[&str] = &["model_providers"];
+const OAUTH_STRIP_SCALAR_KEYS: &[&str] = &[
+    "model_provider",
+    "review_model",
+    "model_context_window",
+    "model_auto_compact_token_limit",
+    "disable_response_storage",
+    "network_access",
+];
+const OAUTH_STRIP_TABLE_KEYS: &[&str] = &["model_providers"];
+
+fn is_official_oauth_auth(auth_json: &str) -> Result<bool, AppError> {
+    let auth = serde_json::from_str::<serde_json::Value>(auth_json)
+        .map_err(|error| AppError::InvalidAuthJson(error.to_string()))?;
+
+    Ok(auth
+        .get("auth_mode")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| value == "chatgpt")
+        || auth.get("tokens").is_some())
+}
 
 fn validate_auth_json(contents: &str) -> Result<(), AppError> {
     serde_json::from_str::<serde_json::Value>(contents)
@@ -1002,6 +1231,22 @@ fn managed_config_toml(contents: &str) -> Result<String, AppError> {
         .map_err(|error| AppError::Message(error.to_string()))
 }
 
+fn normalize_config_toml_for_auth(auth_json: &str, config_toml: &str) -> Result<String, AppError> {
+    let mut table = parse_toml_table(config_toml)?;
+
+    if is_official_oauth_auth(auth_json)? {
+        for key in OAUTH_STRIP_SCALAR_KEYS {
+            table.remove(*key);
+        }
+        for key in OAUTH_STRIP_TABLE_KEYS {
+            table.remove(*key);
+        }
+    }
+
+    toml::to_string_pretty(&toml::Value::Table(table))
+        .map_err(|error| AppError::Message(error.to_string()))
+}
+
 fn merge_profile_managed_config(
     current_config_toml: &str,
     profile_config_toml: &str,
@@ -1031,12 +1276,7 @@ fn detect_auth_type_label(auth_json: &str, config_toml: &str) -> Result<String, 
         .map_err(|error| AppError::InvalidAuthJson(error.to_string()))?;
     let config = parse_toml_table(config_toml)?;
 
-    if auth
-        .get("auth_mode")
-        .and_then(|value| value.as_str())
-        .is_some_and(|value| value == "chatgpt")
-        || auth.get("tokens").is_some()
-    {
+    if is_official_oauth_auth(auth_json)? {
         return Ok("官方 OAuth".into());
     }
 
@@ -1072,12 +1312,7 @@ fn auth_match_hash(auth_json: &str) -> Result<String, AppError> {
     let auth = serde_json::from_str::<serde_json::Value>(auth_json)
         .map_err(|error| AppError::InvalidAuthJson(error.to_string()))?;
 
-    if auth
-        .get("auth_mode")
-        .and_then(|value| value.as_str())
-        .is_some_and(|value| value == "chatgpt")
-        || auth.get("tokens").is_some()
-    {
+    if is_official_oauth_auth(auth_json)? {
         if let Some(id_token) = auth
             .get("tokens")
             .and_then(|value| value.as_object())
@@ -1102,7 +1337,10 @@ fn oauth_identity_payload(id_token: &str) -> Option<String> {
     let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
     let json = serde_json::from_slice::<serde_json::Value>(&decoded).ok()?;
 
-    let email = json.get("email").and_then(|value| value.as_str()).unwrap_or("");
+    let email = json
+        .get("email")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
     let auth_section = json.get("https://api.openai.com/auth");
     let user_id = auth_section
         .and_then(|section| section.get("chatgpt_user_id"))

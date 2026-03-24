@@ -30,6 +30,7 @@ test("renders a card-only profile gallery without a left sidebar", async () => {
   expect(document.querySelector('[data-page="cards"]')).not.toBeNull();
   expect(document.querySelector('[data-role="global-restart"]')).toBeNull();
   expect(document.querySelector('[data-role="global-refresh"]')).not.toBeNull();
+  expect(document.querySelector('[data-role="check-update"]')).not.toBeNull();
   expect(document.querySelector('[data-role="add-card"]')).not.toBeNull();
   expect(document.querySelector(".page-header")).toBeNull();
   expect(
@@ -231,4 +232,3 @@ test("deletes a saved profile after confirmation", async () => {
   expect(invokeMock).toHaveBeenCalledWith("delete_profile", { profileId: "profile-1" });
   expect(document.querySelectorAll("[data-role='profile-card']")).toHaveLength(1);
 });
-

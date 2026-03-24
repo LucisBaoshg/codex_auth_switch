@@ -1,6 +1,9 @@
 pub mod core;
 
-use crate::core::{restart_codex_app, AppSnapshot, ProfileDocument, ProfileInput, ProfileManager};
+use crate::core::{
+    check_for_update, open_url, restart_codex_app, AppSnapshot, ProfileDocument, ProfileInput,
+    ProfileManager, UpdateCheckResult,
+};
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
@@ -17,9 +20,7 @@ fn load_snapshot(app: AppHandle) -> Result<AppSnapshot, String> {
     let manager = manager_from_app(&app)?;
     // 在程序初次获取快照或用户手动刷新时，主动牵引/同步一次会话数据库，保证启动即对齐
     let _ = manager.fix_session_database_and_configs();
-    manager
-        .snapshot()
-        .map_err(|error| error.to_string())
+    manager.snapshot().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -117,12 +118,25 @@ fn restart_codex() -> Result<(), String> {
 #[tauri::command]
 fn fix_session_database(app: tauri::AppHandle) -> Result<(), String> {
     let manager = manager_from_app(&app)?;
-    manager.fix_session_database_and_configs().map_err(|error| error.to_string())
+    manager
+        .fix_session_database_and_configs()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn check_update() -> Result<UpdateCheckResult, String> {
+    check_for_update().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn open_update_page(url: String) -> Result<(), String> {
+    open_url(&url).map_err(|error| error.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             load_snapshot,
             import_profile,
@@ -135,7 +149,9 @@ pub fn run() {
             set_target_dir,
             open_target_dir,
             restart_codex,
-            fix_session_database
+            fix_session_database,
+            check_update,
+            open_update_page
         ])
         .run(tauri::generate_context!())
         .expect("error while running Codex Auth Switch");

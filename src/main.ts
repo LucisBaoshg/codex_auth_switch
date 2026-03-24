@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { check as checkForAppUpdate } from "@tauri-apps/plugin-updater";
 import "./styles.css";
 
 type FlashKind = "info" | "success" | "error";
@@ -47,6 +48,15 @@ type AppSnapshot = {
   lastSwitchProfileId: string | null;
   lastSwitchedAt: string | null;
   profiles: ProfileSummary[];
+};
+
+type UpdateCheckResult = {
+  hasUpdate: boolean;
+  currentVersion: string;
+  latestVersion: string;
+  releaseUrl: string;
+  publishedAt: string | null;
+  releaseName: string | null;
 };
 
 type EditorState = {
@@ -143,6 +153,10 @@ const state: {
   activeTab: "local" | "network";
   networkProfiles: NetworkProfile[];
   networkLoading: boolean;
+  update: {
+    checking: boolean;
+    lastResult: UpdateCheckResult | null;
+  };
 } = {
   snapshot: null,
   view: "cards",
@@ -153,6 +167,10 @@ const state: {
   activeTab: "local",
   networkProfiles: [],
   networkLoading: false,
+  update: {
+    checking: false,
+    lastResult: null,
+  },
 };
 
 function setFlash(kind: FlashKind, text: string): void {
@@ -548,6 +566,69 @@ async function downloadAndApplyNetworkProfile(networkProfileId: string, profileN
   }
 }
 
+async function checkForUpdate(): Promise<void> {
+  if (!isTauriRuntime) {
+    setFlash("info", "浏览器预览模式无法检查更新。");
+    return;
+  }
+
+  state.update.checking = true;
+  render();
+  try {
+    const update = await checkForAppUpdate();
+    if (!update) {
+      state.update.lastResult = null;
+      setFlash("success", "已是最新版本。");
+      return;
+    }
+
+    state.update.lastResult = {
+      hasUpdate: true,
+      currentVersion: update.currentVersion,
+      latestVersion: update.version,
+      releaseUrl: "",
+      publishedAt: update.date ?? null,
+      releaseName: null,
+    };
+
+    const confirmed = await nativeConfirm(
+      `发现新版本 ${update.version}（当前 ${update.currentVersion}）。是否立即下载并安装？`,
+      "立即更新",
+      false,
+    );
+    if (!confirmed) {
+      setFlash("info", `已取消更新，当前可升级到 ${update.version}。`);
+      return;
+    }
+
+    let downloadedBytes = 0;
+    setFlash("info", `正在下载更新 ${update.version}...`);
+    await update.downloadAndInstall((event) => {
+      if (event.event === "Started") {
+        const total = event.data.contentLength;
+        setFlash(
+          "info",
+          total
+            ? `开始下载更新，大小约 ${(total / 1024 / 1024).toFixed(1)} MB。`
+            : "开始下载更新包。",
+        );
+      } else if (event.event === "Progress") {
+        downloadedBytes += event.data.chunkLength;
+        setFlash("info", `正在下载更新，已接收 ${(downloadedBytes / 1024 / 1024).toFixed(1)} MB。`);
+      } else if (event.event === "Finished") {
+        setFlash("info", "更新包下载完成，正在安装。");
+      }
+    });
+
+    setFlash("success", "更新已安装完成。请重新打开应用进入新版本。");
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    state.update.checking = false;
+    render();
+  }
+}
+
 function formatDateTime(value: string | null): string {
   if (!value) {
     return "还没有";
@@ -594,6 +675,9 @@ function renderCardsPage(snapshot: AppSnapshot): string {
         <div class="top-nav-actions">
           <button class="icon-button" title="刷新状态" data-role="global-refresh" data-action="refresh" ${state.busy ? "disabled" : ""}>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+          </button>
+          <button class="icon-button" title="检查更新" data-role="check-update" data-action="check-update" ${state.busy || state.update.checking ? "disabled" : ""}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></svg>
           </button>
         </div>
       </header>
@@ -936,6 +1020,8 @@ function bindEvents(): void {
         await saveEditorProfile(false);
       } else if (action === "save-and-switch") {
         await saveEditorProfile(true);
+      } else if (action === "check-update") {
+        await checkForUpdate();
       } else if (action === "restart-codex") {
         state.busy = true; render();
         try {

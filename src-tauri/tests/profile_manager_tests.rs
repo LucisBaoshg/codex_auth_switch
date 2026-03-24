@@ -1,5 +1,7 @@
 use codex_auth_switch_lib::core::{restart_codex_script, ProfileInput, ProfileManager};
+use rusqlite::Connection;
 use serde_json::json;
+use std::env;
 use std::fs;
 use tempfile::TempDir;
 
@@ -72,6 +74,27 @@ model_auto_compact_token_limit = 900000
 [model_providers.OpenAI]
 name = "OpenAI"
 base_url = "http://sub2api.ite.tapcash.com"
+wire_api = "responses"
+requires_openai_auth = true
+{}"#,
+        local_sections()
+    )
+}
+
+fn stale_official_config_toml(model: &str) -> String {
+    format!(
+        r#"model_provider = "OpenAI"
+model = "{model}"
+review_model = "{model}"
+model_reasoning_effort = "medium"
+disable_response_storage = true
+network_access = "enabled"
+model_context_window = 1000000
+model_auto_compact_token_limit = 900000
+
+[model_providers.OpenAI]
+name = "OpenAI"
+base_url = "https://api.intellectgrowth.com/v1"
 wire_api = "responses"
 requires_openai_auth = true
 {}"#,
@@ -221,7 +244,9 @@ fn get_profile_document_returns_saved_auth_and_config_contents() {
 
     assert_eq!(document.id, profile.id);
     assert!(document.auth_json.contains("sk-browse"));
-    assert!(document.config_toml.contains("base_url = \"http://sub2api.ite.tapcash.com\""));
+    assert!(document
+        .config_toml
+        .contains("base_url = \"http://sub2api.ite.tapcash.com\""));
     assert_eq!(document.auth_type_label, "第三方 API");
 }
 
@@ -367,7 +392,10 @@ fn snapshot_auto_imports_current_target_profile_and_creates_marker() {
 
     assert_eq!(snapshot.profiles.len(), 1);
     assert_eq!(snapshot.profiles[0].name, "tapcash");
-    assert_eq!(snapshot.active_profile_id.as_deref(), Some(snapshot.profiles[0].id.as_str()));
+    assert_eq!(
+        snapshot.active_profile_id.as_deref(),
+        Some(snapshot.profiles[0].id.as_str())
+    );
 
     let marker_path = target_dir.path().join("codex-auth-switch.json");
     assert!(marker_path.exists());
@@ -412,7 +440,10 @@ fn snapshot_reuses_existing_profile_instead_of_importing_duplicate() {
     let snapshot = manager.snapshot().expect("snapshot");
 
     assert_eq!(snapshot.profiles.len(), 1);
-    assert_eq!(snapshot.active_profile_id.as_deref(), Some(profile.id.as_str()));
+    assert_eq!(
+        snapshot.active_profile_id.as_deref(),
+        Some(profile.id.as_str())
+    );
 }
 
 #[test]
@@ -462,6 +493,114 @@ fn switch_profile_syncs_current_auth_and_managed_config_back_to_previous_profile
         .get_profile_document(&profile_a.id)
         .expect("load synced profile");
     assert!(synced.config_toml.contains("model = \"gpt-5.4-turbo\""));
+}
+
+#[test]
+fn fix_session_database_updates_sqlite_and_jsonl_without_shell_tools() {
+    let home_dir = TempDir::new().expect("temp home");
+    let app_dir = TempDir::new().expect("temp app");
+    let codex_dir = home_dir.path().join(".codex");
+    fs::create_dir_all(&codex_dir).expect("create codex dir");
+
+    fs::write(
+        codex_dir.join("config.toml"),
+        r#"model_provider = "openai_custom""#,
+    )
+    .expect("seed config");
+
+    let db_path = codex_dir.join("state_1.sqlite");
+    let conn = Connection::open(&db_path).expect("open sqlite");
+    conn.execute("CREATE TABLE threads (model_provider TEXT)", [])
+        .expect("create table");
+    conn.execute("INSERT INTO threads (model_provider) VALUES ('openai')", [])
+        .expect("seed row");
+    drop(conn);
+
+    let sessions_dir = codex_dir.join("sessions");
+    let archived_dir = codex_dir.join("archived_sessions");
+    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+    fs::create_dir_all(&archived_dir).expect("create archived sessions dir");
+    fs::write(
+        sessions_dir.join("one.jsonl"),
+        r#"{"session_meta":{"payload":{"model_provider":"openai"}}}"#,
+    )
+    .expect("seed sessions");
+    fs::write(
+        archived_dir.join("two.jsonl"),
+        r#"{"session_meta":{"payload":{"model_provider":"openai"}}}"#,
+    )
+    .expect("seed archived sessions");
+
+    let old_home = env::var("HOME").ok();
+    let old_userprofile = env::var("USERPROFILE").ok();
+    let old_path = env::var("PATH").ok();
+    env::set_var("HOME", home_dir.path());
+    env::set_var("USERPROFILE", home_dir.path());
+    env::set_var("PATH", "");
+
+    let manager =
+        ProfileManager::load_or_default(app_dir.path().to_path_buf()).expect("load manager");
+    manager
+        .fix_session_database_and_configs()
+        .expect("fix sessions");
+
+    if let Some(value) = old_home {
+        env::set_var("HOME", value);
+    }
+    if let Some(value) = old_userprofile {
+        env::set_var("USERPROFILE", value);
+    }
+    if let Some(value) = old_path {
+        env::set_var("PATH", value);
+    }
+
+    let conn = Connection::open(&db_path).expect("reopen sqlite");
+    let provider: String = conn
+        .query_row("SELECT model_provider FROM threads LIMIT 1", [], |row| {
+            row.get(0)
+        })
+        .expect("query provider");
+    assert_eq!(provider, "openai_custom");
+
+    let sessions_content =
+        fs::read_to_string(sessions_dir.join("one.jsonl")).expect("read sessions");
+    let archived_content =
+        fs::read_to_string(archived_dir.join("two.jsonl")).expect("read archived");
+    assert!(sessions_content.contains("\"model_provider\":\"openai_custom\""));
+    assert!(archived_content.contains("\"model_provider\":\"openai_custom\""));
+}
+
+#[test]
+fn fix_session_database_sanitizes_official_oauth_config() {
+    let (_app_dir, target_dir, manager) = temp_manager();
+
+    fs::write(
+        target_dir.path().join("auth.json"),
+        oauth_auth_json("owner@example.com", "user-1", "tapcash-main-001"),
+    )
+    .expect("seed oauth auth");
+    fs::write(
+        target_dir.path().join("config.toml"),
+        stale_official_config_toml("gpt-5"),
+    )
+    .expect("seed stale official config");
+
+    manager
+        .fix_session_database_and_configs()
+        .expect("sanitize official config");
+
+    let repaired =
+        fs::read_to_string(target_dir.path().join("config.toml")).expect("read repaired config");
+    assert!(repaired.contains("model = \"gpt-5\""));
+    assert!(repaired.contains("model_reasoning_effort = \"medium\""));
+    assert!(!repaired.contains("model_provider ="));
+    assert!(!repaired.contains("review_model ="));
+    assert!(!repaired.contains("disable_response_storage ="));
+    assert!(!repaired.contains("network_access ="));
+    assert!(!repaired.contains("model_context_window ="));
+    assert!(!repaired.contains("model_auto_compact_token_limit ="));
+    assert!(!repaired.contains("[model_providers."));
+    assert!(!repaired.contains("intellectgrowth"));
 }
 
 #[test]

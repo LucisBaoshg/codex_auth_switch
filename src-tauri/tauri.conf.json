@@ -27,11 +27,20 @@
   "bundle": {
     "active": true,
     "targets": ["app"],
+    "createUpdaterArtifacts": true,
     "icon": ["icons/icon.png", "icons/icon.icns", "icons/icon.ico"],
     "category": "DeveloperTool",
     "macOS": {
       "bundleVersion": "1",
       "infoPlist": "Info.plist"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVBQzY5Mzc2NkZGRTMzNzcKUldSM00vNXZkcFBHNmtoVC96RnRzVjRqd3BNUFlpdjFhNERLZE4wWllMTmQvV3Y2WUYvM2RuVXMK",
+      "endpoints": [
+        "https://github.com/LucisBaoshg/codex_auth_switch/releases/latest/download/latest.json"
+      ]
     }
   }
 }

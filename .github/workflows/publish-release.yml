@@ -16,11 +16,21 @@ on:
         default: "v1.0.0"
 
 jobs:
-  build-windows:
-    name: Build Windows Release Assets
-    runs-on: windows-latest
+  publish-tauri:
+    name: Publish ${{ matrix.name }}
+    runs-on: ${{ matrix.platform }}
     permissions:
-      contents: read
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            platform: windows-latest
+            args: --bundles nsis
+          - name: macOS
+            platform: macos-latest
+            args: --bundles app,dmg
 
     steps:
       - name: Checkout repository
@@ -29,58 +39,19 @@ jobs:
           ref: ${{ github.event.inputs.ref || github.ref }}
 
       - name: Sync version from tag
+        if: runner.os == 'Windows'
         shell: bash
         run: |
           TAG="${{ github.event.inputs.tag_name || github.ref_name }}"
           VERSION="${TAG#v}"
-          echo "Setting version to $VERSION"
           sed -i "s/^version = .*/version = \"$VERSION\"/" src-tauri/Cargo.toml
           node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync('package.json')); p.version='$VERSION'; fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n');"
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install frontend dependencies
-        run: npm ci
-
-      - name: Run frontend tests
-        run: npm test
-
-      - name: Build Windows installer
-        run: npm run tauri build -- --bundles nsis
-
-      - name: Upload Windows release assets
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-windows
-          if-no-files-found: error
-          path: |
-            src-tauri/target/release/bundle/nsis/*.exe
-            src-tauri/target/release/bundle/nsis/*.sig
-
-  build-macos:
-    name: Build macOS Release Assets
-    runs-on: macos-latest
-    permissions:
-      contents: read
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.ref || github.ref }}
-
       - name: Sync version from tag
+        if: runner.os != 'Windows'
         run: |
           TAG="${{ github.event.inputs.tag_name || github.ref_name }}"
           VERSION="${TAG#v}"
-          echo "Setting version to $VERSION"
           sed -i '' "s/^version = .*/version = \"$VERSION\"/" src-tauri/Cargo.toml
           node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync('package.json')); p.version='$VERSION'; fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n');"
 
@@ -100,6 +71,7 @@ jobs:
         run: npm test
 
       - name: Import Apple signing certificate
+        if: runner.os == 'macOS'
         env:
           APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -112,51 +84,21 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k github-actions build.keychain
           rm -f certificate.p12
 
-      - name: Build macOS bundle
+      - name: Build and publish Tauri release
+        uses: tauri-apps/tauri-action@v1
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: npm run tauri build -- --bundles app,dmg
-
-      - name: Upload macOS release assets
-        uses: actions/upload-artifact@v4
         with:
-          name: release-macos
-          if-no-files-found: error
-          path: |
-            src-tauri/target/release/bundle/dmg/*.dmg
-            src-tauri/target/release/bundle/dmg/*.sig
-            src-tauri/target/release/bundle/macos/*.app
-
-  publish-release:
-    name: Publish GitHub Release
-    runs-on: ubuntu-latest
-    needs:
-      - build-windows
-      - build-macos
-    permissions:
-      contents: write
-
-    steps:
-      - name: Download Windows release assets
-        uses: actions/download-artifact@v4
-        with:
-          name: release-windows
-          path: release-assets/windows
-
-      - name: Download macOS release assets
-        uses: actions/download-artifact@v4
-        with:
-          name: release-macos
-          path: release-assets/macos
-
-      - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          tag_name: ${{ github.event.inputs.tag_name || github.ref_name }}
-          files: |
-            release-assets/windows/**
-            release-assets/macos/**
+          tagName: ${{ github.event.inputs.tag_name || github.ref_name }}
+          releaseName: Codex Auth Switch ${{ github.event.inputs.tag_name || github.ref_name }}
+          releaseBody: See the assets to download and install this version.
+          releaseDraft: false
+          prerelease: false
+          generateReleaseNotes: true
+          args: ${{ matrix.args }}
