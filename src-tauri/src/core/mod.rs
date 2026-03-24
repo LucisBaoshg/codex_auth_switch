@@ -1,11 +1,12 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, TimeZone, Utc};
 use rusqlite::Connection;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(target_os = "macos")]
@@ -155,6 +156,13 @@ struct ProfileMetadata {
     pub updated_at: DateTime<Utc>,
     pub auth_hash: String,
     pub config_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SessionIndexEntry {
+    id: String,
+    thread_name: String,
+    updated_at: String,
 }
 
 #[derive(Debug, Error)]
@@ -554,6 +562,7 @@ impl ProfileManager {
 
         self.update_session_databases(&target_dir, &active_provider);
         self.update_session_jsonl(&target_dir, &active_provider);
+        self.rebuild_session_index(&target_dir);
 
         Ok(())
     }
@@ -614,6 +623,71 @@ impl ProfileManager {
                 }
             }
         }
+    }
+
+    fn rebuild_session_index(&self, target_dir: &Path) {
+        let Some(state_db_path) = primary_state_database_path(target_dir) else {
+            return;
+        };
+
+        let Ok(conn) = Connection::open(state_db_path) else {
+            return;
+        };
+        let Ok(columns) = thread_table_columns(&conn) else {
+            return;
+        };
+
+        if !columns.iter().any(|column| column == "id")
+            || !columns.iter().any(|column| column == "title")
+            || !columns.iter().any(|column| column == "updated_at")
+        {
+            return;
+        }
+
+        let sql = if columns.iter().any(|column| column == "archived") {
+            "SELECT id, title, updated_at FROM threads WHERE archived = 0 ORDER BY updated_at ASC, id ASC"
+        } else {
+            "SELECT id, title, updated_at FROM threads ORDER BY updated_at ASC, id ASC"
+        };
+
+        let Ok(mut stmt) = conn.prepare(sql) else {
+            return;
+        };
+        let Ok(rows) = stmt.query_map([], |row| {
+            let updated_at = row.get::<_, i64>(2)?;
+            let updated_at = Utc
+                .timestamp_opt(updated_at, 0)
+                .single()
+                .map(|value| value.to_rfc3339_opts(SecondsFormat::Micros, true))
+                .unwrap_or_else(|| "1970-01-01T00:00:00.000000Z".to_string());
+
+            Ok(SessionIndexEntry {
+                id: row.get(0)?,
+                thread_name: row.get(1)?,
+                updated_at,
+            })
+        }) else {
+            return;
+        };
+
+        let mut entries = Vec::new();
+        for row in rows.flatten() {
+            entries.push(row);
+        }
+
+        let Ok(file) = fs::File::create(target_dir.join("session_index.jsonl")) else {
+            return;
+        };
+        let mut writer = BufWriter::new(file);
+        for entry in entries {
+            if serde_json::to_writer(&mut writer, &entry).is_err() {
+                return;
+            }
+            if writer.write_all(b"\n").is_err() {
+                return;
+            }
+        }
+        let _ = writer.flush();
     }
 
     pub fn switch_profile(&mut self, profile_id: &str) -> Result<SwitchResult, AppError> {
@@ -1384,6 +1458,40 @@ fn replace_model_provider_values(content: &str, provider: &str) -> String {
 
     output.push_str(&content[index..]);
     output
+}
+
+fn primary_state_database_path(target_dir: &Path) -> Option<PathBuf> {
+    fs::read_dir(target_dir)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with("state_") || !name.ends_with(".sqlite") {
+                return None;
+            }
+
+            let version = name
+                .strip_prefix("state_")
+                .and_then(|value| value.strip_suffix(".sqlite"))
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(0);
+
+            Some((version, name, entry.path()))
+        })
+        .max_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)))
+        .map(|(_, _, path)| path)
+}
+
+fn thread_table_columns(conn: &Connection) -> Result<Vec<String>, rusqlite::Error> {
+    let mut stmt = conn.prepare("PRAGMA table_info(threads)")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+
+    let mut columns = Vec::new();
+    for row in rows {
+        columns.push(row?);
+    }
+
+    Ok(columns)
 }
 
 pub fn restart_codex_app() -> Result<(), AppError> {

@@ -604,6 +604,101 @@ fn fix_session_database_sanitizes_official_oauth_config() {
 }
 
 #[test]
+fn fix_session_database_rebuilds_session_index_from_threads_table() {
+    let home_dir = TempDir::new().expect("temp home");
+    let app_dir = TempDir::new().expect("temp app");
+    let codex_dir = home_dir.path().join(".codex");
+    fs::create_dir_all(&codex_dir).expect("create codex dir");
+
+    fs::write(
+        codex_dir.join("config.toml"),
+        r#"model_provider = "openai_custom""#,
+    )
+    .expect("seed config");
+
+    let db_path = codex_dir.join("state_1.sqlite");
+    let conn = Connection::open(&db_path).expect("open sqlite");
+    conn.execute(
+        "CREATE TABLE threads (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            model_provider TEXT NOT NULL,
+            archived INTEGER NOT NULL DEFAULT 0
+        )",
+        [],
+    )
+    .expect("create threads table");
+    conn.execute(
+        "INSERT INTO threads (id, title, updated_at, model_provider, archived) VALUES (?1, ?2, ?3, ?4, ?5)",
+        ("old-thread", "Updated Old Title", 100_i64, "openai", 0_i64),
+    )
+    .expect("seed old thread");
+    conn.execute(
+        "INSERT INTO threads (id, title, updated_at, model_provider, archived) VALUES (?1, ?2, ?3, ?4, ?5)",
+        ("fresh-thread", "Fresh Title", 200_i64, "openai", 0_i64),
+    )
+    .expect("seed fresh thread");
+    conn.execute(
+        "INSERT INTO threads (id, title, updated_at, model_provider, archived) VALUES (?1, ?2, ?3, ?4, ?5)",
+        ("archived-thread", "Archived Title", 300_i64, "openai", 1_i64),
+    )
+    .expect("seed archived thread");
+    drop(conn);
+
+    fs::write(
+        codex_dir.join("session_index.jsonl"),
+        concat!(
+            r#"{"id":"old-thread","thread_name":"Stale Title","updated_at":"1970-01-01T00:00:01Z"}"#,
+            "\n",
+            r#"{"id":"ghost-thread","thread_name":"Ghost Title","updated_at":"1970-01-01T00:00:02Z"}"#,
+            "\n"
+        ),
+    )
+    .expect("seed stale session index");
+
+    let old_home = env::var("HOME").ok();
+    let old_userprofile = env::var("USERPROFILE").ok();
+    let old_path = env::var("PATH").ok();
+    env::set_var("HOME", home_dir.path());
+    env::set_var("USERPROFILE", home_dir.path());
+    env::set_var("PATH", "");
+
+    let manager =
+        ProfileManager::load_or_default(app_dir.path().to_path_buf()).expect("load manager");
+    manager
+        .fix_session_database_and_configs()
+        .expect("repair sessions and index");
+
+    if let Some(value) = old_home {
+        env::set_var("HOME", value);
+    }
+    if let Some(value) = old_userprofile {
+        env::set_var("USERPROFILE", value);
+    }
+    if let Some(value) = old_path {
+        env::set_var("PATH", value);
+    }
+
+    let session_index = fs::read_to_string(codex_dir.join("session_index.jsonl"))
+        .expect("read rebuilt session index");
+    let entries = session_index
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("parse index entry"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["id"], "old-thread");
+    assert_eq!(entries[0]["thread_name"], "Updated Old Title");
+    assert_eq!(entries[1]["id"], "fresh-thread");
+    assert_eq!(entries[1]["thread_name"], "Fresh Title");
+    assert!(entries.iter().all(|entry| entry["id"] != "ghost-thread"));
+    assert!(entries
+        .iter()
+        .all(|entry| entry["id"] != "archived-thread"));
+}
+
+#[test]
 fn restart_codex_script_targets_codex_app_on_macos() {
     #[cfg(target_os = "macos")]
     {

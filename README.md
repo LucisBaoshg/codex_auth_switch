@@ -106,6 +106,43 @@ git push origin v0.1.1
 - `APPLE_CERTIFICATE_PASSWORD`：导出 `.p12` 时设置的密码
 - `APPLE_SIGNING_IDENTITY`：你的 Developer ID Application 签名身份，例如 `Developer ID Application: Your Company Name (TEAMID)`
 
+## CLI 安装与使用
+
+项目还提供一个命令行版本 `codex-auth-switch-cli`，适合在 Linux 服务器上同步远程 profiles 或执行快速切换。
+
+当前通过 GitHub Release 提供的 CLI 附件只有 Linux x64 版本。
+
+### 从 GitHub Release 安装 Linux CLI
+
+```bash
+VERSION=1.4.6
+curl -L \
+  -o /tmp/codex-auth-switch-cli.tar.gz \
+  "https://github.com/LucisBaoshg/codex_auth_switch/releases/download/v${VERSION}/codex-auth-switch-cli_${VERSION}_linux_x64.tar.gz"
+
+tar -xzf /tmp/codex-auth-switch-cli.tar.gz -C /tmp
+mkdir -p ~/.local/bin
+install /tmp/codex-auth-switch-cli ~/.local/bin/codex-auth-switch-cli
+
+~/.local/bin/codex-auth-switch-cli help
+```
+
+如果希望全局直接使用，请确认 `~/.local/bin` 已经在 `PATH` 中。
+
+### CLI 命令
+
+```bash
+codex-auth-switch-cli list
+codex-auth-switch-cli sync-remote
+codex-auth-switch-cli switch <profile-id-or-name>
+```
+
+### CLI 环境变量
+
+- `CODEX_AUTH_SWITCH_TARGET_DIR`：指定目标 Codex 配置目录，默认是 `~/.codex`
+- `CODEX_AUTH_SWITCH_REMOTE_BASE_URL`：覆盖远程 profiles 地址
+- `CODEX_AUTH_SWITCH_REMOTE_TOKEN`：如果远程接口要求鉴权，可通过这个变量传入 Bearer Token
+
 ## 测试
 
 ```bash

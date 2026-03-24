@@ -167,6 +167,43 @@ export default function Home() {
           </div>
         </div>
       </section>
+
+      <section className="mx-auto max-w-5xl rounded-2xl border border-amber-200 bg-amber-50/80 p-8 shadow-sm dark:border-amber-500/20 dark:bg-amber-500/10 backdrop-blur-md transition-colors">
+        <div className="space-y-4">
+          <div className="inline-flex items-center rounded-full bg-amber-100 px-3 py-1 text-sm font-medium text-amber-800 ring-1 ring-inset ring-amber-200 dark:bg-amber-500/20 dark:text-amber-200 dark:ring-amber-500/30">
+            Linux CLI 安装
+          </div>
+          <h2 className="text-2xl font-bold text-neutral-900 dark:text-white transition-colors">
+            服务器环境可直接安装 CLI
+          </h2>
+          <p className="text-neutral-700 dark:text-neutral-300 leading-relaxed transition-colors">
+            如果您不是在桌面端操作，而是在 Linux 服务器上同步共享配置，可以直接从 GitHub Release 下载
+            <code className="mx-1 rounded bg-black/5 px-1.5 py-0.5 text-sm dark:bg-white/10">codex-auth-switch-cli</code>
+            。当前 Release 提供的是 Linux x64 版本。
+          </p>
+          <div className="overflow-x-auto rounded-2xl bg-neutral-950 p-5 text-sm text-neutral-100 shadow-inner">
+            <pre className="whitespace-pre-wrap leading-6">{`VERSION=1.4.6
+curl -L \\
+  -o /tmp/codex-auth-switch-cli.tar.gz \\
+  "https://github.com/LucisBaoshg/codex_auth_switch/releases/download/v\${VERSION}/codex-auth-switch-cli_\${VERSION}_linux_x64.tar.gz"
+
+tar -xzf /tmp/codex-auth-switch-cli.tar.gz -C /tmp
+mkdir -p ~/.local/bin
+install /tmp/codex-auth-switch-cli ~/.local/bin/codex-auth-switch-cli
+
+~/.local/bin/codex-auth-switch-cli help`}</pre>
+          </div>
+          <p className="text-sm text-neutral-600 dark:text-neutral-400 transition-colors">
+            常用命令包括
+            <code className="mx-1 rounded bg-black/5 px-1.5 py-0.5 dark:bg-white/10">list</code>
+            、
+            <code className="mx-1 rounded bg-black/5 px-1.5 py-0.5 dark:bg-white/10">sync-remote</code>
+            和
+            <code className="mx-1 rounded bg-black/5 px-1.5 py-0.5 dark:bg-white/10">switch &lt;profile-id-or-name&gt;</code>
+            。更完整说明见仓库 README。
+          </p>
+        </div>
+      </section>
     </main>
   );
 }

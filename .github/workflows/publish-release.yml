@@ -45,6 +45,7 @@ jobs:
           TAG="${{ github.event.inputs.tag_name || github.ref_name }}"
           VERSION="${TAG#v}"
           sed -i "s/^version = .*/version = \"$VERSION\"/" src-tauri/Cargo.toml
+          sed -i "s/^version = .*/version = \"$VERSION\"/" cli/Cargo.toml
           node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync('package.json')); p.version='$VERSION'; fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n');"
 
       - name: Sync version from tag
@@ -53,6 +54,7 @@ jobs:
           TAG="${{ github.event.inputs.tag_name || github.ref_name }}"
           VERSION="${TAG#v}"
           sed -i '' "s/^version = .*/version = \"$VERSION\"/" src-tauri/Cargo.toml
+          sed -i '' "s/^version = .*/version = \"$VERSION\"/" cli/Cargo.toml
           node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync('package.json')); p.version='$VERSION'; fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n');"
 
       - name: Setup Node.js
@@ -121,6 +123,7 @@ jobs:
           TAG="${{ github.event.inputs.tag_name || github.ref_name }}"
           VERSION="${TAG#v}"
           sed -i "s/^version = .*/version = \"$VERSION\"/" src-tauri/Cargo.toml
+          sed -i "s/^version = .*/version = \"$VERSION\"/" cli/Cargo.toml
           node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync('package.json')); p.version='$VERSION'; fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n');"
 
       - name: Setup Node.js
