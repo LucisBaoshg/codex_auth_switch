@@ -139,14 +139,14 @@ jobs:
         run: npm test
 
       - name: Build Linux CLI
-        run: cargo build --manifest-path src-tauri/Cargo.toml --release --bin codex-auth-switch-cli
+        run: cargo build --manifest-path cli/Cargo.toml --release
 
       - name: Package Linux CLI archive
         run: |
           TAG="${{ github.event.inputs.tag_name || github.ref_name }}"
           VERSION="${TAG#v}"
           mkdir -p release-assets/linux-cli
-          cp src-tauri/target/release/codex-auth-switch-cli release-assets/linux-cli/codex-auth-switch-cli
+          cp cli/target/release/codex-auth-switch-cli release-assets/linux-cli/codex-auth-switch-cli
           chmod +x release-assets/linux-cli/codex-auth-switch-cli
           tar -C release-assets/linux-cli -czf "codex-auth-switch-cli_${VERSION}_linux_x64.tar.gz" codex-auth-switch-cli
 

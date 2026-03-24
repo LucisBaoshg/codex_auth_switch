@@ -1,6 +1,6 @@
 [package]
 name = "codex-auth-switch"
-version = "1.4.4"
+version = "1.4.5"
 description = "A desktop utility for switching between Codex auth profiles"
 authors = ["Codex"]
 edition = "2021"
@@ -9,10 +9,6 @@ default-run = "codex-auth-switch"
 [lib]
 name = "codex_auth_switch_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
-
-[[bin]]
-name = "codex-auth-switch-cli"
-path = "src/bin/codex-auth-switch-cli.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

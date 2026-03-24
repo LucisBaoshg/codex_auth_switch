@@ -1,7 +1,5 @@
-#![allow(dead_code)]
-
 #[allow(dead_code)]
-#[path = "../core/mod.rs"]
+#[path = "../../src-tauri/src/core/mod.rs"]
 mod core;
 
 use core::{default_cli_app_data_dir, ProfileManager};
@@ -69,10 +67,7 @@ fn run() -> Result<(), String> {
         "list" => {
             let profiles = manager.list_profiles().map_err(|error| error.to_string())?;
             for profile in profiles {
-                println!(
-                    "{}\t{}\t{}",
-                    profile.id, profile.name, profile.auth_type_label
-                );
+                println!("{}\t{}\t{}", profile.id, profile.name, profile.auth_type_label);
             }
         }
         "help" | "--help" | "-h" => {
