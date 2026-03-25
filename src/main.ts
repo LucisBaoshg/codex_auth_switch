@@ -7,6 +7,27 @@ type FlashKind = "info" | "success" | "error";
 type ViewMode = "cards" | "editor";
 type EditorMode = "new" | "fromCurrent" | "existing";
 
+type CodexUsageWindow = {
+  usedPercent: number;
+  windowMinutes: number | null;
+  resetsAt: string | null;
+};
+
+type CodexUsageCredits = {
+  hasCredits: boolean;
+  unlimited: boolean;
+  balance: string | null;
+};
+
+type CodexUsageSnapshot = {
+  source: string;
+  planType: string | null;
+  primary: CodexUsageWindow | null;
+  secondary: CodexUsageWindow | null;
+  credits: CodexUsageCredits | null;
+  updatedAt: string;
+};
+
 type ProfileSummary = {
   id: string;
   name: string;
@@ -16,6 +37,7 @@ type ProfileSummary = {
   updatedAt: string;
   authHash: string;
   configHash: string;
+  codexUsage: CodexUsageSnapshot | null;
 };
 
 type ProfileInput = {
@@ -48,6 +70,7 @@ type AppSnapshot = {
   lastSelectedProfileId: string | null;
   lastSwitchProfileId: string | null;
   lastSwitchedAt: string | null;
+  codexUsageApiEnabled: boolean;
   profiles: ProfileSummary[];
 };
 
@@ -127,6 +150,7 @@ const mockSnapshot: AppSnapshot = {
   lastSelectedProfileId: "profile-2",
   lastSwitchProfileId: "profile-2",
   lastSwitchedAt: new Date().toISOString(),
+  codexUsageApiEnabled: true,
   profiles: [
     {
       id: "profile-1",
@@ -137,6 +161,22 @@ const mockSnapshot: AppSnapshot = {
       updatedAt: "2026-03-18T12:20:00Z",
       authHash: "7da2e87f1bc3",
       configHash: "92ca2d10aa51",
+      codexUsage: {
+        source: "api",
+        planType: "team",
+        primary: {
+          usedPercent: 24,
+          windowMinutes: 300,
+          resetsAt: "2026-03-25T18:26:00Z",
+        },
+        secondary: {
+          usedPercent: 7,
+          windowMinutes: 10080,
+          resetsAt: "2026-04-01T18:26:00Z",
+        },
+        credits: null,
+        updatedAt: new Date().toISOString(),
+      },
     },
     {
       id: "profile-2",
@@ -147,6 +187,7 @@ const mockSnapshot: AppSnapshot = {
       updatedAt: "2026-03-19T04:12:00Z",
       authHash: "d18ff783cb10",
       configHash: "c450c91961af",
+      codexUsage: null,
     },
   ],
 };
@@ -674,6 +715,94 @@ async function checkForUpdate(): Promise<void> {
   }
 }
 
+async function setCodexUsageApiEnabled(enabled: boolean): Promise<void> {
+  if (enabled) {
+    const confirmed = await nativeConfirm(
+      "启用后会使用已保存的 ChatGPT access token 请求 chatgpt.com/backend-api/wham/usage。这个接口不是公开稳定 API，继续吗？",
+      "继续启用",
+      false,
+    );
+    if (!confirmed) {
+      return;
+    }
+  }
+
+  setBusy(true);
+  try {
+    if (!isTauriRuntime) {
+      const snapshot = state.snapshot;
+      if (!snapshot) {
+        throw new Error("当前没有可用快照。");
+      }
+      setSnapshot({
+        ...snapshot,
+        codexUsageApiEnabled: enabled,
+      });
+    } else {
+      const snapshot = await desktopInvoke<AppSnapshot>("set_codex_usage_api_enabled", {
+        enabled,
+      });
+      setSnapshot(snapshot);
+    }
+
+    setFlash(
+      "success",
+      enabled ? "已启用 Codex 额度查询。" : "已关闭 Codex 额度查询。",
+    );
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+
+async function refreshProfileCodexUsage(profileId: string, profileName: string): Promise<void> {
+  setBusy(true);
+  try {
+    if (!isTauriRuntime) {
+      const snapshot = state.snapshot;
+      if (!snapshot) {
+        throw new Error("当前没有可用快照。");
+      }
+      setSnapshot(snapshot);
+    } else {
+      const snapshot = await desktopInvoke<AppSnapshot>("refresh_profile_codex_usage", {
+        profileId,
+      });
+      setSnapshot(snapshot);
+    }
+    setFlash("success", `已刷新「${profileName}」的 Codex 额度。`);
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+
+async function refreshAllCodexUsage(): Promise<void> {
+  setBusy(true);
+  try {
+    if (!isTauriRuntime) {
+      const snapshot = state.snapshot;
+      if (!snapshot) {
+        throw new Error("当前没有可用快照。");
+      }
+      setSnapshot(snapshot);
+    } else {
+      const snapshot = await desktopInvoke<AppSnapshot>("refresh_all_codex_usage");
+      setSnapshot(snapshot);
+    }
+    setFlash("success", "已刷新全部官方 OAuth 档案的 Codex 额度。");
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+
 function formatDateTime(value: string | null): string {
   if (!value) {
     return "还没有";
@@ -683,6 +812,122 @@ function formatDateTime(value: string | null): string {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(new Date(value));
+}
+
+function selectUsageWindow(
+  usage: CodexUsageSnapshot | null,
+  minutes: number,
+  fallbackPrimary: boolean,
+): CodexUsageWindow | null {
+  if (!usage) {
+    return null;
+  }
+  if (usage.primary?.windowMinutes === minutes) {
+    return usage.primary;
+  }
+  if (usage.secondary?.windowMinutes === minutes) {
+    return usage.secondary;
+  }
+  return fallbackPrimary ? usage.primary : usage.secondary;
+}
+
+function remainingPercent(usedPercent: number): number {
+  return Math.max(0, Math.min(100, Math.floor(100 - usedPercent)));
+}
+
+function formatPlanTitle(planType: string | null): string {
+  if (!planType) {
+    return "Codex Plan";
+  }
+
+  const normalized = planType.charAt(0).toUpperCase() + planType.slice(1).toLowerCase();
+  return `Codex ${normalized} Plan`;
+}
+
+function formatUsageReset(window: CodexUsageWindow | null): string {
+  if (!window?.resetsAt) {
+    return "--";
+  }
+
+  const resetAt = new Date(window.resetsAt);
+  const time = new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(resetAt);
+  const date = new Intl.DateTimeFormat("en", {
+    day: "numeric",
+    month: "short",
+  }).format(resetAt);
+  return `${time} on ${date}`;
+}
+
+function renderUsageProgressRow(label: string, window: CodexUsageWindow | null): string {
+  const remaining = window ? remainingPercent(window.usedPercent) : 0;
+
+  return `
+    <div class="usage-progress-row">
+      <div class="usage-progress-head">
+        <span class="usage-progress-label">${escapeHtml(label)}</span>
+        <span class="usage-progress-reset">${escapeHtml(formatUsageReset(window))}</span>
+      </div>
+      <div class="usage-progress-line">
+        <div class="usage-progress-track">
+          <div class="usage-progress-fill" style="width:${remaining}%"></div>
+        </div>
+        <span class="usage-progress-value">${window ? `${remaining}%` : "--"}</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderCodexUsagePanel(snapshot: AppSnapshot, profile: ProfileSummary): string {
+  if (profile.authTypeLabel !== "官方 OAuth") {
+    return "";
+  }
+
+  const usage = profile.codexUsage;
+  const primaryWindow = selectUsageWindow(usage, 300, true);
+  const weeklyWindow = selectUsageWindow(usage, 10080, false);
+  const updated = usage ? formatDateTime(usage.updatedAt) : "还没有";
+
+  return `
+    <section class="usage-panel">
+      <div class="usage-panel-head">
+        <div class="usage-panel-copy">
+          <strong>${escapeHtml(formatPlanTitle(usage?.planType ?? null))}</strong>
+          <span class="usage-panel-updated">更新于：${escapeHtml(updated)}</span>
+        </div>
+        ${
+          snapshot.codexUsageApiEnabled
+            ? `
+              <button
+                class="button button-ghost usage-refresh-button"
+                data-action="refresh-codex-usage"
+                data-id="${profile.id}"
+                data-name="${escapeHtml(profile.name)}"
+                ${state.busy ? "disabled" : ""}
+              >
+                刷新额度
+              </button>
+            `
+            : `
+              <button
+                class="button button-ghost usage-refresh-button"
+                data-action="enable-codex-usage"
+                ${state.busy ? "disabled" : ""}
+              >
+                启用额度查询
+              </button>
+            `
+        }
+      </div>
+      <div class="usage-progress-list">
+        ${renderUsageProgressRow("5H", primaryWindow)}
+        ${renderUsageProgressRow("WEEKLY", weeklyWindow)}
+      </div>
+    </section>
+  `;
 }
 
 function escapeHtml(value: string): string {
@@ -765,9 +1010,29 @@ function renderCardsPage(snapshot: AppSnapshot): string {
       <section class="grid-container">
         <div class="section-header">
           <h3 class="section-title">已保存的配置文件 (${snapshot.profiles.length})</h3>
-          <button class="icon-button section-refresh-button" title="刷新状态" data-role="global-refresh" data-action="refresh" ${state.busy ? "disabled" : ""}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
-          </button>
+          <div class="section-actions">
+            ${snapshot.profiles.some((profile) => profile.authTypeLabel === "官方 OAuth") ? `
+              ${
+                snapshot.codexUsageApiEnabled
+                  ? `
+                    <button class="button button-secondary" data-action="refresh-all-codex-usage" ${state.busy ? "disabled" : ""}>
+                      刷新全部额度
+                    </button>
+                    <button class="button button-ghost" data-action="disable-codex-usage" ${state.busy ? "disabled" : ""}>
+                      关闭额度查询
+                    </button>
+                  `
+                  : `
+                    <button class="button button-secondary" data-action="enable-codex-usage" ${state.busy ? "disabled" : ""}>
+                      启用 Codex 额度查询
+                    </button>
+                  `
+              }
+            ` : ""}
+            <button class="icon-button section-refresh-button" title="刷新状态" data-role="global-refresh" data-action="refresh" ${state.busy ? "disabled" : ""}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+            </button>
+          </div>
         </div>
         <div class="card-grid">
           <button class="card add-profile-card" data-role="add-card" data-action="new-profile" ${state.busy ? "disabled" : ""}>
@@ -807,6 +1072,7 @@ function renderCardsPage(snapshot: AppSnapshot): string {
                     </div>
                   </div>
                   <p class="card-note" style="${!profile.notes ? 'opacity:0.5;font-style:italic;' : ''}">${escapeHtml(profile.notes || "暂无备注")}</p>
+                  ${renderCodexUsagePanel(snapshot, profile)}
                   
                   <div class="card-actions-overlay">
                     <div style="display: flex; flex-direction: column; gap: 4px; flex-grow: 1;">
@@ -1081,6 +1347,14 @@ function bindEvents(): void {
         }
       } else if (action === "download-and-apply" && button.dataset.id && button.dataset.name) {
         await downloadAndApplyNetworkProfile(button.dataset.id, button.dataset.name);
+      } else if (action === "enable-codex-usage") {
+        await setCodexUsageApiEnabled(true);
+      } else if (action === "disable-codex-usage") {
+        await setCodexUsageApiEnabled(false);
+      } else if (action === "refresh-all-codex-usage") {
+        await refreshAllCodexUsage();
+      } else if (action === "refresh-codex-usage" && button.dataset.id && button.dataset.name) {
+        await refreshProfileCodexUsage(button.dataset.id, button.dataset.name);
       } else if (action === "new-profile") {
         await openEditorForNewProfile();
       } else if (action === "view-profile-details" && button.dataset.id) {

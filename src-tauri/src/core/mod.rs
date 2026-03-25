@@ -27,6 +27,33 @@ pub struct ProfileInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CodexUsageWindow {
+    pub used_percent: f64,
+    pub window_minutes: Option<i64>,
+    pub resets_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexUsageCredits {
+    pub has_credits: bool,
+    pub unlimited: bool,
+    pub balance: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexUsageSnapshot {
+    pub source: String,
+    pub plan_type: Option<String>,
+    pub primary: Option<CodexUsageWindow>,
+    pub secondary: Option<CodexUsageWindow>,
+    pub credits: Option<CodexUsageCredits>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProfileSummary {
     pub id: String,
     pub name: String,
@@ -36,6 +63,7 @@ pub struct ProfileSummary {
     pub updated_at: DateTime<Utc>,
     pub auth_hash: String,
     pub config_hash: String,
+    pub codex_usage: Option<CodexUsageSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +101,7 @@ pub struct AppSnapshot {
     pub last_selected_profile_id: Option<String>,
     pub last_switch_profile_id: Option<String>,
     pub last_switched_at: Option<DateTime<Utc>>,
+    pub codex_usage_api_enabled: bool,
     pub profiles: Vec<ProfileSummary>,
 }
 
@@ -131,6 +160,8 @@ struct StateFile {
     pub last_selected_profile_id: Option<String>,
     pub last_switch_profile_id: Option<String>,
     pub last_switched_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub codex_usage_api_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,6 +187,8 @@ struct ProfileMetadata {
     pub updated_at: DateTime<Utc>,
     pub auth_hash: String,
     pub config_hash: String,
+    #[serde(default)]
+    pub codex_usage: Option<CodexUsageSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -290,6 +323,7 @@ impl ProfileManager {
             now,
             &fs::read_to_string(profile_dir.join("auth.json"))?,
             &fs::read_to_string(profile_dir.join("config.toml"))?,
+            None,
         )?;
 
         self.write_profile_metadata(&profile_dir, &metadata)?;
@@ -373,6 +407,12 @@ impl ProfileManager {
 
         let profile_dir = self.profile_dir(profile_id)?;
         let existing_metadata = self.read_profile_metadata(&profile_dir)?;
+        let next_auth_hash = auth_match_hash(&input.auth_json)?;
+        let preserved_codex_usage = if existing_metadata.auth_hash == next_auth_hash {
+            existing_metadata.codex_usage.clone()
+        } else {
+            None
+        };
 
         fs::write(profile_dir.join("auth.json"), input.auth_json)?;
         fs::write(profile_dir.join("config.toml"), &normalized_config)?;
@@ -386,6 +426,7 @@ impl ProfileManager {
             Utc::now(),
             &fs::read_to_string(profile_dir.join("auth.json"))?,
             &fs::read_to_string(profile_dir.join("config.toml"))?,
+            preserved_codex_usage,
         )?;
 
         self.write_profile_metadata(&profile_dir, &metadata)?;
@@ -811,6 +852,43 @@ impl ProfileManager {
         Ok(())
     }
 
+    pub fn set_codex_usage_api_enabled(&mut self, enabled: bool) -> Result<(), AppError> {
+        self.state.codex_usage_api_enabled = enabled;
+        self.persist_state()?;
+        Ok(())
+    }
+
+    pub fn refresh_profile_codex_usage(&self, profile_id: &str) -> Result<ProfileSummary, AppError> {
+        let profile_dir = self.profile_dir(profile_id)?;
+        let auth_json = fs::read_to_string(profile_dir.join("auth.json"))?;
+        if !is_official_oauth_auth(&auth_json)? {
+            return Err(AppError::Message(
+                "Codex usage is only available for 官方 OAuth profiles.".into(),
+            ));
+        }
+        if !self.state.codex_usage_api_enabled {
+            return Err(AppError::Message(
+                "Codex usage query is disabled. Run the explicit enable action first.".into(),
+            ));
+        }
+
+        let mut metadata = self.read_profile_metadata(&profile_dir)?;
+        metadata.codex_usage = Some(fetch_codex_usage_snapshot(&auth_json)?);
+        self.write_profile_metadata(&profile_dir, &metadata)?;
+        Ok(ProfileSummary::from(metadata))
+    }
+
+    pub fn refresh_all_codex_usage(&self) -> Result<Vec<ProfileSummary>, AppError> {
+        let mut refreshed = Vec::new();
+        for profile in self.list_profiles()? {
+            if profile.auth_type_label != "官方 OAuth" {
+                continue;
+            }
+            refreshed.push(self.refresh_profile_codex_usage(&profile.id)?);
+        }
+        Ok(refreshed)
+    }
+
     pub fn open_target_dir(&self) -> Result<(), AppError> {
         fs::create_dir_all(&self.target_dir)?;
 
@@ -850,6 +928,7 @@ impl ProfileManager {
             last_selected_profile_id: manager.state.last_selected_profile_id.clone(),
             last_switch_profile_id: manager.state.last_switch_profile_id.clone(),
             last_switched_at: manager.state.last_switched_at.clone(),
+            codex_usage_api_enabled: manager.state.codex_usage_api_enabled,
             profiles: manager.list_profiles()?,
         })
     }
@@ -911,6 +990,7 @@ impl ProfileManager {
         updated_at: DateTime<Utc>,
         auth_json: &str,
         config_toml: &str,
+        codex_usage: Option<CodexUsageSnapshot>,
     ) -> Result<ProfileMetadata, AppError> {
         Ok(ProfileMetadata {
             id,
@@ -922,6 +1002,7 @@ impl ProfileManager {
             updated_at,
             auth_hash: auth_match_hash(auth_json)?,
             config_hash: managed_config_hash(config_toml)?,
+            codex_usage,
         })
     }
 
@@ -935,6 +1016,12 @@ impl ProfileManager {
         let existing_metadata = self.read_profile_metadata(&profile_dir)?;
         let normalized_config =
             normalize_config_toml_for_auth(auth_json, &repair_illegal_config_toml(config_toml))?;
+        let next_auth_hash = auth_match_hash(auth_json)?;
+        let preserved_codex_usage = if existing_metadata.auth_hash == next_auth_hash {
+            existing_metadata.codex_usage.clone()
+        } else {
+            None
+        };
 
         fs::write(profile_dir.join("auth.json"), auth_json)?;
         fs::write(profile_dir.join("config.toml"), &normalized_config)?;
@@ -948,6 +1035,7 @@ impl ProfileManager {
             Utc::now(),
             auth_json,
             &normalized_config,
+            preserved_codex_usage,
         )?;
 
         self.write_profile_metadata(&profile_dir, &metadata)
@@ -1167,6 +1255,7 @@ impl From<ProfileMetadata> for ProfileSummary {
             updated_at: value.updated_at,
             auth_hash: value.auth_hash,
             config_hash: value.config_hash,
+            codex_usage: value.codex_usage,
         }
     }
 }
@@ -1574,6 +1663,7 @@ const OAUTH_STRIP_SCALAR_KEYS: &[&str] = &[
     "network_access",
 ];
 const OAUTH_STRIP_TABLE_KEYS: &[&str] = &["model_providers"];
+const DEFAULT_CODEX_USAGE_ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/usage";
 
 fn is_official_oauth_auth(auth_json: &str) -> Result<bool, AppError> {
     let auth = serde_json::from_str::<serde_json::Value>(auth_json)
@@ -1791,6 +1881,157 @@ fn oauth_account_id(auth_json: &str) -> Option<String> {
                 .and_then(|value| value.as_str())
                 .map(|value| value.to_string())
         })
+}
+
+fn oauth_api_account_id(auth_json: &str) -> Option<String> {
+    let auth = serde_json::from_str::<serde_json::Value>(auth_json).ok()?;
+    auth.get("tokens")
+        .and_then(|value| value.as_object())
+        .and_then(|tokens| tokens.get("account_id"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string())
+        .or_else(|| oauth_account_id(auth_json))
+}
+
+fn oauth_access_token(auth_json: &str) -> Option<String> {
+    let auth = serde_json::from_str::<serde_json::Value>(auth_json).ok()?;
+    auth.get("tokens")
+        .and_then(|value| value.as_object())
+        .and_then(|tokens| tokens.get("access_token"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string())
+}
+
+fn oauth_plan_type(auth_json: &str) -> Option<String> {
+    let auth = serde_json::from_str::<serde_json::Value>(auth_json).ok()?;
+    auth.get("tokens")
+        .and_then(|value| value.as_object())
+        .and_then(|tokens| tokens.get("id_token"))
+        .and_then(|value| value.as_str())
+        .and_then(|id_token| {
+            let payload = id_token.split('.').nth(1)?;
+            let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
+            let json = serde_json::from_slice::<serde_json::Value>(&decoded).ok()?;
+            json.get("https://api.openai.com/auth")
+                .and_then(|section| section.get("chatgpt_plan_type"))
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_ascii_lowercase())
+        })
+}
+
+fn codex_usage_endpoint() -> String {
+    std::env::var("CODEX_AUTH_SWITCH_CODEX_USAGE_ENDPOINT")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_CODEX_USAGE_ENDPOINT.to_string())
+}
+
+fn fetch_codex_usage_snapshot(auth_json: &str) -> Result<CodexUsageSnapshot, AppError> {
+    let access_token = oauth_access_token(auth_json).ok_or_else(|| {
+        AppError::Message("The selected profile does not contain a ChatGPT access token.".into())
+    })?;
+    let account_id = oauth_api_account_id(auth_json).ok_or_else(|| {
+        AppError::Message("The selected profile does not contain a ChatGPT account id.".into())
+    })?;
+    let endpoint = codex_usage_endpoint();
+
+    let response = ureq::get(&endpoint)
+        .set("Authorization", &format!("Bearer {access_token}"))
+        .set("ChatGPT-Account-Id", &account_id)
+        .set("User-Agent", "codex-auth-switch")
+        .call()
+        .map_err(|error| AppError::Message(format!("Failed to fetch Codex usage: {error}")))?;
+    let body = response
+        .into_string()
+        .map_err(|error| AppError::Message(format!("Failed to read Codex usage response: {error}")))?;
+
+    parse_codex_usage_response(&body, auth_json)
+}
+
+fn parse_codex_usage_response(
+    body: &str,
+    auth_json: &str,
+) -> Result<CodexUsageSnapshot, AppError> {
+    let root = serde_json::from_str::<serde_json::Value>(body)?;
+    let rate_limit = root.get("rate_limit");
+    let primary = rate_limit
+        .and_then(|value| value.get("primary_window"))
+        .and_then(parse_codex_usage_window);
+    let secondary = rate_limit
+        .and_then(|value| value.get("secondary_window"))
+        .and_then(parse_codex_usage_window);
+
+    if primary.is_none() && secondary.is_none() {
+        return Err(AppError::Message(
+            "No usable Codex usage window was returned by the upstream endpoint.".into(),
+        ));
+    }
+
+    Ok(CodexUsageSnapshot {
+        source: "api".into(),
+        plan_type: root
+            .get("plan_type")
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_ascii_lowercase())
+            .or_else(|| oauth_plan_type(auth_json)),
+        primary,
+        secondary,
+        credits: root.get("credits").and_then(parse_codex_usage_credits),
+        updated_at: Utc::now(),
+    })
+}
+
+fn parse_codex_usage_window(value: &serde_json::Value) -> Option<CodexUsageWindow> {
+    if value.is_null() {
+        return None;
+    }
+
+    Some(CodexUsageWindow {
+        used_percent: value.get("used_percent").and_then(parse_usage_percent)?,
+        window_minutes: value
+            .get("limit_window_seconds")
+            .and_then(|seconds| seconds.as_i64())
+            .and_then(ceil_minutes),
+        resets_at: value
+            .get("reset_at")
+            .and_then(|timestamp| timestamp.as_i64())
+            .and_then(|timestamp| Utc.timestamp_opt(timestamp, 0).single()),
+    })
+}
+
+fn parse_codex_usage_credits(value: &serde_json::Value) -> Option<CodexUsageCredits> {
+    if value.is_null() {
+        return None;
+    }
+
+    Some(CodexUsageCredits {
+        has_credits: value
+            .get("has_credits")
+            .and_then(|field| field.as_bool())
+            .unwrap_or(false),
+        unlimited: value
+            .get("unlimited")
+            .and_then(|field| field.as_bool())
+            .unwrap_or(false),
+        balance: value
+            .get("balance")
+            .and_then(|field| field.as_str())
+            .map(|field| field.to_string()),
+    })
+}
+
+fn parse_usage_percent(value: &serde_json::Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_i64().map(|number| number as f64))
+}
+
+fn ceil_minutes(seconds: i64) -> Option<i64> {
+    if seconds <= 0 {
+        return None;
+    }
+    Some((seconds + 59) / 60)
 }
 
 fn suggested_profile_name(auth_json: &str, config_toml: &str) -> Result<String, AppError> {

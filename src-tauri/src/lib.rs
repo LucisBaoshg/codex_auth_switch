@@ -105,6 +105,33 @@ fn set_target_dir(app: AppHandle, target_dir: Option<String>) -> Result<AppSnaps
 }
 
 #[tauri::command]
+fn set_codex_usage_api_enabled(app: AppHandle, enabled: bool) -> Result<AppSnapshot, String> {
+    let mut manager = manager_from_app(&app)?;
+    manager
+        .set_codex_usage_api_enabled(enabled)
+        .map_err(|error| error.to_string())?;
+    manager.snapshot().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn refresh_profile_codex_usage(app: AppHandle, profile_id: String) -> Result<AppSnapshot, String> {
+    let manager = manager_from_app(&app)?;
+    manager
+        .refresh_profile_codex_usage(&profile_id)
+        .map_err(|error| error.to_string())?;
+    manager.snapshot().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn refresh_all_codex_usage(app: AppHandle) -> Result<AppSnapshot, String> {
+    let manager = manager_from_app(&app)?;
+    manager
+        .refresh_all_codex_usage()
+        .map_err(|error| error.to_string())?;
+    manager.snapshot().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn open_target_dir(app: AppHandle) -> Result<(), String> {
     manager_from_app(&app)?
         .open_target_dir()
@@ -153,6 +180,9 @@ pub fn run() {
             switch_profile,
             delete_profile,
             set_target_dir,
+            set_codex_usage_api_enabled,
+            refresh_profile_codex_usage,
+            refresh_all_codex_usage,
             open_target_dir,
             restart_codex,
             fix_session_database,

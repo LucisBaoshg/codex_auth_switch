@@ -15,7 +15,11 @@ on:
 jobs:
   publish-macos-intel:
     name: Publish macOS Intel
-    runs-on: macos-15-intel
+    # Build the Intel bundle on an Apple Silicon runner. This matches Tauri's
+    # documented GitHub Actions example and avoids repeated hangs seen on
+    # macos-15-intel during codesign.
+    runs-on: macos-latest
+    timeout-minutes: 45
     permissions:
       contents: write
 
@@ -40,6 +44,8 @@ jobs:
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
 
       - name: Install frontend dependencies
         run: npm ci

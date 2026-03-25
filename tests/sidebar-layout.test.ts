@@ -197,6 +197,102 @@ test("opens the editor flow when clicking the add-profile card", async () => {
   expect(document.querySelector("#editor-config-toml")).not.toBeNull();
 });
 
+test("renders codex usage as a plan header with two progress rows", async () => {
+  const usageUpdatedAt = "2026-03-25T21:56:00+08:00";
+  const fiveHourReset = "2026-03-26T01:45:00+08:00";
+  const weeklyReset = "2026-03-30T20:14:00+08:00";
+
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "load_snapshot") {
+      return {
+        targetDir: "/Users/example/.codex",
+        usingDefaultTargetDir: true,
+        targetExists: true,
+        targetAuthExists: true,
+        targetConfigExists: true,
+        targetUpdatedAt: "2026-03-25T00:00:00Z",
+        targetAuthTypeLabel: "官方 OAuth",
+        activeProfileId: "profile-1",
+        lastSelectedProfileId: "profile-1",
+        lastSwitchProfileId: "profile-1",
+        lastSwitchedAt: "2026-03-25T00:00:00Z",
+        codexUsageApiEnabled: true,
+        profiles: [
+          {
+            id: "profile-1",
+            name: "淘宝team",
+            notes: "自动从当前 Codex 配置生成",
+            authTypeLabel: "官方 OAuth",
+            createdAt: "2026-03-24T00:00:00Z",
+            updatedAt: "2026-03-24T14:19:00Z",
+            authHash: "auth-1",
+            configHash: "config-1",
+            codexUsage: {
+              source: "api",
+              planType: "team",
+              primary: {
+                usedPercent: 35,
+                windowMinutes: 300,
+                resetsAt: fiveHourReset,
+              },
+              secondary: {
+                usedPercent: 84,
+                windowMinutes: 10080,
+                resetsAt: weeklyReset,
+              },
+              credits: null,
+              updatedAt: usageUpdatedAt,
+            },
+          },
+        ],
+      };
+    }
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+
+  await import("../src/main");
+  await flushUi();
+
+  const expectedUpdatedAt = new Intl.DateTimeFormat("zh-CN", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(usageUpdatedAt));
+  const expectedFiveHourReset = `${new Intl.DateTimeFormat("en", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date(fiveHourReset))} on ${new Intl.DateTimeFormat("en", {
+    month: "short",
+    day: "numeric",
+  }).format(new Date(fiveHourReset))}`;
+  const expectedWeeklyReset = `${new Intl.DateTimeFormat("en", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date(weeklyReset))} on ${new Intl.DateTimeFormat("en", {
+    month: "short",
+    day: "numeric",
+  }).format(new Date(weeklyReset))}`;
+
+  expect(document.body.textContent).toContain("Codex Team Plan");
+  expect(document.body.textContent).toContain(`更新于：${expectedUpdatedAt}`);
+  expect(document.body.textContent).toContain(expectedFiveHourReset);
+  expect(document.body.textContent).toContain(expectedWeeklyReset);
+  expect(document.body.textContent).toContain("65%");
+  expect(document.body.textContent).toContain("16%");
+  expect(document.body.textContent).not.toContain("私有 API");
+  expect(document.querySelectorAll(".usage-progress-row")).toHaveLength(2);
+  expect(document.querySelector(".usage-stat")).toBeNull();
+  expect(
+    document.querySelector('[data-action="refresh-codex-usage"][data-id="profile-1"]'),
+  ).not.toBeNull();
+});
+
 test("shows a manual-restart success message after switching profiles", async () => {
   const initialSnapshot = {
     targetDir: "/Users/example/.codex",
