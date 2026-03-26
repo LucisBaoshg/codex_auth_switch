@@ -123,6 +123,15 @@ fn refresh_profile_codex_usage(app: AppHandle, profile_id: String) -> Result<App
 }
 
 #[tauri::command]
+fn refresh_profile_latency_probe(app: AppHandle, profile_id: String) -> Result<AppSnapshot, String> {
+    let manager = manager_from_app(&app)?;
+    manager
+        .refresh_profile_latency_probe(&profile_id)
+        .map_err(|error| error.to_string())?;
+    manager.snapshot().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn refresh_all_codex_usage(app: AppHandle) -> Result<AppSnapshot, String> {
     let manager = manager_from_app(&app)?;
     manager
@@ -182,6 +191,7 @@ pub fn run() {
             set_target_dir,
             set_codex_usage_api_enabled,
             refresh_profile_codex_usage,
+            refresh_profile_latency_probe,
             refresh_all_codex_usage,
             open_target_dir,
             restart_codex,

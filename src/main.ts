@@ -28,6 +28,16 @@ type CodexUsageSnapshot = {
   updatedAt: string;
 };
 
+type ThirdPartyLatencySnapshot = {
+  wireApi: string | null;
+  model: string | null;
+  ttftMs: number | null;
+  totalMs: number | null;
+  statusCode: number | null;
+  updatedAt: string;
+  error: string | null;
+};
+
 type ProfileSummary = {
   id: string;
   name: string;
@@ -38,6 +48,7 @@ type ProfileSummary = {
   authHash: string;
   configHash: string;
   codexUsage: CodexUsageSnapshot | null;
+  thirdPartyLatency: ThirdPartyLatencySnapshot | null;
 };
 
 type ProfileInput = {
@@ -177,6 +188,7 @@ const mockSnapshot: AppSnapshot = {
         credits: null,
         updatedAt: new Date().toISOString(),
       },
+      thirdPartyLatency: null,
     },
     {
       id: "profile-2",
@@ -188,6 +200,15 @@ const mockSnapshot: AppSnapshot = {
       authHash: "d18ff783cb10",
       configHash: "c450c91961af",
       codexUsage: null,
+      thirdPartyLatency: {
+        wireApi: "responses",
+        model: "gpt-5.4",
+        ttftMs: 1820,
+        totalMs: 4960,
+        statusCode: 200,
+        updatedAt: new Date().toISOString(),
+        error: null,
+      },
     },
   ],
 };
@@ -803,6 +824,35 @@ async function refreshAllCodexUsage(): Promise<void> {
   }
 }
 
+async function refreshProfileLatencyProbe(profileId: string, profileName: string): Promise<void> {
+  setBusy(true);
+  try {
+    if (!isTauriRuntime) {
+      const snapshot = state.snapshot;
+      if (!snapshot) {
+        throw new Error("当前没有可用快照。");
+      }
+      setSnapshot(snapshot);
+    } else {
+      const snapshot = await desktopInvoke<AppSnapshot>("refresh_profile_latency_probe", {
+        profileId,
+      });
+      setSnapshot(snapshot);
+      const probe = snapshot.profiles.find((profile) => profile.id === profileId)?.thirdPartyLatency;
+      if (probe?.error) {
+        setFlash("error", `「${profileName}」测速失败：${probe.error}`);
+        return;
+      }
+    }
+    setFlash("success", `已完成「${profileName}」第三方 API 测速。`);
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+
 function formatDateTime(value: string | null): string {
   if (!value) {
     return "还没有";
@@ -860,6 +910,13 @@ function formatUsageReset(window: CodexUsageWindow | null): string {
     month: "short",
   }).format(resetAt);
   return `${time} on ${date}`;
+}
+
+function formatLatencyDuration(ms: number | null): string {
+  if (ms == null) {
+    return "--";
+  }
+  return `${(Math.max(0, ms) / 1000).toFixed(2)}s`;
 }
 
 function renderUsageProgressRow(label: string, window: CodexUsageWindow | null): string {
@@ -925,6 +982,65 @@ function renderCodexUsagePanel(snapshot: AppSnapshot, profile: ProfileSummary): 
       <div class="usage-progress-list">
         ${renderUsageProgressRow("5H", primaryWindow)}
         ${renderUsageProgressRow("WEEKLY", weeklyWindow)}
+      </div>
+    </section>
+  `;
+}
+
+function renderThirdPartyLatencyPanel(profile: ProfileSummary): string {
+  if (profile.authTypeLabel !== "第三方 API") {
+    return "";
+  }
+
+  const probe = profile.thirdPartyLatency;
+  const updated = probe ? formatDateTime(probe.updatedAt) : "还没有";
+  const actionLabel = probe ? "重新测速" : "开始测速";
+  const probeMeta = [probe?.wireApi, probe?.model].filter(Boolean).join(" · ");
+
+  return `
+    <section class="latency-panel" data-role="third-party-latency-panel">
+      <div class="latency-panel-head">
+        <div class="latency-panel-copy">
+          <strong>第三方 API 测速</strong>
+          <span class="latency-panel-updated">更新于：${escapeHtml(updated)}</span>
+        </div>
+        <button
+          class="button button-ghost latency-refresh-button"
+          data-action="refresh-third-party-latency"
+          data-id="${profile.id}"
+          data-name="${escapeHtml(profile.name)}"
+          ${state.busy ? "disabled" : ""}
+        >
+          ${escapeHtml(actionLabel)}
+        </button>
+      </div>
+      ${
+        probe?.error
+          ? `<p class="latency-panel-error">测速失败：${escapeHtml(probe.error)}</p>`
+          : `
+            <div class="latency-panel-stats">
+              <div class="latency-stat">
+                <span class="latency-stat-label">首 Token</span>
+                <strong>${escapeHtml(formatLatencyDuration(probe?.ttftMs ?? null))}</strong>
+              </div>
+              <div class="latency-stat">
+                <span class="latency-stat-label">总耗时</span>
+                <strong>${escapeHtml(formatLatencyDuration(probe?.totalMs ?? null))}</strong>
+              </div>
+            </div>
+          `
+      }
+      <div class="latency-panel-meta">
+        ${
+          probeMeta
+            ? `<span>${escapeHtml(probeMeta)}</span>`
+            : `<span>点击按钮后会发送一次极小的流式请求用于测速</span>`
+        }
+        ${
+          probe?.statusCode != null
+            ? `<span>HTTP ${escapeHtml(String(probe.statusCode))}</span>`
+            : ""
+        }
       </div>
     </section>
   `;
@@ -1073,6 +1189,7 @@ function renderCardsPage(snapshot: AppSnapshot): string {
                   </div>
                   <p class="card-note" style="${!profile.notes ? 'opacity:0.5;font-style:italic;' : ''}">${escapeHtml(profile.notes || "暂无备注")}</p>
                   ${renderCodexUsagePanel(snapshot, profile)}
+                  ${renderThirdPartyLatencyPanel(profile)}
                   
                   <div class="card-actions-overlay">
                     <div style="display: flex; flex-direction: column; gap: 4px; flex-grow: 1;">
@@ -1355,6 +1472,12 @@ function bindEvents(): void {
         await refreshAllCodexUsage();
       } else if (action === "refresh-codex-usage" && button.dataset.id && button.dataset.name) {
         await refreshProfileCodexUsage(button.dataset.id, button.dataset.name);
+      } else if (
+        action === "refresh-third-party-latency" &&
+        button.dataset.id &&
+        button.dataset.name
+      ) {
+        await refreshProfileLatencyProbe(button.dataset.id, button.dataset.name);
       } else if (action === "new-profile") {
         await openEditorForNewProfile();
       } else if (action === "view-profile-details" && button.dataset.id) {

@@ -15,9 +15,58 @@ on:
         required: true
         default: "v1.0.0"
 
+concurrency:
+  group: release-${{ github.event.inputs.tag_name || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
+  prepare-release:
+    name: Prepare Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      release_id: ${{ steps.ensure-release.outputs.release_id }}
+
+    steps:
+      - name: Ensure GitHub release exists
+        id: ensure-release
+        uses: actions/github-script@v7
+        env:
+          TAG_NAME: ${{ github.event.inputs.tag_name || github.ref_name }}
+        with:
+          script: |
+            const tag = process.env.TAG_NAME;
+            try {
+              const existing = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag,
+              });
+              core.info(`Using existing release ${existing.data.id} for ${tag}`);
+              core.setOutput("release_id", String(existing.data.id));
+            } catch (error) {
+              if (error.status !== 404) {
+                throw error;
+              }
+
+              const created = await github.rest.repos.createRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag_name: tag,
+                name: `Codex Auth Switch ${tag}`,
+                body: "See the assets to download and install this version.",
+                draft: false,
+                prerelease: false,
+                generate_release_notes: true,
+              });
+              core.info(`Created release ${created.data.id} for ${tag}`);
+              core.setOutput("release_id", String(created.data.id));
+            }
+
   publish-tauri:
     name: Publish ${{ matrix.name }}
+    needs: prepare-release
     runs-on: ${{ matrix.platform }}
     permissions:
       contents: write
@@ -97,12 +146,8 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
+          releaseId: ${{ needs.prepare-release.outputs.release_id }}
           tagName: ${{ github.event.inputs.tag_name || github.ref_name }}
-          releaseName: Codex Auth Switch ${{ github.event.inputs.tag_name || github.ref_name }}
-          releaseBody: See the assets to download and install this version.
-          releaseDraft: false
-          prerelease: false
-          generateReleaseNotes: true
           args: ${{ matrix.args }}
 
   publish-linux-cli:

@@ -12,9 +12,49 @@ on:
         required: true
         default: "v1.0.0"
 
+concurrency:
+  group: release-${{ github.event.inputs.tag_name || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
+  resolve-release:
+    name: Resolve Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      release_id: ${{ steps.resolve.outputs.release_id }}
+
+    steps:
+      - name: Resolve existing GitHub release
+        id: resolve
+        uses: actions/github-script@v7
+        env:
+          TAG_NAME: ${{ github.event.inputs.tag_name || github.ref_name }}
+        with:
+          script: |
+            const tag = process.env.TAG_NAME;
+            try {
+              const release = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag,
+              });
+              core.info(`Using existing release ${release.data.id} for ${tag}`);
+              core.setOutput("release_id", String(release.data.id));
+            } catch (error) {
+              if (error.status === 404) {
+                core.setFailed(
+                  `Release for ${tag} does not exist yet. Run the main Publish Release workflow for this tag first.`
+                );
+                return;
+              }
+              throw error;
+            }
+
   publish-macos-intel:
     name: Publish macOS Intel
+    needs: resolve-release
     # Build the Intel bundle on an Apple Silicon runner. This matches Tauri's
     # documented GitHub Actions example and avoids repeated hangs seen on
     # macos-15-intel during codesign.
@@ -77,10 +117,6 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
+          releaseId: ${{ needs.resolve-release.outputs.release_id }}
           tagName: ${{ github.event.inputs.tag_name || github.ref_name }}
-          releaseName: Codex Auth Switch ${{ github.event.inputs.tag_name || github.ref_name }}
-          releaseBody: See the assets to download and install this version.
-          releaseDraft: false
-          prerelease: false
-          generateReleaseNotes: false
           args: --target x86_64-apple-darwin --bundles app,dmg

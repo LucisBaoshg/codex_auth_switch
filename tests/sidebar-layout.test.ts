@@ -293,6 +293,151 @@ test("renders codex usage as a plan header with two progress rows", async () => 
   ).not.toBeNull();
 });
 
+test("renders a third-party latency panel inside the profile card", async () => {
+  const probeUpdatedAt = "2026-03-26T10:12:00+08:00";
+
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "load_snapshot") {
+      return {
+        targetDir: "/Users/example/.codex",
+        usingDefaultTargetDir: true,
+        targetExists: true,
+        targetAuthExists: true,
+        targetConfigExists: true,
+        targetUpdatedAt: "2026-03-25T00:00:00Z",
+        targetAuthTypeLabel: "第三方 API",
+        activeProfileId: "profile-2",
+        lastSelectedProfileId: "profile-2",
+        lastSwitchProfileId: "profile-2",
+        lastSwitchedAt: "2026-03-25T00:00:00Z",
+        codexUsageApiEnabled: false,
+        profiles: [
+          {
+            id: "profile-2",
+            name: "aixj",
+            notes: "栋哥分享",
+            authTypeLabel: "第三方 API",
+            createdAt: "2026-03-24T00:00:00Z",
+            updatedAt: "2026-03-24T13:24:00Z",
+            authHash: "auth-2",
+            configHash: "config-2",
+            codexUsage: null,
+            thirdPartyLatency: {
+              wireApi: "responses",
+              model: "gpt-5.4",
+              ttftMs: 1820,
+              totalMs: 4960,
+              statusCode: 200,
+              updatedAt: probeUpdatedAt,
+              error: null,
+            },
+          },
+        ],
+      };
+    }
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+
+  await import("../src/main");
+  await flushUi();
+
+  const expectedUpdatedAt = new Intl.DateTimeFormat("zh-CN", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(probeUpdatedAt));
+
+  expect(document.body.textContent).toContain("第三方 API 测速");
+  expect(document.body.textContent).toContain(`更新于：${expectedUpdatedAt}`);
+  expect(document.body.textContent).toContain("首 Token");
+  expect(document.body.textContent).toContain("1.82s");
+  expect(document.body.textContent).toContain("总耗时");
+  expect(document.body.textContent).toContain("4.96s");
+  expect(document.body.textContent).toContain("responses · gpt-5.4");
+  expect(
+    document.querySelector('[data-action="refresh-third-party-latency"][data-id="profile-2"]'),
+  ).not.toBeNull();
+});
+
+test("refreshes third-party latency for the selected profile card", async () => {
+  const refreshedSnapshot = {
+    targetDir: "/Users/example/.codex",
+    usingDefaultTargetDir: true,
+    targetExists: true,
+    targetAuthExists: true,
+    targetConfigExists: true,
+    targetUpdatedAt: "2026-03-25T00:00:00Z",
+    targetAuthTypeLabel: "第三方 API",
+    activeProfileId: "profile-2",
+    lastSelectedProfileId: "profile-2",
+    lastSwitchProfileId: "profile-2",
+    lastSwitchedAt: "2026-03-25T00:00:00Z",
+    codexUsageApiEnabled: false,
+    profiles: [
+      {
+        id: "profile-2",
+        name: "aixj",
+        notes: "栋哥分享",
+        authTypeLabel: "第三方 API",
+        createdAt: "2026-03-24T00:00:00Z",
+        updatedAt: "2026-03-24T13:24:00Z",
+        authHash: "auth-2",
+        configHash: "config-2",
+        codexUsage: null,
+        thirdPartyLatency: {
+          wireApi: "chat_completions",
+          model: "gpt-4.1",
+          ttftMs: 960,
+          totalMs: 2410,
+          statusCode: 200,
+          updatedAt: "2026-03-26T10:15:00+08:00",
+          error: null,
+        },
+      },
+    ],
+  };
+
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "load_snapshot") {
+      return {
+        ...refreshedSnapshot,
+        profiles: refreshedSnapshot.profiles.map((profile) => ({
+          ...profile,
+          thirdPartyLatency: null,
+        })),
+      };
+    }
+    if (command === "refresh_profile_latency_probe") {
+      return refreshedSnapshot;
+    }
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+
+  await import("../src/main");
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="refresh-third-party-latency"][data-id="profile-2"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+  await flushUi();
+  await flushUi();
+
+  expect(invokeMock).toHaveBeenCalledWith("refresh_profile_latency_probe", { profileId: "profile-2" });
+  expect(document.body.textContent).toContain("0.96s");
+  expect(document.body.textContent).toContain("2.41s");
+  expect(document.body.textContent).toContain("已完成「aixj」第三方 API 测速。");
+});
+
 test("shows a manual-restart success message after switching profiles", async () => {
   const initialSnapshot = {
     targetDir: "/Users/example/.codex",

@@ -478,6 +478,100 @@ p { margin: 0; }
   font-size: 0.8rem;
 }
 
+.latency-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: linear-gradient(135deg, rgba(15, 23, 42, 0.03), rgba(15, 23, 42, 0.01));
+}
+
+@media (prefers-color-scheme: dark) {
+  .latency-panel {
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.02));
+  }
+}
+
+.latency-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.latency-panel-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.latency-panel-copy strong {
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+
+.latency-panel-updated {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.latency-panel-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.latency-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: rgba(15, 23, 42, 0.02);
+}
+
+@media (prefers-color-scheme: dark) {
+  .latency-stat {
+    background: rgba(255, 255, 255, 0.03);
+  }
+}
+
+.latency-stat-label {
+  color: var(--text-muted);
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.latency-stat strong {
+  color: var(--text-main);
+  font-size: 1rem;
+}
+
+.latency-panel-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--text-muted);
+  font-size: 0.74rem;
+}
+
+.latency-panel-error {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.18);
+  color: var(--danger);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
 @media (prefers-color-scheme: dark) {
   .usage-progress-track {
     background: rgba(255, 255, 255, 0.08);
@@ -814,6 +908,17 @@ p { margin: 0; }
   }
   .usage-panel-head {
     align-items: stretch;
+    flex-direction: column;
+  }
+  .latency-panel-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .latency-panel-stats {
+    grid-template-columns: 1fr;
+  }
+  .latency-panel-meta {
+    align-items: flex-start;
     flex-direction: column;
   }
   .usage-progress-head {

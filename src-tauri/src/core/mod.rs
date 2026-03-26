@@ -6,13 +6,14 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::{BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(target_os = "macos")]
 use std::thread;
 #[cfg(target_os = "macos")]
 use std::time::Duration;
+use std::time::Instant;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -54,6 +55,18 @@ pub struct CodexUsageSnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ThirdPartyLatencySnapshot {
+    pub wire_api: Option<String>,
+    pub model: Option<String>,
+    pub ttft_ms: Option<u64>,
+    pub total_ms: Option<u64>,
+    pub status_code: Option<u16>,
+    pub updated_at: DateTime<Utc>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProfileSummary {
     pub id: String,
     pub name: String,
@@ -64,6 +77,7 @@ pub struct ProfileSummary {
     pub auth_hash: String,
     pub config_hash: String,
     pub codex_usage: Option<CodexUsageSnapshot>,
+    pub third_party_latency: Option<ThirdPartyLatencySnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -189,6 +203,8 @@ struct ProfileMetadata {
     pub config_hash: String,
     #[serde(default)]
     pub codex_usage: Option<CodexUsageSnapshot>,
+    #[serde(default)]
+    pub third_party_latency: Option<ThirdPartyLatencySnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -196,6 +212,20 @@ struct SessionIndexEntry {
     id: String,
     thread_name: String,
     updated_at: String,
+}
+
+#[derive(Debug)]
+struct ThirdPartyProbeTarget {
+    api_key: String,
+    base_url: String,
+    model: String,
+    wire_api: String,
+}
+
+#[derive(Debug)]
+struct SseEvent {
+    event: Option<String>,
+    data: String,
 }
 
 #[derive(Debug, Error)]
@@ -324,6 +354,7 @@ impl ProfileManager {
             &fs::read_to_string(profile_dir.join("auth.json"))?,
             &fs::read_to_string(profile_dir.join("config.toml"))?,
             None,
+            None,
         )?;
 
         self.write_profile_metadata(&profile_dir, &metadata)?;
@@ -408,8 +439,16 @@ impl ProfileManager {
         let profile_dir = self.profile_dir(profile_id)?;
         let existing_metadata = self.read_profile_metadata(&profile_dir)?;
         let next_auth_hash = auth_match_hash(&input.auth_json)?;
+        let next_config_hash = managed_config_hash(&normalized_config)?;
         let preserved_codex_usage = if existing_metadata.auth_hash == next_auth_hash {
             existing_metadata.codex_usage.clone()
+        } else {
+            None
+        };
+        let preserved_third_party_latency = if existing_metadata.auth_hash == next_auth_hash
+            && existing_metadata.config_hash == next_config_hash
+        {
+            existing_metadata.third_party_latency.clone()
         } else {
             None
         };
@@ -427,6 +466,7 @@ impl ProfileManager {
             &fs::read_to_string(profile_dir.join("auth.json"))?,
             &fs::read_to_string(profile_dir.join("config.toml"))?,
             preserved_codex_usage,
+            preserved_third_party_latency,
         )?;
 
         self.write_profile_metadata(&profile_dir, &metadata)?;
@@ -878,6 +918,24 @@ impl ProfileManager {
         Ok(ProfileSummary::from(metadata))
     }
 
+    pub fn refresh_profile_latency_probe(&self, profile_id: &str) -> Result<ProfileSummary, AppError> {
+        let profile_dir = self.profile_dir(profile_id)?;
+        let auth_json = fs::read_to_string(profile_dir.join("auth.json"))?;
+        let config_toml = fs::read_to_string(profile_dir.join("config.toml"))?;
+        let mut metadata = self.read_profile_metadata(&profile_dir)?;
+
+        if metadata.auth_type_label != "第三方 API" {
+            return Err(AppError::Message(
+                "Third-party latency probe is only available for 第三方 API profiles.".into(),
+            ));
+        }
+
+        metadata.third_party_latency =
+            Some(fetch_third_party_latency_snapshot(&auth_json, &config_toml));
+        self.write_profile_metadata(&profile_dir, &metadata)?;
+        Ok(ProfileSummary::from(metadata))
+    }
+
     pub fn refresh_all_codex_usage(&self) -> Result<Vec<ProfileSummary>, AppError> {
         let mut refreshed = Vec::new();
         for profile in self.list_profiles()? {
@@ -991,6 +1049,7 @@ impl ProfileManager {
         auth_json: &str,
         config_toml: &str,
         codex_usage: Option<CodexUsageSnapshot>,
+        third_party_latency: Option<ThirdPartyLatencySnapshot>,
     ) -> Result<ProfileMetadata, AppError> {
         Ok(ProfileMetadata {
             id,
@@ -1003,6 +1062,7 @@ impl ProfileManager {
             auth_hash: auth_match_hash(auth_json)?,
             config_hash: managed_config_hash(config_toml)?,
             codex_usage,
+            third_party_latency,
         })
     }
 
@@ -1017,8 +1077,16 @@ impl ProfileManager {
         let normalized_config =
             normalize_config_toml_for_auth(auth_json, &repair_illegal_config_toml(config_toml))?;
         let next_auth_hash = auth_match_hash(auth_json)?;
+        let next_config_hash = managed_config_hash(&normalized_config)?;
         let preserved_codex_usage = if existing_metadata.auth_hash == next_auth_hash {
             existing_metadata.codex_usage.clone()
+        } else {
+            None
+        };
+        let preserved_third_party_latency = if existing_metadata.auth_hash == next_auth_hash
+            && existing_metadata.config_hash == next_config_hash
+        {
+            existing_metadata.third_party_latency.clone()
         } else {
             None
         };
@@ -1036,6 +1104,7 @@ impl ProfileManager {
             auth_json,
             &normalized_config,
             preserved_codex_usage,
+            preserved_third_party_latency,
         )?;
 
         self.write_profile_metadata(&profile_dir, &metadata)
@@ -1256,6 +1325,7 @@ impl From<ProfileMetadata> for ProfileSummary {
             auth_hash: value.auth_hash,
             config_hash: value.config_hash,
             codex_usage: value.codex_usage,
+            third_party_latency: value.third_party_latency,
         }
     }
 }
@@ -2032,6 +2102,323 @@ fn ceil_minutes(seconds: i64) -> Option<i64> {
         return None;
     }
     Some((seconds + 59) / 60)
+}
+
+fn fetch_third_party_latency_snapshot(
+    auth_json: &str,
+    config_toml: &str,
+) -> ThirdPartyLatencySnapshot {
+    match resolve_third_party_probe_target(auth_json, config_toml) {
+        Ok(target) => match target.wire_api.as_str() {
+            "responses" => probe_third_party_stream(&target, "/responses", responses_probe_body(&target)),
+            "chat_completions" => {
+                probe_third_party_stream(&target, "/chat/completions", chat_completions_probe_body(&target))
+            }
+            other => latency_probe_failure(
+                Some(other.to_string()),
+                Some(target.model),
+                None,
+                None,
+                format!("暂不支持 {other} 流式协议。"),
+            ),
+        },
+        Err(error) => latency_probe_failure(None, None, None, None, error.to_string()),
+    }
+}
+
+fn resolve_third_party_probe_target(
+    auth_json: &str,
+    config_toml: &str,
+) -> Result<ThirdPartyProbeTarget, AppError> {
+    let auth = serde_json::from_str::<serde_json::Value>(auth_json)
+        .map_err(|error| AppError::InvalidAuthJson(error.to_string()))?;
+    let api_key = auth
+        .get("OPENAI_API_KEY")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::Message("当前卡片缺少 OPENAI_API_KEY，无法执行第三方 API 测速。".into())
+        })?;
+
+    let config = parse_toml_table(config_toml)?;
+    let model = config
+        .get("model")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::Message("当前卡片缺少 model，无法执行测速。".into()))?;
+
+    let providers = config
+        .get("model_providers")
+        .and_then(|value| value.as_table())
+        .ok_or_else(|| AppError::Message("当前卡片缺少 model_providers 配置。".into()))?;
+
+    let provider_name = config
+        .get("model_provider")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| providers.keys().next().cloned())
+        .ok_or_else(|| AppError::Message("当前卡片缺少 model_provider 配置。".into()))?;
+
+    let provider = providers
+        .get(&provider_name)
+        .and_then(|value| value.as_table())
+        .ok_or_else(|| {
+            AppError::Message(format!(
+                "在 model_providers 中找不到 `{provider_name}` 的配置。"
+            ))
+        })?;
+
+    let base_url = provider
+        .get("base_url")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::Message("当前卡片缺少 base_url 配置。".into()))?;
+
+    let wire_api = provider
+        .get("wire_api")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "responses".into());
+
+    Ok(ThirdPartyProbeTarget {
+        api_key,
+        base_url,
+        model,
+        wire_api,
+    })
+}
+
+fn responses_probe_body(target: &ThirdPartyProbeTarget) -> String {
+    serde_json::json!({
+        "model": target.model,
+        "input": "Reply with exactly: ok",
+        "stream": true,
+        "max_output_tokens": 8,
+        "temperature": 0
+    })
+    .to_string()
+}
+
+fn chat_completions_probe_body(target: &ThirdPartyProbeTarget) -> String {
+    serde_json::json!({
+        "model": target.model,
+        "stream": true,
+        "temperature": 0,
+        "max_tokens": 8,
+        "messages": [
+            {
+                "role": "user",
+                "content": "Reply with exactly: ok"
+            }
+        ]
+    })
+    .to_string()
+}
+
+fn probe_third_party_stream(
+    target: &ThirdPartyProbeTarget,
+    path: &str,
+    body: String,
+) -> ThirdPartyLatencySnapshot {
+    let started_at = Utc::now();
+    let started = Instant::now();
+    let endpoint = format!("{}{}", target.base_url, path);
+    let response = ureq::post(&endpoint)
+        .set("Authorization", &format!("Bearer {}", target.api_key))
+        .set("Content-Type", "application/json")
+        .set("Accept", "text/event-stream")
+        .set("User-Agent", "codex-auth-switch")
+        .send_string(&body);
+
+    match response {
+        Ok(response) => {
+            let status_code = Some(response.status() as u16);
+            let mut reader = BufReader::new(response.into_reader());
+            let mut ttft_ms = None;
+
+            loop {
+                let event = match next_sse_event(&mut reader) {
+                    Ok(Some(event)) => event,
+                    Ok(None) => break,
+                    Err(error) => {
+                        return latency_probe_failure(
+                            Some(target.wire_api.clone()),
+                            Some(target.model.clone()),
+                            status_code,
+                            Some(started.elapsed().as_millis() as u64),
+                            format!("读取流式响应失败：{error}"),
+                        )
+                    }
+                };
+
+                if event.data.trim() == "[DONE]" {
+                    break;
+                }
+
+                let first_text = match target.wire_api.as_str() {
+                    "responses" => extract_first_responses_delta(&event),
+                    "chat_completions" => extract_first_chat_completions_delta(&event),
+                    _ => None,
+                };
+
+                if ttft_ms.is_none()
+                    && first_text
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty())
+                {
+                    ttft_ms = Some(started.elapsed().as_millis() as u64);
+                }
+            }
+
+            let total_ms = Some(started.elapsed().as_millis() as u64);
+            if ttft_ms.is_none() {
+                return latency_probe_failure(
+                    Some(target.wire_api.clone()),
+                    Some(target.model.clone()),
+                    status_code,
+                    total_ms,
+                    "上游没有返回可识别的首个文本 token。".into(),
+                );
+            }
+
+            ThirdPartyLatencySnapshot {
+                wire_api: Some(target.wire_api.clone()),
+                model: Some(target.model.clone()),
+                ttft_ms,
+                total_ms,
+                status_code,
+                updated_at: started_at,
+                error: None,
+            }
+        }
+        Err(ureq::Error::Status(code, response)) => {
+            let body = response.into_string().unwrap_or_default();
+            latency_probe_failure(
+                Some(target.wire_api.clone()),
+                Some(target.model.clone()),
+                Some(code as u16),
+                Some(started.elapsed().as_millis() as u64),
+                format!(
+                    "上游返回 HTTP {}{}",
+                    code,
+                    if body.trim().is_empty() {
+                        String::new()
+                    } else {
+                        format!("：{}", truncate_probe_error(&body))
+                    }
+                ),
+            )
+        }
+        Err(ureq::Error::Transport(error)) => latency_probe_failure(
+            Some(target.wire_api.clone()),
+            Some(target.model.clone()),
+            None,
+            Some(started.elapsed().as_millis() as u64),
+            format!("请求失败：{error}"),
+        ),
+    }
+}
+
+fn next_sse_event(reader: &mut impl BufRead) -> Result<Option<SseEvent>, std::io::Error> {
+    let mut event = None;
+    let mut data_lines = Vec::new();
+    let mut saw_payload = false;
+
+    loop {
+        let mut line = String::new();
+        let bytes_read = reader.read_line(&mut line)?;
+        if bytes_read == 0 {
+            if !saw_payload {
+                return Ok(None);
+            }
+            break;
+        }
+
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed.is_empty() {
+            if saw_payload {
+                break;
+            }
+            continue;
+        }
+
+        saw_payload = true;
+        if let Some(value) = trimmed.strip_prefix("event:") {
+            event = Some(value.trim().to_string());
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix("data:") {
+            data_lines.push(value.trim_start().to_string());
+        }
+    }
+
+    Ok(Some(SseEvent {
+        event,
+        data: data_lines.join("\n"),
+    }))
+}
+
+fn extract_first_responses_delta(event: &SseEvent) -> Option<String> {
+    if let Some(name) = event.event.as_deref() {
+        if !name.contains("delta") && !name.contains("output_text") {
+            return None;
+        }
+    }
+
+    let payload = serde_json::from_str::<serde_json::Value>(&event.data).ok()?;
+    payload
+        .get("delta")
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string())
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn extract_first_chat_completions_delta(event: &SseEvent) -> Option<String> {
+    let payload = serde_json::from_str::<serde_json::Value>(&event.data).ok()?;
+    payload
+        .get("choices")
+        .and_then(|value| value.as_array())
+        .and_then(|choices| {
+            choices.iter().find_map(|choice| {
+                choice
+                    .get("delta")
+                    .and_then(|delta| delta.get("content"))
+                    .and_then(|content| content.as_str())
+                    .map(|content| content.to_string())
+                    .filter(|content| !content.trim().is_empty())
+            })
+        })
+}
+
+fn latency_probe_failure(
+    wire_api: Option<String>,
+    model: Option<String>,
+    status_code: Option<u16>,
+    total_ms: Option<u64>,
+    error: String,
+) -> ThirdPartyLatencySnapshot {
+    ThirdPartyLatencySnapshot {
+        wire_api,
+        model,
+        ttft_ms: None,
+        total_ms,
+        status_code,
+        updated_at: Utc::now(),
+        error: Some(error),
+    }
+}
+
+fn truncate_probe_error(value: &str) -> String {
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= 120 {
+        return compact;
+    }
+    compact.chars().take(120).collect::<String>() + "..."
 }
 
 fn suggested_profile_name(auth_json: &str, config_toml: &str) -> Result<String, AppError> {
