@@ -51,6 +51,15 @@ multi_agent = true
 "#
 }
 
+fn runtime_growth_sections() -> &'static str {
+    r#"
+windows_wsl_setup_acknowledged = true
+
+[projects."/tmp/runtime-growth"]
+trust_level = "trusted"
+"#
+}
+
 fn official_config_toml(model: &str) -> String {
     format!(
         r#"model = "{model}"
@@ -100,6 +109,10 @@ requires_openai_auth = true
 {}"#,
         local_sections()
     )
+}
+
+fn config_with_shared_growth(config_toml: &str) -> String {
+    format!("{config_toml}\n{}", runtime_growth_sections())
 }
 
 fn temp_manager() -> (TempDir, TempDir, ProfileManager) {
@@ -481,7 +494,7 @@ fn switch_profile_syncs_current_auth_and_managed_config_back_to_previous_profile
     .expect("rewrite auth");
     fs::write(
         target_dir.path().join("config.toml"),
-        official_config_toml("gpt-5.4-turbo"),
+        config_with_shared_growth(&stale_official_config_toml("gpt-5.4-turbo")),
     )
     .expect("rewrite config");
 
@@ -493,6 +506,140 @@ fn switch_profile_syncs_current_auth_and_managed_config_back_to_previous_profile
         .get_profile_document(&profile_a.id)
         .expect("load synced profile");
     assert!(synced.config_toml.contains("model = \"gpt-5.4-turbo\""));
+    assert!(synced.config_toml.contains("windows_wsl_setup_acknowledged = true"));
+    assert!(synced
+        .config_toml
+        .contains("[projects.\"/tmp/runtime-growth\"]"));
+    assert!(!synced.config_toml.contains("model_provider ="));
+    assert!(!synced.config_toml.contains("[model_providers."));
+    assert!(!synced.config_toml.contains("base_url ="));
+}
+
+#[test]
+fn switch_profile_merges_shared_runtime_config_without_polluting_official_profile() {
+    let (_app_dir, target_dir, mut manager) = temp_manager();
+
+    let official = manager
+        .import_profile(ProfileInput {
+            name: "Official".into(),
+            notes: String::new(),
+            auth_json: oauth_auth_json("one@example.com", "user-a", "acct-a"),
+            config_toml: official_config_toml("gpt-5.4"),
+        })
+        .expect("import official");
+    let third_party = manager
+        .import_profile(ProfileInput {
+            name: "Third Party".into(),
+            notes: String::new(),
+            auth_json: api_key_auth_json("sk-third"),
+            config_toml: third_party_config_toml("gpt-5.4"),
+        })
+        .expect("import third party");
+
+    manager
+        .switch_profile(&third_party.id)
+        .expect("switch to third party");
+
+    fs::write(
+        target_dir.path().join("config.toml"),
+        config_with_shared_growth(&third_party_config_toml("gpt-5.4")),
+    )
+    .expect("seed runtime growth");
+
+    manager
+        .switch_profile(&official.id)
+        .expect("switch to official");
+
+    let switched =
+        fs::read_to_string(target_dir.path().join("config.toml")).expect("read switched config");
+    assert!(switched.contains("model = \"gpt-5.4\""));
+    assert!(switched.contains("model_reasoning_effort = \"medium\""));
+    assert!(switched.contains("windows_wsl_setup_acknowledged = true"));
+    assert!(switched.contains("[projects.\"/tmp/runtime-growth\"]"));
+    assert!(!switched.contains("model_provider ="));
+    assert!(!switched.contains("review_model ="));
+    assert!(!switched.contains("disable_response_storage ="));
+    assert!(!switched.contains("network_access ="));
+    assert!(!switched.contains("model_context_window ="));
+    assert!(!switched.contains("model_auto_compact_token_limit ="));
+    assert!(!switched.contains("[model_providers."));
+    assert!(!switched.contains("base_url ="));
+}
+
+#[test]
+fn switch_profile_updates_selected_profile_document_with_effective_merged_config() {
+    let (_app_dir, target_dir, mut manager) = temp_manager();
+
+    let official = manager
+        .import_profile(ProfileInput {
+            name: "Official".into(),
+            notes: String::new(),
+            auth_json: oauth_auth_json("one@example.com", "user-a", "acct-a"),
+            config_toml: official_config_toml("gpt-5.4"),
+        })
+        .expect("import official");
+    let third_party = manager
+        .import_profile(ProfileInput {
+            name: "Third Party".into(),
+            notes: String::new(),
+            auth_json: api_key_auth_json("sk-third"),
+            config_toml: third_party_config_toml("gpt-5.4"),
+        })
+        .expect("import third party");
+
+    manager
+        .switch_profile(&third_party.id)
+        .expect("switch to third party");
+
+    fs::write(
+        target_dir.path().join("config.toml"),
+        config_with_shared_growth(&third_party_config_toml("gpt-5.4")),
+    )
+    .expect("seed runtime growth");
+
+    manager
+        .switch_profile(&official.id)
+        .expect("switch to official");
+
+    let saved = manager
+        .get_profile_document(&official.id)
+        .expect("load updated official profile");
+    assert!(saved.config_toml.contains("model = \"gpt-5.4\""));
+    assert!(saved.config_toml.contains("model_reasoning_effort = \"medium\""));
+    assert!(saved.config_toml.contains("windows_wsl_setup_acknowledged = true"));
+    assert!(saved.config_toml.contains("[projects.\"/tmp/runtime-growth\"]"));
+    assert!(saved.config_toml.contains("[mcp_servers.playwright]"));
+    assert!(saved.config_toml.contains("[features]"));
+    assert!(!saved.config_toml.contains("model_provider ="));
+    assert!(!saved.config_toml.contains("[model_providers."));
+}
+
+#[test]
+fn switch_profile_keeps_shared_sections_when_target_config_is_missing() {
+    let (_app_dir, target_dir, mut manager) = temp_manager();
+
+    let official = manager
+        .import_profile(ProfileInput {
+            name: "Official".into(),
+            notes: String::new(),
+            auth_json: oauth_auth_json("one@example.com", "user-a", "acct-a"),
+            config_toml: config_with_shared_growth(&official_config_toml("gpt-5.4")),
+        })
+        .expect("import official");
+
+    manager
+        .switch_profile(&official.id)
+        .expect("switch with empty target");
+
+    let switched =
+        fs::read_to_string(target_dir.path().join("config.toml")).expect("read switched config");
+    assert!(switched.contains("model = \"gpt-5.4\""));
+    assert!(switched.contains("model_reasoning_effort = \"medium\""));
+    assert!(switched.contains("windows_wsl_setup_acknowledged = true"));
+    assert!(switched.contains("[projects.\"/tmp/demo\"]"));
+    assert!(switched.contains("[projects.\"/tmp/runtime-growth\"]"));
+    assert!(switched.contains("[mcp_servers.playwright]"));
+    assert!(switched.contains("[features]"));
 }
 
 #[test]

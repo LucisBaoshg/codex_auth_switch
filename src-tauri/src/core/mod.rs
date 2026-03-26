@@ -439,7 +439,7 @@ impl ProfileManager {
         let profile_dir = self.profile_dir(profile_id)?;
         let existing_metadata = self.read_profile_metadata(&profile_dir)?;
         let next_auth_hash = auth_match_hash(&input.auth_json)?;
-        let next_config_hash = managed_config_hash(&normalized_config)?;
+        let next_config_hash = managed_config_hash(&input.auth_json, &normalized_config)?;
         let preserved_codex_usage = if existing_metadata.auth_hash == next_auth_hash {
             existing_metadata.codex_usage.clone()
         } else {
@@ -816,13 +816,21 @@ impl ProfileManager {
         let next_profile_config = fs::read_to_string(profile_dir.join("config.toml"))?;
         let next_config_toml = match current_config_toml {
             Some(current_config_toml) => {
-                merge_profile_managed_config(&current_config_toml, &next_profile_config)?
+                merge_profile_managed_config(
+                    &current_config_toml,
+                    &next_auth_json,
+                    &next_profile_config,
+                )?
             }
-            None => managed_config_toml(&next_profile_config)?,
+            None => normalize_config_toml_for_auth(
+                &next_auth_json,
+                &repair_illegal_config_toml(&next_profile_config),
+            )?,
         };
 
         fs::write(self.target_auth_path(), &next_auth_json)?;
         fs::write(self.target_config_path(), &next_config_toml)?;
+        self.sync_runtime_state_to_profile(profile_id, &next_auth_json, &next_config_toml)?;
 
         let switched_at = Utc::now();
         self.state.last_selected_profile_id = Some(profile_id.to_string());
@@ -831,7 +839,7 @@ impl ProfileManager {
         self.persist_target_marker(TargetMarkerFile {
             profile_id: profile_id.to_string(),
             auth_hash: auth_match_hash(&next_auth_json)?,
-            config_hash: managed_config_hash(&next_config_toml)?,
+            config_hash: managed_config_hash(&next_auth_json, &next_config_toml)?,
             updated_at: switched_at,
         })?;
         self.persist_state()?;
@@ -852,7 +860,11 @@ impl ProfileManager {
         }
 
         let auth_hash = auth_match_hash(&fs::read_to_string(self.target_auth_path())?)?;
-        let config_hash = managed_config_hash(&fs::read_to_string(self.target_config_path())?)?;
+        let auth_json = fs::read_to_string(self.target_auth_path())?;
+        let config_hash = managed_config_hash(
+            &auth_json,
+            &fs::read_to_string(self.target_config_path())?,
+        )?;
 
         if let Some(marker) = self.read_target_marker()? {
             if marker.auth_hash == auth_hash && marker.config_hash == config_hash {
@@ -1060,7 +1072,7 @@ impl ProfileManager {
             created_at,
             updated_at,
             auth_hash: auth_match_hash(auth_json)?,
-            config_hash: managed_config_hash(config_toml)?,
+            config_hash: managed_config_hash(auth_json, config_toml)?,
             codex_usage,
             third_party_latency,
         })
@@ -1077,7 +1089,7 @@ impl ProfileManager {
         let normalized_config =
             normalize_config_toml_for_auth(auth_json, &repair_illegal_config_toml(config_toml))?;
         let next_auth_hash = auth_match_hash(auth_json)?;
-        let next_config_hash = managed_config_hash(&normalized_config)?;
+        let next_config_hash = managed_config_hash(auth_json, &normalized_config)?;
         let preserved_codex_usage = if existing_metadata.auth_hash == next_auth_hash {
             existing_metadata.codex_usage.clone()
         } else {
@@ -1259,7 +1271,7 @@ impl ProfileManager {
         let auth_json = fs::read_to_string(self.target_auth_path())?;
         let config_toml = fs::read_to_string(self.target_config_path())?;
         let auth_hash = auth_match_hash(&auth_json)?;
-        let config_hash = managed_config_hash(&config_toml)?;
+        let config_hash = managed_config_hash(&auth_json, &config_toml)?;
 
         if let Some(marker) = self.read_target_marker()? {
             if marker.auth_hash == auth_hash && marker.config_hash == config_hash {
@@ -1712,7 +1724,17 @@ mod tests {
     }
 }
 
-const PROFILE_MANAGED_SCALAR_KEYS: &[&str] = &[
+const COMMON_PROFILE_SCALAR_KEYS: &[&str] = &["model", "model_reasoning_effort"];
+const THIRD_PARTY_PROFILE_SCALAR_KEYS: &[&str] = &[
+    "model_provider",
+    "review_model",
+    "model_context_window",
+    "model_auto_compact_token_limit",
+    "disable_response_storage",
+    "network_access",
+];
+const THIRD_PARTY_PROFILE_TABLE_KEYS: &[&str] = &["model_providers"];
+const ALL_PROFILE_SCALAR_KEYS: &[&str] = &[
     "model_provider",
     "model",
     "review_model",
@@ -1722,17 +1744,7 @@ const PROFILE_MANAGED_SCALAR_KEYS: &[&str] = &[
     "disable_response_storage",
     "network_access",
 ];
-
-const PROFILE_MANAGED_TABLE_KEYS: &[&str] = &["model_providers"];
-const OAUTH_STRIP_SCALAR_KEYS: &[&str] = &[
-    "model_provider",
-    "review_model",
-    "model_context_window",
-    "model_auto_compact_token_limit",
-    "disable_response_storage",
-    "network_access",
-];
-const OAUTH_STRIP_TABLE_KEYS: &[&str] = &["model_providers"];
+const ALL_PROFILE_TABLE_KEYS: &[&str] = &["model_providers"];
 const DEFAULT_CODEX_USAGE_ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/usage";
 
 fn is_official_oauth_auth(auth_json: &str) -> Result<bool, AppError> {
@@ -1774,76 +1786,84 @@ fn parse_toml_table(contents: &str) -> Result<toml::map::Map<String, toml::Value
     }
 }
 
-fn managed_config_table(
+fn shared_config_table(
     table: &toml::map::Map<String, toml::Value>,
 ) -> toml::map::Map<String, toml::Value> {
-    let mut managed = toml::map::Map::new();
+    let mut shared = table.clone();
 
-    for key in PROFILE_MANAGED_SCALAR_KEYS {
-        if let Some(value) = table.get(*key) {
-            managed.insert((*key).to_string(), value.clone());
-        }
+    for key in ALL_PROFILE_SCALAR_KEYS {
+        shared.remove(*key);
     }
 
-    for key in PROFILE_MANAGED_TABLE_KEYS {
-        if let Some(value) = table.get(*key) {
-            managed.insert((*key).to_string(), value.clone());
-        }
+    for key in ALL_PROFILE_TABLE_KEYS {
+        shared.remove(*key);
     }
 
-    managed
+    shared
 }
 
-fn managed_config_hash(contents: &str) -> Result<String, AppError> {
+fn managed_config_table(
+    auth_json: &str,
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<toml::map::Map<String, toml::Value>, AppError> {
+    let mut managed = toml::map::Map::new();
+
+    for key in COMMON_PROFILE_SCALAR_KEYS {
+        if let Some(value) = table.get(*key) {
+            managed.insert((*key).to_string(), value.clone());
+        }
+    }
+
+    if !is_official_oauth_auth(auth_json)? {
+        for key in THIRD_PARTY_PROFILE_SCALAR_KEYS {
+            if let Some(value) = table.get(*key) {
+                managed.insert((*key).to_string(), value.clone());
+            }
+        }
+
+        for key in THIRD_PARTY_PROFILE_TABLE_KEYS {
+            if let Some(value) = table.get(*key) {
+                managed.insert((*key).to_string(), value.clone());
+            }
+        }
+    }
+
+    Ok(managed)
+}
+
+fn managed_config_hash(auth_json: &str, contents: &str) -> Result<String, AppError> {
     let table = parse_toml_table(contents)?;
-    let serialized = toml::to_string(&toml::Value::Table(managed_config_table(&table)))
-        .map_err(|error| AppError::Message(error.to_string()))?;
+    let serialized =
+        toml::to_string(&toml::Value::Table(managed_config_table(auth_json, &table)?))
+            .map_err(|error| AppError::Message(error.to_string()))?;
     Ok(sha256_bytes(serialized.as_bytes()))
 }
 
-fn managed_config_toml(contents: &str) -> Result<String, AppError> {
-    let table = parse_toml_table(contents)?;
-    toml::to_string_pretty(&toml::Value::Table(managed_config_table(&table)))
-        .map_err(|error| AppError::Message(error.to_string()))
-}
-
 fn normalize_config_toml_for_auth(auth_json: &str, config_toml: &str) -> Result<String, AppError> {
-    let mut table = parse_toml_table(config_toml)?;
-
-    if is_official_oauth_auth(auth_json)? {
-        for key in OAUTH_STRIP_SCALAR_KEYS {
-            table.remove(*key);
-        }
-        for key in OAUTH_STRIP_TABLE_KEYS {
-            table.remove(*key);
-        }
+    let table = parse_toml_table(config_toml)?;
+    let mut normalized = shared_config_table(&table);
+    for (key, value) in managed_config_table(auth_json, &table)? {
+        normalized.insert(key, value);
     }
 
-    toml::to_string_pretty(&toml::Value::Table(table))
+    toml::to_string_pretty(&toml::Value::Table(normalized))
         .map_err(|error| AppError::Message(error.to_string()))
 }
 
 fn merge_profile_managed_config(
     current_config_toml: &str,
+    next_auth_json: &str,
     profile_config_toml: &str,
 ) -> Result<String, AppError> {
-    let mut current_table = parse_toml_table(current_config_toml)?;
+    let current_table = parse_toml_table(current_config_toml)?;
     let profile_table = parse_toml_table(profile_config_toml)?;
-    let managed_profile = managed_config_table(&profile_table);
+    let mut merged = shared_config_table(&current_table);
 
-    for key in PROFILE_MANAGED_SCALAR_KEYS {
-        current_table.remove(*key);
+    for (key, value) in managed_config_table(next_auth_json, &profile_table)? {
+        merged.insert(key, value);
     }
 
-    for key in PROFILE_MANAGED_TABLE_KEYS {
-        current_table.remove(*key);
-    }
-
-    for (key, value) in managed_profile {
-        current_table.insert(key, value);
-    }
-
-    toml::to_string_pretty(&toml::Value::Table(current_table))
+    toml::to_string_pretty(&toml::Value::Table(merged))
         .map_err(|error| AppError::Message(error.to_string()))
 }
 
