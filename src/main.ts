@@ -219,6 +219,7 @@ const state: {
   selectedProfileId: string | null;
   editor: EditorState;
   busy: boolean;
+  pendingActions: Set<string>;
   flash: { kind: FlashKind; text: string } | null;
   activeTab: "local" | "network";
   networkProfiles: NetworkProfile[];
@@ -234,6 +235,7 @@ const state: {
   selectedProfileId: null,
   editor: createEditorState(),
   busy: false,
+  pendingActions: new Set<string>(),
   flash: null,
   activeTab: "local",
   networkProfiles: [],
@@ -258,6 +260,39 @@ function setBusy(nextBusy: boolean): void {
   state.busy = nextBusy;
   render();
 }
+
+function beginPendingAction(key: string): void {
+  state.pendingActions.add(key);
+  render();
+}
+
+function endPendingAction(key: string): void {
+  state.pendingActions.delete(key);
+  render();
+}
+
+function isPendingAction(key: string): boolean {
+  return state.pendingActions.has(key);
+}
+
+function isPendingActionPrefix(prefix: string): boolean {
+  for (const key of state.pendingActions) {
+    if (key === prefix || key.startsWith(`${prefix}:`)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function usageRefreshActionKey(profileId: string): string {
+  return `codex-usage:${profileId}`;
+}
+
+function latencyProbeActionKey(profileId: string): string {
+  return `latency-probe:${profileId}`;
+}
+
+const refreshAllUsageActionKey = "codex-usage:all";
 
 function setSnapshot(snapshot: AppSnapshot): void {
   state.snapshot = snapshot;
@@ -779,8 +814,10 @@ async function setCodexUsageApiEnabled(enabled: boolean): Promise<void> {
 }
 
 async function refreshProfileCodexUsage(profileId: string, profileName: string): Promise<void> {
-  setBusy(true);
+  const actionKey = usageRefreshActionKey(profileId);
+  beginPendingAction(actionKey);
   try {
+    setFlash("info", `正在刷新「${profileName}」的 Codex 额度…`);
     if (!isTauriRuntime) {
       const snapshot = state.snapshot;
       if (!snapshot) {
@@ -797,14 +834,14 @@ async function refreshProfileCodexUsage(profileId: string, profileName: string):
   } catch (error) {
     setFlash("error", error instanceof Error ? error.message : String(error));
   } finally {
-    state.busy = false;
-    render();
+    endPendingAction(actionKey);
   }
 }
 
 async function refreshAllCodexUsage(): Promise<void> {
-  setBusy(true);
+  beginPendingAction(refreshAllUsageActionKey);
   try {
+    setFlash("info", "正在刷新全部官方 OAuth 档案的 Codex 额度…");
     if (!isTauriRuntime) {
       const snapshot = state.snapshot;
       if (!snapshot) {
@@ -819,14 +856,15 @@ async function refreshAllCodexUsage(): Promise<void> {
   } catch (error) {
     setFlash("error", error instanceof Error ? error.message : String(error));
   } finally {
-    state.busy = false;
-    render();
+    endPendingAction(refreshAllUsageActionKey);
   }
 }
 
 async function refreshProfileLatencyProbe(profileId: string, profileName: string): Promise<void> {
-  setBusy(true);
+  const actionKey = latencyProbeActionKey(profileId);
+  beginPendingAction(actionKey);
   try {
+    setFlash("info", `正在为「${profileName}」执行第三方 API 测速…`);
     if (!isTauriRuntime) {
       const snapshot = state.snapshot;
       if (!snapshot) {
@@ -848,8 +886,7 @@ async function refreshProfileLatencyProbe(profileId: string, profileName: string
   } catch (error) {
     setFlash("error", error instanceof Error ? error.message : String(error));
   } finally {
-    state.busy = false;
-    render();
+    endPendingAction(actionKey);
   }
 }
 
@@ -947,13 +984,21 @@ function renderCodexUsagePanel(snapshot: AppSnapshot, profile: ProfileSummary): 
   const primaryWindow = selectUsageWindow(usage, 300, true);
   const weeklyWindow = selectUsageWindow(usage, 10080, false);
   const updated = usage ? formatDateTime(usage.updatedAt) : "还没有";
+  const refreshingUsage = isPendingAction(usageRefreshActionKey(profile.id));
+  const refreshingAllUsage = isPendingAction(refreshAllUsageActionKey);
+  const usageButtonLabel = refreshingUsage ? "刷新中..." : "刷新额度";
+  const usageUpdatedCopy = refreshingUsage
+    ? "正在刷新额度…"
+    : refreshingAllUsage
+      ? "批量刷新中…"
+      : `更新于：${updated}`;
 
   return `
     <section class="usage-panel">
       <div class="usage-panel-head">
         <div class="usage-panel-copy">
           <strong>${escapeHtml(formatPlanTitle(usage?.planType ?? null))}</strong>
-          <span class="usage-panel-updated">更新于：${escapeHtml(updated)}</span>
+          <span class="usage-panel-updated">${escapeHtml(usageUpdatedCopy)}</span>
         </div>
         ${
           snapshot.codexUsageApiEnabled
@@ -963,16 +1008,16 @@ function renderCodexUsagePanel(snapshot: AppSnapshot, profile: ProfileSummary): 
                 data-action="refresh-codex-usage"
                 data-id="${profile.id}"
                 data-name="${escapeHtml(profile.name)}"
-                ${state.busy ? "disabled" : ""}
+                ${state.busy || refreshingUsage || refreshingAllUsage ? "disabled" : ""}
               >
-                刷新额度
+                ${escapeHtml(usageButtonLabel)}
               </button>
             `
             : `
               <button
                 class="button button-ghost usage-refresh-button"
                 data-action="enable-codex-usage"
-                ${state.busy ? "disabled" : ""}
+                ${state.busy || refreshingAllUsage ? "disabled" : ""}
               >
                 启用额度查询
               </button>
@@ -994,22 +1039,24 @@ function renderThirdPartyLatencyPanel(profile: ProfileSummary): string {
 
   const probe = profile.thirdPartyLatency;
   const updated = probe ? formatDateTime(probe.updatedAt) : "还没有";
-  const actionLabel = probe ? "重新测速" : "开始测速";
+  const refreshingLatency = isPendingAction(latencyProbeActionKey(profile.id));
+  const actionLabel = refreshingLatency ? "测速中..." : probe ? "重新测速" : "开始测速";
   const probeMeta = [probe?.wireApi, probe?.model].filter(Boolean).join(" · ");
+  const probeUpdatedCopy = refreshingLatency ? "正在执行测速…" : `更新于：${updated}`;
 
   return `
     <section class="latency-panel" data-role="third-party-latency-panel">
       <div class="latency-panel-head">
         <div class="latency-panel-copy">
           <strong>第三方 API 测速</strong>
-          <span class="latency-panel-updated">更新于：${escapeHtml(updated)}</span>
+          <span class="latency-panel-updated">${escapeHtml(probeUpdatedCopy)}</span>
         </div>
         <button
           class="button button-ghost latency-refresh-button"
           data-action="refresh-third-party-latency"
           data-id="${profile.id}"
           data-name="${escapeHtml(profile.name)}"
-          ${state.busy ? "disabled" : ""}
+          ${state.busy || refreshingLatency ? "disabled" : ""}
         >
           ${escapeHtml(actionLabel)}
         </button>
@@ -1070,6 +1117,7 @@ function renderFlash(): string {
 function renderCardsPage(snapshot: AppSnapshot): string {
   const activeProfile =
     snapshot.profiles.find((profile) => profile.id === snapshot.activeProfileId) ?? null;
+  const anyUsageRefreshPending = isPendingActionPrefix("codex-usage");
   const hasPendingUpdate = state.update.lastResult?.hasUpdate ?? false;
   const currentVersionText = state.update.lastResult?.currentVersion ?? state.appVersion ?? "--";
   const updateLabelText = hasPendingUpdate ? "发现新版本" : "当前版本";
@@ -1131,15 +1179,15 @@ function renderCardsPage(snapshot: AppSnapshot): string {
               ${
                 snapshot.codexUsageApiEnabled
                   ? `
-                    <button class="button button-secondary" data-action="refresh-all-codex-usage" ${state.busy ? "disabled" : ""}>
-                      刷新全部额度
+                    <button class="button button-secondary" data-action="refresh-all-codex-usage" ${state.busy || anyUsageRefreshPending ? "disabled" : ""}>
+                      ${isPendingAction(refreshAllUsageActionKey) ? "刷新中..." : "刷新全部额度"}
                     </button>
-                    <button class="button button-ghost" data-action="disable-codex-usage" ${state.busy ? "disabled" : ""}>
+                    <button class="button button-ghost" data-action="disable-codex-usage" ${state.busy || anyUsageRefreshPending ? "disabled" : ""}>
                       关闭额度查询
                     </button>
                   `
                   : `
-                    <button class="button button-secondary" data-action="enable-codex-usage" ${state.busy ? "disabled" : ""}>
+                    <button class="button button-secondary" data-action="enable-codex-usage" ${state.busy || anyUsageRefreshPending ? "disabled" : ""}>
                       启用 Codex 额度查询
                     </button>
                   `

@@ -293,6 +293,95 @@ test("renders codex usage as a plan header with two progress rows", async () => 
   ).not.toBeNull();
 });
 
+test("keeps the rest of the UI interactive while codex usage is refreshing", async () => {
+  let resolveRefresh: ((value: unknown) => void) | null = null;
+  const refreshedSnapshot = {
+    targetDir: "/Users/example/.codex",
+    usingDefaultTargetDir: true,
+    targetExists: true,
+    targetAuthExists: true,
+    targetConfigExists: true,
+    targetUpdatedAt: "2026-03-25T00:00:00Z",
+    targetAuthTypeLabel: "官方 OAuth",
+    activeProfileId: "profile-1",
+    lastSelectedProfileId: "profile-1",
+    lastSwitchProfileId: "profile-1",
+    lastSwitchedAt: "2026-03-25T00:00:00Z",
+    codexUsageApiEnabled: true,
+    profiles: [
+      {
+        id: "profile-1",
+        name: "淘宝team",
+        notes: "自动从当前 Codex 配置生成",
+        authTypeLabel: "官方 OAuth",
+        createdAt: "2026-03-24T00:00:00Z",
+        updatedAt: "2026-03-24T14:19:00Z",
+        authHash: "auth-1",
+        configHash: "config-1",
+        codexUsage: {
+          source: "api",
+          planType: "team",
+          primary: {
+            usedPercent: 35,
+            windowMinutes: 300,
+            resetsAt: "2026-03-26T01:45:00+08:00",
+          },
+          secondary: null,
+          credits: null,
+          updatedAt: "2026-03-25T21:56:00+08:00",
+        },
+      },
+    ],
+  };
+
+  invokeMock.mockImplementation((command: string) => {
+    if (command === "load_snapshot") {
+      return Promise.resolve({
+        ...refreshedSnapshot,
+        profiles: refreshedSnapshot.profiles.map((profile) => ({
+          ...profile,
+          codexUsage: null,
+        })),
+      });
+    }
+    if (command === "refresh_profile_codex_usage") {
+      return new Promise((resolve) => {
+        resolveRefresh = resolve;
+      });
+    }
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+
+  await import("../src/main");
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="refresh-codex-usage"][data-id="profile-1"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+  await flushUi();
+  await flushUi();
+
+  const pendingRefreshButton = document.querySelector<HTMLButtonElement>(
+    '[data-action="refresh-codex-usage"][data-id="profile-1"]',
+  );
+  expect(invokeMock).toHaveBeenCalledWith("refresh_profile_codex_usage", { profileId: "profile-1" });
+  expect(pendingRefreshButton?.textContent).toContain("刷新中");
+  expect(pendingRefreshButton?.hasAttribute("disabled")).toBe(true);
+  expect(
+    document.querySelector<HTMLButtonElement>('[data-action="new-profile"]')?.hasAttribute("disabled"),
+  ).toBe(false);
+
+  resolveRefresh?.(refreshedSnapshot);
+  await flushUi();
+  await flushUi();
+});
+
 test("renders a third-party latency panel inside the profile card", async () => {
   const probeUpdatedAt = "2026-03-26T10:12:00+08:00";
 

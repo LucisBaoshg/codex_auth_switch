@@ -9,7 +9,7 @@ use std::sync::{
     Arc, Mutex, OnceLock,
 };
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 fn oauth_auth_json(
@@ -74,7 +74,7 @@ fn temp_manager() -> (TempDir, TempDir, ProfileManager) {
 
 struct TestServer {
     base_url: String,
-    responses: Arc<Mutex<HashMap<String, (String, String)>>>,
+    responses: Arc<Mutex<HashMap<String, (String, String, Duration)>>>,
     requests: Arc<Mutex<Vec<String>>>,
     shutdown: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
@@ -119,14 +119,21 @@ impl TestServer {
                             .get(path)
                             .cloned();
 
-                        let (status, content_type, body) = match response {
-                            Some((content_type, body)) => ("200 OK", content_type, body),
+                        let (status, content_type, body, delay) = match response {
+                            Some((content_type, body, delay)) => {
+                                ("200 OK", content_type, body, delay)
+                            }
                             None => (
                                 "404 Not Found",
                                 "text/plain".to_string(),
                                 "not found".to_string(),
+                                Duration::from_millis(0),
                             ),
                         };
+
+                        if !delay.is_zero() {
+                            thread::sleep(delay);
+                        }
 
                         let payload = format!(
                             "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: {content_type}\r\nConnection: close\r\n\r\n{body}",
@@ -154,7 +161,18 @@ impl TestServer {
     fn set_json(&self, path: &str, body: serde_json::Value) {
         self.responses.lock().expect("lock responses").insert(
             path.to_string(),
-            ("application/json".into(), body.to_string()),
+            (
+                "application/json".into(),
+                body.to_string(),
+                Duration::from_millis(0),
+            ),
+        );
+    }
+
+    fn set_json_with_delay(&self, path: &str, body: serde_json::Value, delay: Duration) {
+        self.responses.lock().expect("lock responses").insert(
+            path.to_string(),
+            ("application/json".into(), body.to_string(), delay),
         );
     }
 
@@ -375,5 +393,70 @@ fn update_profile_clears_stale_codex_usage_when_auth_changes() {
 
     assert!(updated.codex_usage.is_none());
 
+    std::env::remove_var("CODEX_AUTH_SWITCH_CODEX_USAGE_ENDPOINT");
+}
+
+#[test]
+fn refresh_profile_codex_usage_times_out_for_slow_upstream() {
+    let _guard = env_lock().lock().expect("lock env");
+    let server = TestServer::start();
+    server.set_json_with_delay(
+        "/backend-api/wham/usage",
+        json!({
+            "user_id": "user-test",
+            "account_id": "account-test",
+            "email": "team@example.com",
+            "plan_type": "team",
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 24,
+                    "limit_window_seconds": 18000,
+                    "reset_at": 1773491460
+                }
+            }
+        }),
+        Duration::from_millis(1200),
+    );
+
+    std::env::set_var(
+        "CODEX_AUTH_SWITCH_CODEX_USAGE_ENDPOINT",
+        format!("{}/backend-api/wham/usage", server.base_url),
+    );
+    std::env::set_var("CODEX_AUTH_SWITCH_CODEX_USAGE_TIMEOUT_MS", "100");
+
+    let (_app_dir, _target_dir, mut manager) = temp_manager();
+    let profile = manager
+        .import_profile(ProfileInput {
+            name: "Official Team".into(),
+            notes: "oauth".into(),
+            auth_json: oauth_auth_json(
+                "team@example.com",
+                "user-test",
+                "account-test",
+                "access-token-test",
+            ),
+            config_toml: official_config_toml("gpt-5.4"),
+        })
+        .expect("import profile");
+    manager
+        .set_codex_usage_api_enabled(true)
+        .expect("enable usage api");
+
+    let started = Instant::now();
+    let error = manager
+        .refresh_profile_codex_usage(&profile.id)
+        .expect_err("refresh usage should time out");
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_millis(700),
+        "request should fail fast when upstream is slow, elapsed: {elapsed:?}"
+    );
+    assert!(
+        error.to_string().contains("timeout") || error.to_string().contains("超时"),
+        "expected timeout error, got: {error}"
+    );
+
+    std::env::remove_var("CODEX_AUTH_SWITCH_CODEX_USAGE_TIMEOUT_MS");
     std::env::remove_var("CODEX_AUTH_SWITCH_CODEX_USAGE_ENDPOINT");
 }

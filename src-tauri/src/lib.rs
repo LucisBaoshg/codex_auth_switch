@@ -16,6 +16,24 @@ fn manager_from_app(app: &AppHandle) -> Result<ProfileManager, String> {
     ProfileManager::load_or_default(app_data_dir).map_err(|error| error.to_string())
 }
 
+async fn run_blocking_manager_task<T, F>(app: AppHandle, task: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(ProfileManager) -> Result<T, String> + Send + 'static,
+{
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let manager = ProfileManager::load_or_default(app_data_dir).map_err(|error| error.to_string())?;
+        task(manager)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[tauri::command]
 fn load_snapshot(app: AppHandle) -> Result<AppSnapshot, String> {
     let manager = manager_from_app(&app)?;
@@ -114,30 +132,42 @@ fn set_codex_usage_api_enabled(app: AppHandle, enabled: bool) -> Result<AppSnaps
 }
 
 #[tauri::command]
-fn refresh_profile_codex_usage(app: AppHandle, profile_id: String) -> Result<AppSnapshot, String> {
-    let manager = manager_from_app(&app)?;
-    manager
-        .refresh_profile_codex_usage(&profile_id)
-        .map_err(|error| error.to_string())?;
-    manager.snapshot().map_err(|error| error.to_string())
+async fn refresh_profile_codex_usage(
+    app: AppHandle,
+    profile_id: String,
+) -> Result<AppSnapshot, String> {
+    run_blocking_manager_task(app, move |manager| {
+        manager
+            .refresh_profile_codex_usage(&profile_id)
+            .map_err(|error| error.to_string())?;
+        manager.snapshot().map_err(|error| error.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
-fn refresh_profile_latency_probe(app: AppHandle, profile_id: String) -> Result<AppSnapshot, String> {
-    let manager = manager_from_app(&app)?;
-    manager
-        .refresh_profile_latency_probe(&profile_id)
-        .map_err(|error| error.to_string())?;
-    manager.snapshot().map_err(|error| error.to_string())
+async fn refresh_profile_latency_probe(
+    app: AppHandle,
+    profile_id: String,
+) -> Result<AppSnapshot, String> {
+    run_blocking_manager_task(app, move |manager| {
+        manager
+            .refresh_profile_latency_probe(&profile_id)
+            .map_err(|error| error.to_string())?;
+        manager.snapshot().map_err(|error| error.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
-fn refresh_all_codex_usage(app: AppHandle) -> Result<AppSnapshot, String> {
-    let manager = manager_from_app(&app)?;
-    manager
-        .refresh_all_codex_usage()
-        .map_err(|error| error.to_string())?;
-    manager.snapshot().map_err(|error| error.to_string())
+async fn refresh_all_codex_usage(app: AppHandle) -> Result<AppSnapshot, String> {
+    run_blocking_manager_task(app, move |manager| {
+        manager
+            .refresh_all_codex_usage()
+            .map_err(|error| error.to_string())?;
+        manager.snapshot().map_err(|error| error.to_string())
+    })
+    .await
 }
 
 #[tauri::command]

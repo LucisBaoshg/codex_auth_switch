@@ -11,9 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(target_os = "macos")]
 use std::thread;
-#[cfg(target_os = "macos")]
-use std::time::Duration;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -1746,6 +1744,9 @@ const ALL_PROFILE_SCALAR_KEYS: &[&str] = &[
 ];
 const ALL_PROFILE_TABLE_KEYS: &[&str] = &["model_providers"];
 const DEFAULT_CODEX_USAGE_ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/usage";
+const DEFAULT_HTTP_CONNECT_TIMEOUT_MS: u64 = 5_000;
+const DEFAULT_CODEX_USAGE_TIMEOUT_MS: u64 = 15_000;
+const DEFAULT_LATENCY_PROBE_TIMEOUT_MS: u64 = 12_000;
 
 fn is_official_oauth_auth(auth_json: &str) -> Result<bool, AppError> {
     let auth = serde_json::from_str::<serde_json::Value>(auth_json)
@@ -2017,6 +2018,58 @@ fn codex_usage_endpoint() -> String {
         .unwrap_or_else(|| DEFAULT_CODEX_USAGE_ENDPOINT.to_string())
 }
 
+fn duration_from_env_ms(name: &str, default_ms: u64) -> Duration {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_millis(default_ms))
+}
+
+fn http_connect_timeout() -> Duration {
+    duration_from_env_ms(
+        "CODEX_AUTH_SWITCH_HTTP_CONNECT_TIMEOUT_MS",
+        DEFAULT_HTTP_CONNECT_TIMEOUT_MS,
+    )
+}
+
+fn codex_usage_timeout() -> Duration {
+    duration_from_env_ms(
+        "CODEX_AUTH_SWITCH_CODEX_USAGE_TIMEOUT_MS",
+        DEFAULT_CODEX_USAGE_TIMEOUT_MS,
+    )
+}
+
+fn latency_probe_timeout() -> Duration {
+    duration_from_env_ms(
+        "CODEX_AUTH_SWITCH_LATENCY_PROBE_TIMEOUT_MS",
+        DEFAULT_LATENCY_PROBE_TIMEOUT_MS,
+    )
+}
+
+fn build_http_agent(timeout: Duration) -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(http_connect_timeout())
+        .timeout(timeout)
+        .build()
+}
+
+fn is_ureq_timeout(error: &ureq::Error) -> bool {
+    error.kind() == ureq::ErrorKind::Io
+        && error
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("timed out")
+}
+
+fn format_timeout_error(action: &str, timeout: Duration) -> AppError {
+    AppError::Message(format!(
+        "{action}: request timeout after {} ms.",
+        timeout.as_millis()
+    ))
+}
+
 fn fetch_codex_usage_snapshot(auth_json: &str) -> Result<CodexUsageSnapshot, AppError> {
     let access_token = oauth_access_token(auth_json).ok_or_else(|| {
         AppError::Message("The selected profile does not contain a ChatGPT access token.".into())
@@ -2025,13 +2078,21 @@ fn fetch_codex_usage_snapshot(auth_json: &str) -> Result<CodexUsageSnapshot, App
         AppError::Message("The selected profile does not contain a ChatGPT account id.".into())
     })?;
     let endpoint = codex_usage_endpoint();
+    let timeout = codex_usage_timeout();
 
-    let response = ureq::get(&endpoint)
+    let response = build_http_agent(timeout)
+        .get(&endpoint)
         .set("Authorization", &format!("Bearer {access_token}"))
         .set("ChatGPT-Account-Id", &account_id)
         .set("User-Agent", "codex-auth-switch")
         .call()
-        .map_err(|error| AppError::Message(format!("Failed to fetch Codex usage: {error}")))?;
+        .map_err(|error| {
+            if is_ureq_timeout(&error) {
+                format_timeout_error("Failed to fetch Codex usage", timeout)
+            } else {
+                AppError::Message(format!("Failed to fetch Codex usage: {error}"))
+            }
+        })?;
     let body = response
         .into_string()
         .map_err(|error| AppError::Message(format!("Failed to read Codex usage response: {error}")))?;
@@ -2248,7 +2309,9 @@ fn probe_third_party_stream(
     let started_at = Utc::now();
     let started = Instant::now();
     let endpoint = format!("{}{}", target.base_url, path);
-    let response = ureq::post(&endpoint)
+    let timeout = latency_probe_timeout();
+    let response = build_http_agent(timeout)
+        .post(&endpoint)
         .set("Authorization", &format!("Bearer {}", target.api_key))
         .set("Content-Type", "application/json")
         .set("Accept", "text/event-stream")
@@ -2266,12 +2329,17 @@ fn probe_third_party_stream(
                     Ok(Some(event)) => event,
                     Ok(None) => break,
                     Err(error) => {
+                        let read_error = if error.kind() == std::io::ErrorKind::TimedOut {
+                            format!("读取流式响应超时（{} ms）。", timeout.as_millis())
+                        } else {
+                            format!("读取流式响应失败：{error}")
+                        };
                         return latency_probe_failure(
                             Some(target.wire_api.clone()),
                             Some(target.model.clone()),
                             status_code,
                             Some(started.elapsed().as_millis() as u64),
-                            format!("读取流式响应失败：{error}"),
+                            read_error,
                         )
                     }
                 };
@@ -2334,13 +2402,20 @@ fn probe_third_party_stream(
                 ),
             )
         }
-        Err(ureq::Error::Transport(error)) => latency_probe_failure(
-            Some(target.wire_api.clone()),
-            Some(target.model.clone()),
-            None,
-            Some(started.elapsed().as_millis() as u64),
-            format!("请求失败：{error}"),
-        ),
+        Err(error @ ureq::Error::Transport(_)) => {
+            let request_error = if is_ureq_timeout(&error) {
+                format!("请求测速接口超时（{} ms）。", timeout.as_millis())
+            } else {
+                format!("请求失败：{error}")
+            };
+            latency_probe_failure(
+                Some(target.wire_api.clone()),
+                Some(target.model.clone()),
+                None,
+                Some(started.elapsed().as_millis() as u64),
+                request_error,
+            )
+        }
     }
 }
 
