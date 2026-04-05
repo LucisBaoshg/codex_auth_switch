@@ -1,6 +1,6 @@
 [package]
 name = "codex-auth-switch"
-version = "1.4.10"
+version = "1.4.11"
 description = "A desktop utility for switching between Codex auth profiles"
 authors = ["Codex"]
 edition = "2021"
@@ -30,6 +30,3 @@ uuid = { version = "1", features = ["serde", "v4"] }
 
 [dev-dependencies]
 tempfile = "3"
-
-[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
-tauri-plugin-updater = "2"

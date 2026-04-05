@@ -6,7 +6,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(target_os = "macos")]
@@ -123,9 +123,14 @@ pub struct UpdateCheckResult {
     pub has_update: bool,
     pub current_version: String,
     pub latest_version: String,
-    pub release_url: String,
+    pub download_url: String,
     pub published_at: Option<String>,
-    pub release_name: Option<String>,
+    pub notes: Option<String>,
+    pub kind: String,
+    pub filename: String,
+    pub sha256: String,
+    pub size: u64,
+    pub can_install: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,12 +151,31 @@ pub struct RemoteSyncResult {
     pub profiles: Vec<ProfileSummary>,
 }
 
-#[derive(Debug, Deserialize)]
-struct GithubLatestRelease {
-    tag_name: String,
-    html_url: String,
+#[derive(Debug, Clone, Deserialize)]
+struct MirrorLatestRelease {
+    app_id: String,
+    version: String,
     published_at: Option<String>,
-    name: Option<String>,
+    #[allow(dead_code)]
+    synced_at: Option<String>,
+    notes: Option<String>,
+    platform: String,
+    arch: String,
+    kind: String,
+    filename: String,
+    sha256: String,
+    size: u64,
+    download_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateInstallRequest {
+    pub latest_version: String,
+    pub download_url: String,
+    pub sha256: String,
+    pub kind: String,
+    pub filename: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -810,16 +834,15 @@ impl ProfileManager {
             }
         }
 
-        let next_auth_json = fs::read_to_string(profile_dir.join("auth.json"))?;
+        let next_auth_json =
+            refresh_oauth_auth_json(&fs::read_to_string(profile_dir.join("auth.json"))?)?;
         let next_profile_config = fs::read_to_string(profile_dir.join("config.toml"))?;
         let next_config_toml = match current_config_toml {
-            Some(current_config_toml) => {
-                merge_profile_managed_config(
-                    &current_config_toml,
-                    &next_auth_json,
-                    &next_profile_config,
-                )?
-            }
+            Some(current_config_toml) => merge_profile_managed_config(
+                &current_config_toml,
+                &next_auth_json,
+                &next_profile_config,
+            )?,
             None => normalize_config_toml_for_auth(
                 &next_auth_json,
                 &repair_illegal_config_toml(&next_profile_config),
@@ -859,10 +882,8 @@ impl ProfileManager {
 
         let auth_hash = auth_match_hash(&fs::read_to_string(self.target_auth_path())?)?;
         let auth_json = fs::read_to_string(self.target_auth_path())?;
-        let config_hash = managed_config_hash(
-            &auth_json,
-            &fs::read_to_string(self.target_config_path())?,
-        )?;
+        let config_hash =
+            managed_config_hash(&auth_json, &fs::read_to_string(self.target_config_path())?)?;
 
         if let Some(marker) = self.read_target_marker()? {
             if marker.auth_hash == auth_hash && marker.config_hash == config_hash {
@@ -908,10 +929,69 @@ impl ProfileManager {
         Ok(())
     }
 
-    pub fn refresh_profile_codex_usage(&self, profile_id: &str) -> Result<ProfileSummary, AppError> {
+    fn resolve_codex_usage_auth_source(
+        &self,
+        profile_id: &str,
+    ) -> Result<ResolvedCodexUsageAuthSource, AppError> {
         let profile_dir = self.profile_dir(profile_id)?;
-        let auth_json = fs::read_to_string(profile_dir.join("auth.json"))?;
-        if !is_official_oauth_auth(&auth_json)? {
+        let saved_auth_json = fs::read_to_string(profile_dir.join("auth.json"))?;
+        let saved_config_toml = fs::read_to_string(profile_dir.join("config.toml"))?;
+
+        if !self.target_auth_path().exists() || !self.target_config_path().exists() {
+            return Ok(ResolvedCodexUsageAuthSource {
+                auth_json: saved_auth_json,
+                config_toml: saved_config_toml,
+                using_runtime_auth: false,
+                should_sync_runtime_state: false,
+            });
+        }
+
+        let Some(active_profile) = self.detect_active_profile()? else {
+            return Ok(ResolvedCodexUsageAuthSource {
+                auth_json: saved_auth_json,
+                config_toml: saved_config_toml,
+                using_runtime_auth: false,
+                should_sync_runtime_state: false,
+            });
+        };
+        if active_profile.id != profile_id {
+            return Ok(ResolvedCodexUsageAuthSource {
+                auth_json: saved_auth_json,
+                config_toml: saved_config_toml,
+                using_runtime_auth: false,
+                should_sync_runtime_state: false,
+            });
+        }
+
+        let runtime_auth_json = fs::read_to_string(self.target_auth_path())?;
+        if !is_official_oauth_auth(&runtime_auth_json)? {
+            return Ok(ResolvedCodexUsageAuthSource {
+                auth_json: saved_auth_json,
+                config_toml: saved_config_toml,
+                using_runtime_auth: false,
+                should_sync_runtime_state: false,
+            });
+        }
+
+        let runtime_config_toml = fs::read_to_string(self.target_config_path())?;
+        let should_sync_runtime_state =
+            runtime_auth_json != saved_auth_json || runtime_config_toml != saved_config_toml;
+
+        Ok(ResolvedCodexUsageAuthSource {
+            auth_json: runtime_auth_json,
+            config_toml: runtime_config_toml,
+            using_runtime_auth: true,
+            should_sync_runtime_state,
+        })
+    }
+
+    pub fn refresh_profile_codex_usage(
+        &self,
+        profile_id: &str,
+    ) -> Result<ProfileSummary, AppError> {
+        let profile_dir = self.profile_dir(profile_id)?;
+        let source = self.resolve_codex_usage_auth_source(profile_id)?;
+        if !is_official_oauth_auth(&source.auth_json)? {
             return Err(AppError::Message(
                 "Codex usage is only available for 官方 OAuth profiles.".into(),
             ));
@@ -922,13 +1002,30 @@ impl ProfileManager {
             ));
         }
 
+        let refreshed_auth_json = refresh_oauth_auth_json(&source.auth_json)?;
+        if source.using_runtime_auth && refreshed_auth_json != source.auth_json {
+            fs::write(self.target_auth_path(), &refreshed_auth_json)?;
+        }
+
+        let usage = fetch_codex_usage_snapshot(&refreshed_auth_json)?;
+        if source.should_sync_runtime_state || refreshed_auth_json != source.auth_json {
+            self.sync_runtime_state_to_profile(
+                profile_id,
+                &refreshed_auth_json,
+                &source.config_toml,
+            )?;
+        }
+
         let mut metadata = self.read_profile_metadata(&profile_dir)?;
-        metadata.codex_usage = Some(fetch_codex_usage_snapshot(&auth_json)?);
+        metadata.codex_usage = Some(usage);
         self.write_profile_metadata(&profile_dir, &metadata)?;
         Ok(ProfileSummary::from(metadata))
     }
 
-    pub fn refresh_profile_latency_probe(&self, profile_id: &str) -> Result<ProfileSummary, AppError> {
+    pub fn refresh_profile_latency_probe(
+        &self,
+        profile_id: &str,
+    ) -> Result<ProfileSummary, AppError> {
         let profile_dir = self.profile_dir(profile_id)?;
         let auth_json = fs::read_to_string(profile_dir.join("auth.json"))?;
         let config_toml = fs::read_to_string(profile_dir.join("config.toml"))?;
@@ -1412,21 +1509,133 @@ pub fn default_codex_target_dir() -> Result<PathBuf, AppError> {
     Ok(home_dir.join(".codex"))
 }
 
-pub fn check_for_update() -> Result<UpdateCheckResult, AppError> {
-    let current_version = env!("CARGO_PKG_VERSION").to_string();
-    let api_url = "https://api.github.com/repos/LucisBaoshg/codex_auth_switch/releases/latest";
+const INTERNAL_UPDATE_BASE_URL: &str = "http://tc-github-mirror.ite.tool4seller.com";
+const INTERNAL_UPDATE_APP_ID: &str = "codex-auth-switch";
+const UPDATE_KIND_INSTALLER: &str = "installer";
+const UPDATE_KIND_IN_APP: &str = "in_app_update";
 
-    let response = ureq::get(api_url)
-        .set("Accept", "application/vnd.github+json")
+fn current_update_platform() -> Result<&'static str, AppError> {
+    if cfg!(target_os = "macos") {
+        Ok("macos")
+    } else if cfg!(target_os = "windows") {
+        Ok("windows")
+    } else if cfg!(target_os = "linux") {
+        Ok("linux")
+    } else {
+        Err(AppError::Message("当前平台暂不支持更新。".into()))
+    }
+}
+
+fn current_update_arch() -> Result<&'static str, AppError> {
+    if cfg!(target_arch = "aarch64") {
+        Ok("arm64")
+    } else if cfg!(target_arch = "x86_64") {
+        Ok("x64")
+    } else {
+        Err(AppError::Message("当前架构暂不支持更新。".into()))
+    }
+}
+
+fn preferred_update_kind(platform: &str) -> &'static str {
+    if platform == "macos" {
+        UPDATE_KIND_IN_APP
+    } else {
+        UPDATE_KIND_INSTALLER
+    }
+}
+
+fn mirror_latest_url(app_id: &str, platform: &str, arch: &str, kind: &str) -> String {
+    format!(
+        "{INTERNAL_UPDATE_BASE_URL}/updates/{app_id}/latest?platform={platform}&arch={arch}&kind={kind}"
+    )
+}
+
+fn fetch_mirror_release(
+    app_id: &str,
+    platform: &str,
+    arch: &str,
+    kind: &str,
+) -> Result<Option<MirrorLatestRelease>, AppError> {
+    let url = mirror_latest_url(app_id, platform, arch, kind);
+    let response = match ureq::get(&url)
+        .set("Accept", "application/json")
         .set("User-Agent", "codex-auth-switch")
         .call()
-        .map_err(|error| AppError::Message(format!("检查更新失败：{error}")))?;
+    {
+        Ok(response) => response,
+        Err(ureq::Error::Status(404, _)) => return Ok(None),
+        Err(error) => return Err(AppError::Message(format!("检查更新失败：{error}"))),
+    };
 
-    let release: GithubLatestRelease = response
+    let release: MirrorLatestRelease = response
         .into_json()
         .map_err(|error| AppError::Message(format!("解析更新信息失败：{error}")))?;
 
-    let latest_version = normalize_version_string(&release.tag_name);
+    validate_mirror_release(&release, app_id, platform, arch)?;
+    Ok(Some(release))
+}
+
+fn validate_mirror_release(
+    release: &MirrorLatestRelease,
+    app_id: &str,
+    platform: &str,
+    arch: &str,
+) -> Result<(), AppError> {
+    if release.app_id != app_id {
+        return Err(AppError::Message(format!(
+            "内网镜像返回了错误的应用标识：期望 {app_id}，实际 {}。",
+            release.app_id
+        )));
+    }
+
+    if release.platform != platform {
+        return Err(AppError::Message(format!(
+            "内网镜像返回的平台不匹配：期望 {platform}，实际 {}。",
+            release.platform
+        )));
+    }
+
+    if release.arch != arch {
+        return Err(AppError::Message(format!(
+            "内网镜像返回的架构不匹配：期望 {arch}，实际 {}。",
+            release.arch
+        )));
+    }
+
+    Ok(())
+}
+
+fn resolve_mirror_release() -> Result<MirrorLatestRelease, AppError> {
+    let platform = current_update_platform()?;
+    let arch = current_update_arch()?;
+    let preferred_kind = preferred_update_kind(platform);
+
+    if let Some(release) =
+        fetch_mirror_release(INTERNAL_UPDATE_APP_ID, platform, arch, preferred_kind)?
+    {
+        return Ok(release);
+    }
+
+    if preferred_kind != UPDATE_KIND_INSTALLER {
+        if let Some(release) = fetch_mirror_release(
+            INTERNAL_UPDATE_APP_ID,
+            platform,
+            arch,
+            UPDATE_KIND_INSTALLER,
+        )? {
+            return Ok(release);
+        }
+    }
+
+    Err(AppError::Message(
+        "内网镜像站暂时没有适用于当前平台的更新包。".into(),
+    ))
+}
+
+pub fn check_for_update() -> Result<UpdateCheckResult, AppError> {
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let release = resolve_mirror_release()?;
+    let latest_version = normalize_version_string(&release.version);
     let current_semver = Version::parse(&current_version).ok();
     let latest_semver = Version::parse(&latest_version).ok();
     let has_update = match (current_semver, latest_semver) {
@@ -1434,14 +1643,29 @@ pub fn check_for_update() -> Result<UpdateCheckResult, AppError> {
         _ => latest_version != current_version,
     };
 
+    let can_install = release.kind == UPDATE_KIND_IN_APP;
+
     Ok(UpdateCheckResult {
         has_update,
         current_version,
         latest_version,
-        release_url: release.html_url,
+        download_url: release.download_url,
         published_at: release.published_at,
-        release_name: release.name,
+        notes: release.notes,
+        kind: release.kind,
+        filename: release.filename,
+        sha256: release.sha256,
+        size: release.size,
+        can_install,
     })
+}
+
+pub fn install_update(payload: UpdateInstallRequest) -> Result<(), AppError> {
+    match payload.kind.as_str() {
+        UPDATE_KIND_INSTALLER => open_url(&payload.download_url),
+        UPDATE_KIND_IN_APP => install_in_app_update(&payload),
+        other => Err(AppError::Message(format!("不支持的更新包类型：{other}"))),
+    }
 }
 
 pub fn check_install_location() -> Result<InstallLocationStatus, AppError> {
@@ -1504,6 +1728,197 @@ fn macos_app_bundle_root(path: &Path) -> Option<PathBuf> {
         current = candidate.parent();
     }
     None
+}
+
+#[cfg(target_os = "macos")]
+fn install_in_app_update(payload: &UpdateInstallRequest) -> Result<(), AppError> {
+    let current_exe = std::env::current_exe()?;
+    let app_root = macos_app_bundle_root(&current_exe).ok_or_else(|| {
+        AppError::Message("无法定位当前应用包目录，暂时不能执行应用内更新。".into())
+    })?;
+
+    let temp_root =
+        std::env::temp_dir().join(format!("codex-auth-switch-update-{}", Uuid::new_v4()));
+    let extract_root = temp_root.join("extract");
+    let archive_path = temp_root.join(&payload.filename);
+    fs::create_dir_all(&extract_root)?;
+
+    let download_result = (|| -> Result<(), AppError> {
+        download_update_archive(&payload.download_url, &payload.sha256, &archive_path)?;
+        extract_tar_gz(&archive_path, &extract_root)?;
+        let downloaded_app = find_app_bundle(&extract_root)?
+            .ok_or_else(|| AppError::Message("更新包中未找到可安装的 .app 应用目录。".into()))?;
+        replace_macos_app_bundle(&downloaded_app, &app_root)
+    })();
+
+    let _ = fs::remove_dir_all(&temp_root);
+    download_result
+}
+
+#[cfg(not(target_os = "macos"))]
+fn install_in_app_update(_payload: &UpdateInstallRequest) -> Result<(), AppError> {
+    Err(AppError::Message(
+        "当前平台暂不支持应用内更新，请改用安装包升级。".into(),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn download_update_archive(
+    url: &str,
+    expected_sha256: &str,
+    destination: &Path,
+) -> Result<(), AppError> {
+    let response = ureq::get(url)
+        .set("Accept", "application/octet-stream")
+        .set("User-Agent", "codex-auth-switch")
+        .call()
+        .map_err(|error| AppError::Message(format!("下载更新包失败：{error}")))?;
+
+    let mut reader = response.into_reader();
+    let mut writer = fs::File::create(destination)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        writer.write_all(&buffer[..read])?;
+    }
+
+    let actual_sha256 = format!("{:x}", hasher.finalize());
+    if actual_sha256 != expected_sha256.trim().to_ascii_lowercase() {
+        return Err(AppError::Message(format!(
+            "更新包校验失败：期望 {expected_sha256}，实际 {actual_sha256}。"
+        )));
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn extract_tar_gz(archive_path: &Path, extract_root: &Path) -> Result<(), AppError> {
+    let status = Command::new("tar")
+        .arg("-xzf")
+        .arg(archive_path)
+        .arg("-C")
+        .arg(extract_root)
+        .status()?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(AppError::Message("解压更新包失败。".into()))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn find_app_bundle(root: &Path) -> Result<Option<PathBuf>, AppError> {
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("app"))
+        {
+            return Ok(Some(path));
+        }
+    }
+
+    Ok(None)
+}
+
+#[cfg(target_os = "macos")]
+fn replace_macos_app_bundle(source_app: &Path, target_app: &Path) -> Result<(), AppError> {
+    let target_parent = target_app
+        .parent()
+        .ok_or_else(|| AppError::Message("无法确定当前应用的安装目录。".into()))?;
+    let backup_path = target_parent.join(format!(
+        "{}.backup-{}",
+        target_app
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("Codex Auth Switch.app"),
+        Uuid::new_v4()
+    ));
+
+    match fs::rename(target_app, &backup_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            return replace_macos_app_bundle_with_admin(source_app, target_app, &backup_path);
+        }
+        Err(error) => return Err(error.into()),
+    }
+
+    let copy_result = copy_app_bundle(source_app, target_app);
+    if let Err(error) = copy_result {
+        let _ = fs::remove_dir_all(target_app);
+        let _ = fs::rename(&backup_path, target_app);
+        return Err(error);
+    }
+
+    let _ = fs::remove_dir_all(&backup_path);
+    let _ = Command::new("touch").arg(target_app).status();
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn copy_app_bundle(source_app: &Path, target_app: &Path) -> Result<(), AppError> {
+    let status = Command::new("ditto")
+        .arg(source_app)
+        .arg(target_app)
+        .status()?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(AppError::Message("复制新版本应用失败。".into()))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn replace_macos_app_bundle_with_admin(
+    source_app: &Path,
+    target_app: &Path,
+    backup_path: &Path,
+) -> Result<(), AppError> {
+    let command = format!(
+        "rm -rf {backup} && mv {target} {backup} && ditto {source} {target} && rm -rf {backup}",
+        backup = shell_quote(backup_path),
+        target = shell_quote(target_app),
+        source = shell_quote(source_app),
+    );
+    let apple_script = format!(
+        "do shell script \"{}\" with administrator privileges",
+        escape_applescript_string(&command)
+    );
+    let status = Command::new("osascript")
+        .arg("-e")
+        .arg(apple_script)
+        .status()?;
+
+    if status.success() {
+        let _ = Command::new("touch").arg(target_app).status();
+        Ok(())
+    } else {
+        Err(AppError::Message(
+            "更新失败：没有权限替换 Applications 中的应用包。".into(),
+        ))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn shell_quote(path: &Path) -> String {
+    let text = path.to_string_lossy().replace('\'', "'\"'\"'");
+    format!("'{text}'")
+}
+
+#[cfg(target_os = "macos")]
+fn escape_applescript_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('\"', "\\\"")
 }
 
 fn normalize_version_string(version: &str) -> String {
@@ -1744,9 +2159,29 @@ const ALL_PROFILE_SCALAR_KEYS: &[&str] = &[
 ];
 const ALL_PROFILE_TABLE_KEYS: &[&str] = &["model_providers"];
 const DEFAULT_CODEX_USAGE_ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/usage";
+const REFRESH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+const REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR: &str = "CODEX_REFRESH_TOKEN_URL_OVERRIDE";
+const REFRESH_TOKEN_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const DEFAULT_HTTP_CONNECT_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_CODEX_USAGE_TIMEOUT_MS: u64 = 15_000;
 const DEFAULT_LATENCY_PROBE_TIMEOUT_MS: u64 = 12_000;
+
+#[derive(Debug, Deserialize)]
+struct OAuthRefreshResponse {
+    access_token: String,
+    #[serde(default)]
+    refresh_token: Option<String>,
+    #[serde(default)]
+    id_token: Option<String>,
+}
+
+#[derive(Debug)]
+struct ResolvedCodexUsageAuthSource {
+    auth_json: String,
+    config_toml: String,
+    using_runtime_auth: bool,
+    should_sync_runtime_state: bool,
+}
 
 fn is_official_oauth_auth(auth_json: &str) -> Result<bool, AppError> {
     let auth = serde_json::from_str::<serde_json::Value>(auth_json)
@@ -1834,9 +2269,10 @@ fn managed_config_table(
 
 fn managed_config_hash(auth_json: &str, contents: &str) -> Result<String, AppError> {
     let table = parse_toml_table(contents)?;
-    let serialized =
-        toml::to_string(&toml::Value::Table(managed_config_table(auth_json, &table)?))
-            .map_err(|error| AppError::Message(error.to_string()))?;
+    let serialized = toml::to_string(&toml::Value::Table(managed_config_table(
+        auth_json, &table,
+    )?))
+    .map_err(|error| AppError::Message(error.to_string()))?;
     Ok(sha256_bytes(serialized.as_bytes()))
 }
 
@@ -1993,6 +2429,24 @@ fn oauth_access_token(auth_json: &str) -> Option<String> {
         .map(|value| value.to_string())
 }
 
+fn oauth_refresh_token(auth_json: &str) -> Option<String> {
+    let auth = serde_json::from_str::<serde_json::Value>(auth_json).ok()?;
+    auth.get("tokens")
+        .and_then(|value| value.as_object())
+        .and_then(|tokens| tokens.get("refresh_token"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string())
+}
+
+fn oauth_id_token(auth_json: &str) -> Option<String> {
+    let auth = serde_json::from_str::<serde_json::Value>(auth_json).ok()?;
+    auth.get("tokens")
+        .and_then(|value| value.as_object())
+        .and_then(|tokens| tokens.get("id_token"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string())
+}
+
 fn oauth_plan_type(auth_json: &str) -> Option<String> {
     let auth = serde_json::from_str::<serde_json::Value>(auth_json).ok()?;
     auth.get("tokens")
@@ -2016,6 +2470,14 @@ fn codex_usage_endpoint() -> String {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| DEFAULT_CODEX_USAGE_ENDPOINT.to_string())
+}
+
+fn refresh_token_endpoint() -> String {
+    std::env::var(REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| REFRESH_TOKEN_URL.to_string())
 }
 
 fn duration_from_env_ms(name: &str, default_ms: u64) -> Duration {
@@ -2048,6 +2510,13 @@ fn latency_probe_timeout() -> Duration {
     )
 }
 
+fn oauth_refresh_timeout() -> Duration {
+    duration_from_env_ms(
+        "CODEX_AUTH_SWITCH_REFRESH_TOKEN_TIMEOUT_MS",
+        DEFAULT_CODEX_USAGE_TIMEOUT_MS,
+    )
+}
+
 fn build_http_agent(timeout: Duration) -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout_connect(http_connect_timeout())
@@ -2057,10 +2526,7 @@ fn build_http_agent(timeout: Duration) -> ureq::Agent {
 
 fn is_ureq_timeout(error: &ureq::Error) -> bool {
     error.kind() == ureq::ErrorKind::Io
-        && error
-            .to_string()
-            .to_ascii_lowercase()
-            .contains("timed out")
+        && error.to_string().to_ascii_lowercase().contains("timed out")
 }
 
 fn format_timeout_error(action: &str, timeout: Duration) -> AppError {
@@ -2068,6 +2534,86 @@ fn format_timeout_error(action: &str, timeout: Duration) -> AppError {
         "{action}: request timeout after {} ms.",
         timeout.as_millis()
     ))
+}
+
+fn persist_refreshed_oauth_auth_json(
+    auth_json: &str,
+    refreshed: OAuthRefreshResponse,
+) -> Result<String, AppError> {
+    let mut auth = serde_json::from_str::<serde_json::Value>(auth_json)
+        .map_err(|error| AppError::InvalidAuthJson(error.to_string()))?;
+    let root = auth
+        .as_object_mut()
+        .ok_or_else(|| AppError::InvalidAuthJson("auth.json must be a JSON object.".into()))?;
+
+    let tokens = root
+        .entry("tokens")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let tokens = tokens.as_object_mut().ok_or_else(|| {
+        AppError::InvalidAuthJson("auth.json `tokens` must be a JSON object.".into())
+    })?;
+
+    tokens.insert(
+        "access_token".into(),
+        serde_json::Value::String(refreshed.access_token),
+    );
+    if let Some(refresh_token) = refreshed
+        .refresh_token
+        .or_else(|| oauth_refresh_token(auth_json))
+    {
+        tokens.insert(
+            "refresh_token".into(),
+            serde_json::Value::String(refresh_token),
+        );
+    }
+    if let Some(id_token) = refreshed.id_token.or_else(|| oauth_id_token(auth_json)) {
+        tokens.insert("id_token".into(), serde_json::Value::String(id_token));
+    }
+
+    root.insert(
+        "last_refresh".into(),
+        serde_json::Value::String(Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true)),
+    );
+
+    serde_json::to_string_pretty(&auth)
+        .map_err(|error| AppError::InvalidAuthJson(error.to_string()))
+}
+
+fn refresh_oauth_auth_json(auth_json: &str) -> Result<String, AppError> {
+    if !is_official_oauth_auth(auth_json)? {
+        return Ok(auth_json.to_string());
+    }
+
+    let Some(refresh_token) = oauth_refresh_token(auth_json) else {
+        return Ok(auth_json.to_string());
+    };
+    let timeout = oauth_refresh_timeout();
+
+    let response = build_http_agent(timeout)
+        .post(&refresh_token_endpoint())
+        .set("Content-Type", "application/x-www-form-urlencoded")
+        .send_form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", REFRESH_TOKEN_CLIENT_ID),
+            ("refresh_token", refresh_token.as_str()),
+        ])
+        .map_err(|error| {
+            if is_ureq_timeout(&error) {
+                format_timeout_error("Failed to refresh ChatGPT access token", timeout)
+            } else {
+                AppError::Message(format!("Failed to refresh ChatGPT access token: {error}"))
+            }
+        })?;
+
+    let refreshed = response
+        .into_json::<OAuthRefreshResponse>()
+        .map_err(|error| {
+            AppError::Message(format!(
+                "Failed to parse ChatGPT token refresh response: {error}"
+            ))
+        })?;
+
+    persist_refreshed_oauth_auth_json(auth_json, refreshed)
 }
 
 fn fetch_codex_usage_snapshot(auth_json: &str) -> Result<CodexUsageSnapshot, AppError> {
@@ -2093,17 +2639,14 @@ fn fetch_codex_usage_snapshot(auth_json: &str) -> Result<CodexUsageSnapshot, App
                 AppError::Message(format!("Failed to fetch Codex usage: {error}"))
             }
         })?;
-    let body = response
-        .into_string()
-        .map_err(|error| AppError::Message(format!("Failed to read Codex usage response: {error}")))?;
+    let body = response.into_string().map_err(|error| {
+        AppError::Message(format!("Failed to read Codex usage response: {error}"))
+    })?;
 
     parse_codex_usage_response(&body, auth_json)
 }
 
-fn parse_codex_usage_response(
-    body: &str,
-    auth_json: &str,
-) -> Result<CodexUsageSnapshot, AppError> {
+fn parse_codex_usage_response(body: &str, auth_json: &str) -> Result<CodexUsageSnapshot, AppError> {
     let root = serde_json::from_str::<serde_json::Value>(body)?;
     let rate_limit = root.get("rate_limit");
     let primary = rate_limit
@@ -2191,10 +2734,14 @@ fn fetch_third_party_latency_snapshot(
 ) -> ThirdPartyLatencySnapshot {
     match resolve_third_party_probe_target(auth_json, config_toml) {
         Ok(target) => match target.wire_api.as_str() {
-            "responses" => probe_third_party_stream(&target, "/responses", responses_probe_body(&target)),
-            "chat_completions" => {
-                probe_third_party_stream(&target, "/chat/completions", chat_completions_probe_body(&target))
+            "responses" => {
+                probe_third_party_stream(&target, "/responses", responses_probe_body(&target))
             }
+            "chat_completions" => probe_third_party_stream(
+                &target,
+                "/chat/completions",
+                chat_completions_probe_body(&target),
+            ),
             other => latency_probe_failure(
                 Some(other.to_string()),
                 Some(target.model),
@@ -2340,7 +2887,7 @@ fn probe_third_party_stream(
                             status_code,
                             Some(started.elapsed().as_millis() as u64),
                             read_error,
-                        )
+                        );
                     }
                 };
 

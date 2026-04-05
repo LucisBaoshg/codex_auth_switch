@@ -1,6 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
-import { check as checkForAppUpdate } from "@tauri-apps/plugin-updater";
 import "./styles.css";
 
 type FlashKind = "info" | "success" | "error";
@@ -89,9 +88,14 @@ type UpdateCheckResult = {
   hasUpdate: boolean;
   currentVersion: string;
   latestVersion: string;
-  releaseUrl: string;
+  downloadUrl: string;
   publishedAt: string | null;
-  releaseName: string | null;
+  notes: string | null;
+  kind: string;
+  filename: string;
+  sha256: string;
+  size: number;
+  canInstall: boolean;
 };
 
 type InstallLocationStatus = {
@@ -709,62 +713,53 @@ async function checkForUpdate(): Promise<void> {
       return;
     }
 
-    const update = await checkForAppUpdate();
-    if (!update) {
+    const update = await desktopInvoke<UpdateCheckResult>("check_update");
+    if (!update.hasUpdate) {
       state.update.lastResult = null;
       setFlash("success", "已是最新版本。");
       return;
     }
 
-    state.update.lastResult = {
-      hasUpdate: true,
-      currentVersion: update.currentVersion,
-      latestVersion: update.version,
-      releaseUrl: "",
-      publishedAt: update.date ?? null,
-      releaseName: null,
-    };
+    state.update.lastResult = update;
+    const noteSnippet = update.notes?.replace(/\s+/g, " ").trim();
+    const confirmMessage = update.canInstall
+      ? `发现新版本 ${update.latestVersion}（当前 ${update.currentVersion}）。${noteSnippet ? ` 更新说明：${noteSnippet}` : ""} 是否立即下载并安装？`
+      : `发现新版本 ${update.latestVersion}（当前 ${update.currentVersion}）。${noteSnippet ? ` 更新说明：${noteSnippet}` : ""} 是否打开内网镜像下载安装包？`;
 
     const confirmed = await nativeConfirm(
-      `发现新版本 ${update.version}（当前 ${update.currentVersion}）。是否立即下载并安装？`,
-      "立即更新",
+      confirmMessage,
+      update.canInstall ? "立即更新" : "下载新版本",
       false,
     );
     if (!confirmed) {
-      setFlash("info", `已取消更新，当前可升级到 ${update.version}。`);
+      setFlash("info", `已取消更新，当前可升级到 ${update.latestVersion}。`);
       return;
     }
 
-    let downloadedBytes = 0;
-    setFlash("info", `正在下载更新 ${update.version}...`);
-    await update.downloadAndInstall((event) => {
-      if (event.event === "Started") {
-        const total = event.data.contentLength;
-        setFlash(
-          "info",
-          total
-            ? `开始下载更新，大小约 ${(total / 1024 / 1024).toFixed(1)} MB。`
-            : "开始下载更新包。",
-        );
-      } else if (event.event === "Progress") {
-        downloadedBytes += event.data.chunkLength;
-        setFlash("info", `正在下载更新，已接收 ${(downloadedBytes / 1024 / 1024).toFixed(1)} MB。`);
-      } else if (event.event === "Finished") {
-        setFlash("info", "更新包下载完成，正在安装。");
-      }
+    setFlash(
+      "info",
+      update.canInstall
+        ? `正在下载并安装更新 ${update.latestVersion}...`
+        : `正在打开 ${update.latestVersion} 的内网下载地址...`,
+    );
+    await desktopInvoke("install_update", {
+      payload: {
+        latestVersion: update.latestVersion,
+        downloadUrl: update.downloadUrl,
+        sha256: update.sha256,
+        kind: update.kind,
+        filename: update.filename,
+      },
     });
 
-    setFlash("success", "更新已安装完成。请重新打开应用进入新版本。");
+    setFlash(
+      "success",
+      update.canInstall
+        ? "更新已安装完成。请重新打开应用进入新版本。"
+        : "已打开内网镜像下载地址，请按安装包提示完成升级。",
+    );
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (message.toLowerCase().includes("cross-device link")) {
-      setFlash(
-        "error",
-        "更新失败：当前应用不在标准安装目录中。请先将 Codex Auth Switch 拖到 Applications 文件夹后重新打开，再执行更新。",
-      );
-    } else {
-      setFlash("error", message);
-    }
+    setFlash("error", error instanceof Error ? error.message : String(error));
   } finally {
     state.update.checking = false;
     render();
@@ -1127,11 +1122,15 @@ function renderCardsPage(snapshot: AppSnapshot): string {
   const updateActionText = state.update.checking
     ? "检查中…"
     : hasPendingUpdate
-      ? "立即更新"
+      ? state.update.lastResult?.canInstall
+        ? "立即更新"
+        : "下载新版"
       : "检查更新";
   const updateHint = hasPendingUpdate
-    ? `当前 v${currentVersionText}，点击下载并安装`
-    : "通过 GitHub Release 获取最新安装包";
+    ? state.update.lastResult?.canInstall
+      ? `当前 v${currentVersionText}，点击下载并安装`
+      : `当前 v${currentVersionText}，点击获取安装包`
+    : "通过内网镜像检查更新";
   const updateEntryClass = hasPendingUpdate
     ? "version-update-entry version-update-entry-available"
     : "version-update-entry";

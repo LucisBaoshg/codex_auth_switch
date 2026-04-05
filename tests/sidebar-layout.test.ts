@@ -1,15 +1,10 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 const invokeMock = vi.fn();
-const checkForAppUpdateMock = vi.fn();
 const getVersionMock = vi.fn();
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
-}));
-
-vi.mock("@tauri-apps/plugin-updater", () => ({
-  check: checkForAppUpdateMock,
 }));
 
 vi.mock("@tauri-apps/api/app", () => ({
@@ -19,7 +14,6 @@ vi.mock("@tauri-apps/api/app", () => ({
 beforeEach(() => {
   vi.resetModules();
   invokeMock.mockReset();
-  checkForAppUpdateMock.mockReset();
   getVersionMock.mockReset();
   getVersionMock.mockResolvedValue("1.3.1");
   document.body.innerHTML = '<div id="app"></div>';
@@ -147,14 +141,24 @@ test("shows the latest version in the update entry after update is detected", as
         message: null,
       };
     }
+    if (command === "check_update") {
+      return {
+        hasUpdate: true,
+        currentVersion: "1.3.1",
+        latestVersion: "1.3.2",
+        downloadUrl:
+          "http://tc-github-mirror.ite.tool4seller.com/downloads/codex-auth-switch/macos/arm64/in_app_update/latest/Codex.Auth.Switch_aarch64.app.tar.gz",
+        publishedAt: "2026-03-24T00:00:00Z",
+        releaseName: null,
+        notes: "- Fix mirror updater flow",
+        kind: "in_app_update",
+        filename: "Codex.Auth.Switch_aarch64.app.tar.gz",
+        sha256: "abc123",
+        size: 6406006,
+        canInstall: true,
+      };
+    }
     throw new Error(`unexpected command: ${command}`);
-  });
-
-  checkForAppUpdateMock.mockResolvedValue({
-    currentVersion: "1.3.1",
-    version: "1.3.2",
-    date: "2026-03-24T00:00:00Z",
-    downloadAndInstall: vi.fn(),
   });
 
   Object.defineProperty(window, "__TAURI_INTERNALS__", {
@@ -180,8 +184,108 @@ test("shows the latest version in the update entry after update is detected", as
   await flushUi();
   await flushUi();
 
+  expect(invokeMock).toHaveBeenCalledWith("check_update", undefined);
   expect(document.querySelector('[data-role="update-entry"]')?.textContent).toContain("发现新版本");
   expect(document.querySelector('[data-role="update-entry"]')?.textContent).toContain("v1.3.2");
+});
+
+test("opens the mirror download link when only an installer package is available", async () => {
+  const initialSnapshot = {
+    targetDir: "/Users/example/.codex",
+    usingDefaultTargetDir: true,
+    targetExists: true,
+    targetAuthExists: true,
+    targetConfigExists: true,
+    targetUpdatedAt: "2026-03-20T00:00:00Z",
+    targetAuthTypeLabel: "第三方 API",
+    activeProfileId: "profile-2",
+    lastSelectedProfileId: "profile-2",
+    lastSwitchProfileId: "profile-2",
+    lastSwitchedAt: "2026-03-20T00:00:00Z",
+    profiles: [
+      {
+        id: "profile-2",
+        name: "淘宝 1",
+        notes: "主工作账号，额度稳定。",
+        authTypeLabel: "第三方 API",
+        createdAt: "2026-03-17T01:00:00Z",
+        updatedAt: "2026-03-19T04:12:00Z",
+        authHash: "d18ff783cb10",
+        configHash: "c450c91961af",
+      },
+    ],
+  };
+
+  invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+    if (command === "load_snapshot") {
+      return initialSnapshot;
+    }
+    if (command === "check_install_location") {
+      return {
+        updateSafe: true,
+        requiresApplicationsInstall: false,
+        installPath: "C:/Program Files/Codex Auth Switch",
+        message: null,
+      };
+    }
+    if (command === "check_update") {
+      return {
+        hasUpdate: true,
+        currentVersion: "1.3.1",
+        latestVersion: "1.3.2",
+        downloadUrl:
+          "http://tc-github-mirror.ite.tool4seller.com/downloads/codex-auth-switch/windows/x64/latest/Codex.Auth.Switch_1.3.2_x64-setup.exe",
+        publishedAt: "2026-03-24T00:00:00Z",
+        releaseName: null,
+        notes: "- Fix mirror updater flow",
+        kind: "installer",
+        filename: "Codex.Auth.Switch_1.3.2_x64-setup.exe",
+        sha256: "def456",
+        size: 4063777,
+        canInstall: false,
+      };
+    }
+    if (command === "install_update") {
+      return {
+        ok: true,
+        args,
+      };
+    }
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+
+  await import("../src/main");
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="check-update"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+  await flushUi();
+  await flushUi();
+
+  const okBtn = document.querySelector<HTMLButtonElement>("#btn-ok");
+  expect(okBtn).not.toBeNull();
+  okBtn?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+  await flushUi();
+  await flushUi();
+
+  expect(invokeMock).toHaveBeenCalledWith(
+    "install_update",
+    expect.objectContaining({
+      payload: expect.objectContaining({
+        kind: "installer",
+        downloadUrl:
+          "http://tc-github-mirror.ite.tool4seller.com/downloads/codex-auth-switch/windows/x64/latest/Codex.Auth.Switch_1.3.2_x64-setup.exe",
+      }),
+    }),
+  );
 });
 
 test("opens the editor flow when clicking the add-profile card", async () => {
@@ -750,6 +854,5 @@ test("shows Applications install guidance before checking for update on macOS", 
 
   await flushUi();
 
-  expect(checkForAppUpdateMock).not.toHaveBeenCalled();
   expect(document.body.textContent).toContain("当前应用不在 Applications 文件夹中");
 });

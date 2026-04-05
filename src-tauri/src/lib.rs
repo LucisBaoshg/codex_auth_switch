@@ -1,9 +1,10 @@
 pub mod core;
 
 use crate::core::{
-    check_for_update, check_install_location as resolve_install_location, open_url,
-    restart_codex_app, AppSnapshot, InstallLocationStatus, ProfileDocument, ProfileInput,
-    ProfileManager, UpdateCheckResult,
+    check_for_update, check_install_location as resolve_install_location,
+    install_update as perform_install_update, restart_codex_app, AppSnapshot,
+    InstallLocationStatus, ProfileDocument, ProfileInput, ProfileManager, UpdateCheckResult,
+    UpdateInstallRequest,
 };
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
@@ -27,7 +28,8 @@ where
         .map_err(|error| error.to_string())?;
 
     tauri::async_runtime::spawn_blocking(move || {
-        let manager = ProfileManager::load_or_default(app_data_dir).map_err(|error| error.to_string())?;
+        let manager =
+            ProfileManager::load_or_default(app_data_dir).map_err(|error| error.to_string())?;
         task(manager)
     })
     .await
@@ -196,8 +198,8 @@ fn check_update() -> Result<UpdateCheckResult, String> {
 }
 
 #[tauri::command]
-fn open_update_page(url: String) -> Result<(), String> {
-    open_url(&url).map_err(|error| error.to_string())
+fn install_update(payload: UpdateInstallRequest) -> Result<(), String> {
+    perform_install_update(payload).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -208,7 +210,6 @@ fn check_install_location() -> Result<InstallLocationStatus, String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             load_snapshot,
             import_profile,
@@ -227,7 +228,7 @@ pub fn run() {
             restart_codex,
             fix_session_database,
             check_update,
-            open_update_page,
+            install_update,
             check_install_location
         ])
         .run(tauri::generate_context!())

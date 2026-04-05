@@ -506,7 +506,9 @@ fn switch_profile_syncs_current_auth_and_managed_config_back_to_previous_profile
         .get_profile_document(&profile_a.id)
         .expect("load synced profile");
     assert!(synced.config_toml.contains("model = \"gpt-5.4-turbo\""));
-    assert!(synced.config_toml.contains("windows_wsl_setup_acknowledged = true"));
+    assert!(synced
+        .config_toml
+        .contains("windows_wsl_setup_acknowledged = true"));
     assert!(synced
         .config_toml
         .contains("[projects.\"/tmp/runtime-growth\"]"));
@@ -605,9 +607,15 @@ fn switch_profile_updates_selected_profile_document_with_effective_merged_config
         .get_profile_document(&official.id)
         .expect("load updated official profile");
     assert!(saved.config_toml.contains("model = \"gpt-5.4\""));
-    assert!(saved.config_toml.contains("model_reasoning_effort = \"medium\""));
-    assert!(saved.config_toml.contains("windows_wsl_setup_acknowledged = true"));
-    assert!(saved.config_toml.contains("[projects.\"/tmp/runtime-growth\"]"));
+    assert!(saved
+        .config_toml
+        .contains("model_reasoning_effort = \"medium\""));
+    assert!(saved
+        .config_toml
+        .contains("windows_wsl_setup_acknowledged = true"));
+    assert!(saved
+        .config_toml
+        .contains("[projects.\"/tmp/runtime-growth\"]"));
     assert!(saved.config_toml.contains("[mcp_servers.playwright]"));
     assert!(saved.config_toml.contains("[features]"));
     assert!(!saved.config_toml.contains("model_provider ="));
@@ -840,9 +848,7 @@ fn fix_session_database_rebuilds_session_index_from_threads_table() {
     assert_eq!(entries[1]["id"], "fresh-thread");
     assert_eq!(entries[1]["thread_name"], "Fresh Title");
     assert!(entries.iter().all(|entry| entry["id"] != "ghost-thread"));
-    assert!(entries
-        .iter()
-        .all(|entry| entry["id"] != "archived-thread"));
+    assert!(entries.iter().all(|entry| entry["id"] != "archived-thread"));
 }
 
 #[test]

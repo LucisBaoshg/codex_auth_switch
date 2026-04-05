@@ -12,12 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
-fn oauth_auth_json(
-    email: &str,
-    user_id: &str,
-    account_id: &str,
-    access_token: &str,
-) -> String {
+fn oauth_auth_json(email: &str, user_id: &str, account_id: &str, access_token: &str) -> String {
     let payload = json!({
         "email": email,
         "https://api.openai.com/auth": {
@@ -39,6 +34,65 @@ fn oauth_auth_json(
         }
     })
     .to_string()
+}
+
+fn oauth_auth_json_with_refresh(
+    email: &str,
+    user_id: &str,
+    account_id: &str,
+    access_token: &str,
+    refresh_token: &str,
+) -> String {
+    let mut auth = serde_json::from_str::<serde_json::Value>(&oauth_auth_json(
+        email,
+        user_id,
+        account_id,
+        access_token,
+    ))
+    .expect("parse oauth auth");
+
+    let tokens = auth
+        .get_mut("tokens")
+        .and_then(|value| value.as_object_mut())
+        .expect("tokens object");
+    tokens.insert(
+        "refresh_token".into(),
+        serde_json::Value::String(refresh_token.to_string()),
+    );
+    auth.as_object_mut().expect("auth object").insert(
+        "last_refresh".into(),
+        serde_json::Value::String("2026-04-05T09:59:00Z".into()),
+    );
+
+    auth.to_string()
+}
+
+fn oauth_refresh_response(
+    email: &str,
+    user_id: &str,
+    account_id: &str,
+    access_token: &str,
+    refresh_token: &str,
+) -> serde_json::Value {
+    let payload = json!({
+        "email": email,
+        "https://api.openai.com/auth": {
+            "chatgpt_user_id": user_id,
+            "chatgpt_account_id": account_id,
+            "chatgpt_plan_type": "team"
+        }
+    });
+
+    let encoded_payload = base64_fragment(&payload.to_string());
+
+    json!({
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "id_token": format!("header.{encoded_payload}.signature"),
+        "token_type": "Bearer",
+        "expires_in": 3600,
+        "scope": "openid profile email offline_access"
+    })
 }
 
 fn api_key_auth_json(token: &str) -> String {
@@ -105,7 +159,10 @@ impl TestServer {
                         }
 
                         let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
-                        thread_requests.lock().expect("lock requests").push(request.clone());
+                        thread_requests
+                            .lock()
+                            .expect("lock requests")
+                            .push(request.clone());
 
                         let path = request
                             .lines()
@@ -229,6 +286,67 @@ fn refresh_profile_codex_usage_requires_opt_in() {
 }
 
 #[test]
+fn switch_profile_refreshes_oauth_tokens_before_writing_target_files() {
+    let _guard = env_lock().lock().expect("lock env");
+    let server = TestServer::start();
+    server.set_json(
+        "/oauth/token",
+        oauth_refresh_response(
+            "team@example.com",
+            "user-test",
+            "account-test",
+            "access-token-fresh",
+            "refresh-token-fresh",
+        ),
+    );
+    std::env::set_var(
+        "CODEX_REFRESH_TOKEN_URL_OVERRIDE",
+        format!("{}/oauth/token", server.base_url),
+    );
+
+    let (_app_dir, target_dir, mut manager) = temp_manager();
+    let profile = manager
+        .import_profile(ProfileInput {
+            name: "Official Team".into(),
+            notes: "oauth".into(),
+            auth_json: oauth_auth_json_with_refresh(
+                "team@example.com",
+                "user-test",
+                "account-test",
+                "access-token-stale",
+                "refresh-token-stale",
+            ),
+            config_toml: official_config_toml("gpt-5.4"),
+        })
+        .expect("import profile");
+
+    manager
+        .switch_profile(&profile.id)
+        .expect("switch profile should refresh auth");
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].contains("POST /oauth/token HTTP/1.1"));
+    assert!(requests[0].contains("grant_type=refresh_token"));
+    assert!(requests[0].contains("client_id=app_EMoamEEZ73f0CkXaXp7hrann"));
+    assert!(requests[0].contains("refresh_token=refresh-token-stale"));
+
+    let active_auth =
+        fs::read_to_string(target_dir.path().join("auth.json")).expect("read refreshed auth");
+    assert!(active_auth.contains("access-token-fresh"));
+    assert!(active_auth.contains("refresh-token-fresh"));
+    assert!(!active_auth.contains("access-token-stale"));
+
+    let saved = manager
+        .get_profile_document(&profile.id)
+        .expect("load synced profile");
+    assert!(saved.auth_json.contains("access-token-fresh"));
+    assert!(saved.auth_json.contains("refresh-token-fresh"));
+
+    std::env::remove_var("CODEX_REFRESH_TOKEN_URL_OVERRIDE");
+}
+
+#[test]
 fn refresh_profile_codex_usage_fetches_private_api_and_persists_snapshot() {
     let _guard = env_lock().lock().expect("lock env");
     let server = TestServer::start();
@@ -293,21 +411,21 @@ fn refresh_profile_codex_usage_fetches_private_api_and_persists_snapshot() {
     assert_eq!(usage.source, "api");
     assert_eq!(usage.plan_type.as_deref(), Some("team"));
     assert_eq!(
-        usage.primary
+        usage
+            .primary
             .as_ref()
             .and_then(|window| window.window_minutes),
         Some(300)
     );
     assert_eq!(
-        usage.secondary
+        usage
+            .secondary
             .as_ref()
             .and_then(|window| window.window_minutes),
         Some(10080)
     );
     assert_eq!(
-        usage.primary
-            .as_ref()
-            .map(|window| window.used_percent),
+        usage.primary.as_ref().map(|window| window.used_percent),
         Some(24.0)
     );
 
@@ -329,6 +447,247 @@ fn refresh_profile_codex_usage_fetches_private_api_and_persists_snapshot() {
 
     std::env::remove_var("CODEX_AUTH_SWITCH_CODEX_USAGE_ENDPOINT");
     let _ = fs::metadata("/tmp");
+}
+
+#[test]
+fn refresh_profile_codex_usage_refreshes_token_before_requesting_usage_api() {
+    let _guard = env_lock().lock().expect("lock env");
+    let server = TestServer::start();
+    server.set_json(
+        "/oauth/token",
+        oauth_refresh_response(
+            "team@example.com",
+            "user-test",
+            "account-test",
+            "access-token-fresh",
+            "refresh-token-fresh",
+        ),
+    );
+    server.set_json(
+        "/backend-api/wham/usage",
+        json!({
+            "user_id": "user-test",
+            "account_id": "account-test",
+            "email": "team@example.com",
+            "plan_type": "team",
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 24,
+                    "limit_window_seconds": 18000,
+                    "reset_at": 1773491460
+                }
+            }
+        }),
+    );
+
+    std::env::set_var(
+        "CODEX_REFRESH_TOKEN_URL_OVERRIDE",
+        format!("{}/oauth/token", server.base_url),
+    );
+    std::env::set_var(
+        "CODEX_AUTH_SWITCH_CODEX_USAGE_ENDPOINT",
+        format!("{}/backend-api/wham/usage", server.base_url),
+    );
+
+    let (_app_dir, _target_dir, mut manager) = temp_manager();
+    let profile = manager
+        .import_profile(ProfileInput {
+            name: "Official Team".into(),
+            notes: "oauth".into(),
+            auth_json: oauth_auth_json_with_refresh(
+                "team@example.com",
+                "user-test",
+                "account-test",
+                "access-token-stale",
+                "refresh-token-stale",
+            ),
+            config_toml: official_config_toml("gpt-5.4"),
+        })
+        .expect("import profile");
+
+    manager
+        .set_codex_usage_api_enabled(true)
+        .expect("enable usage api");
+
+    manager
+        .refresh_profile_codex_usage(&profile.id)
+        .expect("refresh usage should refresh auth first");
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].contains("POST /oauth/token HTTP/1.1"));
+    assert!(requests[0].contains("refresh_token=refresh-token-stale"));
+    assert!(requests[1].contains("GET /backend-api/wham/usage HTTP/1.1"));
+    assert!(requests[1].contains("Authorization: Bearer access-token-fresh"));
+
+    let saved = manager
+        .get_profile_document(&profile.id)
+        .expect("load synced profile");
+    assert!(saved.auth_json.contains("access-token-fresh"));
+    assert!(saved.auth_json.contains("refresh-token-fresh"));
+
+    std::env::remove_var("CODEX_AUTH_SWITCH_CODEX_USAGE_ENDPOINT");
+    std::env::remove_var("CODEX_REFRESH_TOKEN_URL_OVERRIDE");
+}
+
+#[test]
+fn refresh_profile_codex_usage_uses_active_target_auth_and_syncs_profile() {
+    let _guard = env_lock().lock().expect("lock env");
+    let server = TestServer::start();
+    server.set_json(
+        "/backend-api/wham/usage",
+        json!({
+            "user_id": "user-test",
+            "account_id": "account-test",
+            "email": "team@example.com",
+            "plan_type": "team",
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 24,
+                    "limit_window_seconds": 18000,
+                    "reset_at": 1773491460
+                }
+            }
+        }),
+    );
+
+    std::env::set_var(
+        "CODEX_AUTH_SWITCH_CODEX_USAGE_ENDPOINT",
+        format!("{}/backend-api/wham/usage", server.base_url),
+    );
+
+    let (_app_dir, target_dir, mut manager) = temp_manager();
+    let profile = manager
+        .import_profile(ProfileInput {
+            name: "Official Team".into(),
+            notes: "oauth".into(),
+            auth_json: oauth_auth_json(
+                "team@example.com",
+                "user-test",
+                "account-test",
+                "access-token-stale",
+            ),
+            config_toml: official_config_toml("gpt-5.4"),
+        })
+        .expect("import profile");
+
+    manager
+        .switch_profile(&profile.id)
+        .expect("switch active profile");
+
+    fs::write(
+        target_dir.path().join("auth.json"),
+        oauth_auth_json(
+            "team@example.com",
+            "user-test",
+            "account-test",
+            "access-token-fresh",
+        ),
+    )
+    .expect("rewrite target auth");
+
+    manager
+        .set_codex_usage_api_enabled(true)
+        .expect("enable usage api");
+
+    manager
+        .refresh_profile_codex_usage(&profile.id)
+        .expect("refresh usage");
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].contains("Authorization: Bearer access-token-fresh"));
+
+    let saved = manager
+        .get_profile_document(&profile.id)
+        .expect("load synced profile");
+    assert!(saved.auth_json.contains("access-token-fresh"));
+
+    std::env::remove_var("CODEX_AUTH_SWITCH_CODEX_USAGE_ENDPOINT");
+}
+
+#[test]
+fn refresh_profile_codex_usage_keeps_non_active_profile_on_saved_auth() {
+    let _guard = env_lock().lock().expect("lock env");
+    let server = TestServer::start();
+    server.set_json(
+        "/backend-api/wham/usage",
+        json!({
+            "user_id": "user-other",
+            "account_id": "account-other",
+            "email": "other@example.com",
+            "plan_type": "team",
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 9,
+                    "limit_window_seconds": 18000,
+                    "reset_at": 1773491460
+                }
+            }
+        }),
+    );
+
+    std::env::set_var(
+        "CODEX_AUTH_SWITCH_CODEX_USAGE_ENDPOINT",
+        format!("{}/backend-api/wham/usage", server.base_url),
+    );
+
+    let (_app_dir, target_dir, mut manager) = temp_manager();
+    let active = manager
+        .import_profile(ProfileInput {
+            name: "Active".into(),
+            notes: "oauth".into(),
+            auth_json: oauth_auth_json(
+                "team@example.com",
+                "user-test",
+                "account-test",
+                "access-token-active-stale",
+            ),
+            config_toml: official_config_toml("gpt-5.4"),
+        })
+        .expect("import active profile");
+    let other = manager
+        .import_profile(ProfileInput {
+            name: "Other".into(),
+            notes: "oauth".into(),
+            auth_json: oauth_auth_json(
+                "other@example.com",
+                "user-other",
+                "account-other",
+                "access-token-other",
+            ),
+            config_toml: official_config_toml("gpt-5.4"),
+        })
+        .expect("import other profile");
+
+    manager
+        .switch_profile(&active.id)
+        .expect("switch active profile");
+
+    fs::write(
+        target_dir.path().join("auth.json"),
+        oauth_auth_json(
+            "team@example.com",
+            "user-test",
+            "account-test",
+            "access-token-active-fresh",
+        ),
+    )
+    .expect("rewrite target auth");
+
+    manager
+        .set_codex_usage_api_enabled(true)
+        .expect("enable usage api");
+
+    manager
+        .refresh_profile_codex_usage(&other.id)
+        .expect("refresh usage");
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].contains("Authorization: Bearer access-token-other"));
+
+    std::env::remove_var("CODEX_AUTH_SWITCH_CODEX_USAGE_ENDPOINT");
 }
 
 #[test]

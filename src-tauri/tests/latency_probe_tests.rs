@@ -75,7 +75,10 @@ impl TestServer {
                         }
 
                         let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
-                        thread_requests.lock().expect("lock requests").push(request.clone());
+                        thread_requests
+                            .lock()
+                            .expect("lock requests")
+                            .push(request.clone());
 
                         let path = request
                             .lines()
