@@ -89,6 +89,8 @@ pub struct ProfileDocument {
     pub updated_at: DateTime<Utc>,
     pub auth_json: String,
     pub config_toml: String,
+    pub loaded_from_target: bool,
+    pub has_target_changes: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -426,8 +428,29 @@ impl ProfileManager {
     pub fn get_profile_document(&self, profile_id: &str) -> Result<ProfileDocument, AppError> {
         let profile_dir = self.profile_dir(profile_id)?;
         let metadata = self.read_profile_metadata(&profile_dir)?;
-        let auth_json = fs::read_to_string(profile_dir.join("auth.json"))?;
-        let config_toml = fs::read_to_string(profile_dir.join("config.toml"))?;
+        let saved_auth_json = fs::read_to_string(profile_dir.join("auth.json"))?;
+        let saved_config_toml = fs::read_to_string(profile_dir.join("config.toml"))?;
+        let active_profile_id = self.detect_active_profile()?.map(|profile| profile.id);
+
+        let (auth_json, config_toml, loaded_from_target, has_target_changes) =
+            if active_profile_id.as_deref() == Some(profile_id)
+                && self.target_auth_path().exists()
+                && self.target_config_path().exists()
+            {
+                let target_auth_json = fs::read_to_string(self.target_auth_path())?;
+                let target_config_toml = fs::read_to_string(self.target_config_path())?;
+                let has_target_changes = target_auth_json != saved_auth_json
+                    || target_config_toml != saved_config_toml;
+
+                (
+                    target_auth_json,
+                    target_config_toml,
+                    true,
+                    has_target_changes,
+                )
+            } else {
+                (saved_auth_json, saved_config_toml, false, false)
+            };
 
         Ok(ProfileDocument {
             id: metadata.id,
@@ -438,6 +461,8 @@ impl ProfileManager {
             updated_at: metadata.updated_at,
             auth_json,
             config_toml,
+            loaded_from_target,
+            has_target_changes,
         })
     }
 

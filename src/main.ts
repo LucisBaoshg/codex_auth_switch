@@ -1,10 +1,19 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
+import {
+  importCurrentAntigravityProfile,
+  loadAntigravitySnapshot,
+  restoreLastAntigravityBackup,
+  revealAntigravitySource,
+  switchAntigravityProfile,
+  type AntigravitySnapshot,
+} from "./antigravity";
 import "./styles.css";
 
 type FlashKind = "info" | "success" | "error";
 type ViewMode = "cards" | "editor";
 type EditorMode = "new" | "fromCurrent" | "existing";
+type PlatformMode = "codex" | "antigravity";
 
 type CodexUsageWindow = {
   usedPercent: number;
@@ -66,6 +75,8 @@ type ProfileDocument = {
   updatedAt: string;
   authJson: string;
   configToml: string;
+  loadedFromTarget: boolean;
+  hasTargetChanges: boolean;
 };
 
 type AppSnapshot = {
@@ -114,6 +125,8 @@ type EditorState = {
   configToml: string;
   createdAt: string | null;
   updatedAt: string | null;
+  loadedFromTarget: boolean;
+  hasTargetChanges: boolean;
 };
 
 type NetworkProfile = {
@@ -150,6 +163,8 @@ theme = "system"
 `,
     createdAt: null,
     updatedAt: null,
+    loadedFromTarget: false,
+    hasTargetChanges: false,
   };
 }
 
@@ -217,8 +232,31 @@ const mockSnapshot: AppSnapshot = {
   ],
 };
 
+const mockAntigravitySnapshot: AntigravitySnapshot = {
+  sourceDbPath:
+    "/Users/example/Library/Application Support/Antigravity/User/globalStorage/state.vscdb",
+  sourceExists: true,
+  activeProfileId: "ag-1",
+  lastSelectedProfileId: "ag-1",
+  lastSwitchProfileId: "ag-1",
+  lastSwitchedAt: new Date().toISOString(),
+  profiles: [
+    {
+      id: "ag-1",
+      name: "Current Antigravity Account",
+      notes: "Imported from local state.vscdb",
+      email: "alice@example.com",
+      displayName: "Alice",
+      createdAt: "2026-04-10T00:00:00Z",
+      updatedAt: new Date().toISOString(),
+    },
+  ],
+};
+
 const state: {
+  platform: PlatformMode;
   snapshot: AppSnapshot | null;
+  antigravitySnapshot: AntigravitySnapshot | null;
   view: ViewMode;
   selectedProfileId: string | null;
   editor: EditorState;
@@ -234,7 +272,9 @@ const state: {
     lastResult: UpdateCheckResult | null;
   };
 } = {
+  platform: "codex",
   snapshot: null,
+  antigravitySnapshot: null,
   view: "cards",
   selectedProfileId: null,
   editor: createEditorState(),
@@ -349,6 +389,8 @@ function createEditorFromInput(mode: EditorMode, input: ProfileInput): EditorSta
     configToml: input.configToml,
     createdAt: null,
     updatedAt: null,
+    loadedFromTarget: false,
+    hasTargetChanges: false,
   };
 }
 
@@ -370,6 +412,23 @@ function createMockDocument(profile: ProfileSummary): ProfileDocument {
 theme = "system"
 profile = "${profile.id}"
 `,
+    loadedFromTarget: false,
+    hasTargetChanges: false,
+  };
+}
+
+function applyEditorDocument(document: ProfileDocument): void {
+  state.editor = {
+    mode: "existing",
+    profileId: document.id,
+    name: document.name,
+    notes: document.notes,
+    authJson: document.authJson,
+    configToml: document.configToml,
+    createdAt: document.createdAt,
+    updatedAt: document.updatedAt,
+    loadedFromTarget: document.loadedFromTarget,
+    hasTargetChanges: document.hasTargetChanges,
   };
 }
 
@@ -401,6 +460,95 @@ async function refreshSnapshot(): Promise<void> {
   } finally {
     state.busy = false;
     render();
+  }
+}
+
+async function fetchAntigravitySnapshot(): Promise<AntigravitySnapshot> {
+  if (!isTauriRuntime) {
+    return mockAntigravitySnapshot;
+  }
+
+  return loadAntigravitySnapshot();
+}
+
+async function refreshAntigravitySnapshot(): Promise<void> {
+  setBusy(true);
+  try {
+    state.antigravitySnapshot = await fetchAntigravitySnapshot();
+    clearFlash();
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+
+async function switchPlatform(platform: PlatformMode): Promise<void> {
+  state.platform = platform;
+
+  if (platform === "antigravity" && !state.antigravitySnapshot) {
+    try {
+      state.antigravitySnapshot = await fetchAntigravitySnapshot();
+      clearFlash();
+    } catch (error) {
+      setFlash("error", error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  render();
+}
+
+async function handleImportCurrentAntigravity(): Promise<void> {
+  setBusy(true);
+  try {
+    await importCurrentAntigravityProfile();
+    state.antigravitySnapshot = await fetchAntigravitySnapshot();
+    setFlash("success", "已导入当前 Antigravity 账号。");
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+
+async function handleSwitchAntigravityProfile(
+  profileId: string,
+  profileName: string,
+): Promise<void> {
+  setBusy(true);
+  try {
+    await switchAntigravityProfile(profileId);
+    state.antigravitySnapshot = await fetchAntigravitySnapshot();
+    setFlash("success", `已切换到 Antigravity 账号「${profileName}」。`);
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+
+async function handleRestoreAntigravityBackup(): Promise<void> {
+  setBusy(true);
+  try {
+    await restoreLastAntigravityBackup();
+    state.antigravitySnapshot = await fetchAntigravitySnapshot();
+    setFlash("success", "已恢复最近一次 Antigravity 备份。");
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+
+async function handleRevealAntigravitySource(): Promise<void> {
+  try {
+    await revealAntigravitySource();
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
   }
 }
 
@@ -521,16 +669,7 @@ async function openEditorForProfile(profileId: string): Promise<void> {
 
   if (!isTauriRuntime) {
     const document = createMockDocument(selectedProfile);
-    state.editor = {
-      mode: "existing",
-      profileId: document.id,
-      name: document.name,
-      notes: document.notes,
-      authJson: document.authJson,
-      configToml: document.configToml,
-      createdAt: document.createdAt,
-      updatedAt: document.updatedAt,
-    };
+    applyEditorDocument(document);
     state.view = "editor";
     render();
     return;
@@ -539,16 +678,7 @@ async function openEditorForProfile(profileId: string): Promise<void> {
   setBusy(true);
   try {
     const document = await desktopInvoke<ProfileDocument>("get_profile_document", { profileId });
-    state.editor = {
-      mode: "existing",
-      profileId: document.id,
-      name: document.name,
-      notes: document.notes,
-      authJson: document.authJson,
-      configToml: document.configToml,
-      createdAt: document.createdAt,
-      updatedAt: document.updatedAt,
-    };
+    applyEditorDocument(document);
     state.view = "editor";
     clearFlash();
   } catch (error) {
@@ -599,18 +729,27 @@ async function saveEditorProfile(andSwitch: boolean): Promise<void> {
     }
 
     if (isExisting && targetProfileId) {
-      const profileSummary =
-        snapshot.profiles.find((profile) => profile.id === targetProfileId) ?? null;
-      if (profileSummary) {
-        state.editor = {
-          ...state.editor,
-          mode: "existing",
-          profileId: profileSummary.id,
-          name: profileSummary.name,
-          notes: profileSummary.notes,
-          createdAt: profileSummary.createdAt,
-          updatedAt: profileSummary.updatedAt,
-        };
+      if (isTauriRuntime) {
+        const document = await desktopInvoke<ProfileDocument>("get_profile_document", {
+          profileId: targetProfileId,
+        });
+        applyEditorDocument(document);
+      } else {
+        const profileSummary =
+          snapshot.profiles.find((profile) => profile.id === targetProfileId) ?? null;
+        if (profileSummary) {
+          state.editor = {
+            ...state.editor,
+            mode: "existing",
+            profileId: profileSummary.id,
+            name: profileSummary.name,
+            notes: profileSummary.notes,
+            createdAt: profileSummary.createdAt,
+            updatedAt: profileSummary.updatedAt,
+            loadedFromTarget: false,
+            hasTargetChanges: false,
+          };
+        }
       }
       state.view = "editor";
       setFlash("success", "已保存这套 profile。");
@@ -1109,6 +1248,140 @@ function renderFlash(): string {
   `;
 }
 
+function renderPlatformTabs(): string {
+  return `
+    <section class="tabs platform-tabs">
+      <button
+        class="tab-button ${state.platform === "codex" ? "active" : ""}"
+        data-action="switch-platform"
+        data-platform="codex"
+      >
+        Codex
+      </button>
+      <button
+        class="tab-button ${state.platform === "antigravity" ? "active" : ""}"
+        data-action="switch-platform"
+        data-platform="antigravity"
+      >
+        Antigravity
+      </button>
+    </section>
+  `;
+}
+
+function renderAntigravityPage(): string {
+  const snapshot = state.antigravitySnapshot;
+
+  if (!snapshot) {
+    return `
+      <section class="cards-page" data-page="antigravity">
+        <header class="top-nav" data-tauri-drag-region>
+          <div class="top-nav-copy">
+            <h1>Google Antigravity</h1>
+            <p>导入并切换当前本机的 Antigravity 登录状态。</p>
+          </div>
+        </header>
+        ${renderFlash()}
+        <section class="loading-page">
+          <h1>正在读取 Antigravity 配置…</h1>
+        </section>
+      </section>
+    `;
+  }
+
+  return `
+    <section class="cards-page" data-page="antigravity">
+      <header class="top-nav" data-tauri-drag-region>
+        <div class="top-nav-copy">
+          <h1>Google Antigravity</h1>
+          <p>导入并切换当前本机的 Antigravity 登录状态。</p>
+        </div>
+      </header>
+
+      ${renderFlash()}
+
+      <section class="grid-container">
+        <div class="section-header">
+          <h3 class="section-title">已保存的 Antigravity 账号 (${snapshot.profiles.length})</h3>
+          <div class="section-actions">
+            <button
+              class="button button-secondary"
+              data-action="import-current-antigravity"
+              ${state.busy ? "disabled" : ""}
+            >
+              导入当前账号
+            </button>
+            <button
+              class="button button-secondary"
+              data-action="restore-antigravity-backup"
+              ${state.busy ? "disabled" : ""}
+            >
+              恢复最近备份
+            </button>
+            <button
+              class="button button-ghost"
+              data-action="reveal-antigravity-source"
+              ${state.busy ? "disabled" : ""}
+            >
+              打开数据目录
+            </button>
+            <button
+              class="icon-button section-refresh-button"
+              title="刷新状态"
+              data-role="global-refresh"
+              data-action="refresh"
+              ${state.busy ? "disabled" : ""}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="card-grid">
+          ${snapshot.profiles.length === 0 ? `
+            <div class="empty-state">
+              <h3>暂无 Antigravity 账号快照</h3>
+              <p>点击“导入当前账号”把现在本机登录状态保存成一个可切换的配置。</p>
+            </div>
+          ` : ""}
+          ${snapshot.profiles
+            .map(
+              (profile) => `
+                <article
+                  class="card profile-card ${snapshot.activeProfileId === profile.id ? "profile-card-live" : ""}"
+                  data-role="antigravity-profile-card"
+                  data-id="${profile.id}"
+                >
+                  <div class="card-head">
+                    <h2>${escapeHtml(profile.name)}</h2>
+                    ${snapshot.activeProfileId === profile.id ? `
+                      <div class="status-badge">
+                        <div class="status-dot status-dot-pulse"></div>
+                        <span>Active</span>
+                      </div>
+                    ` : ""}
+                  </div>
+                  <p class="card-note">${escapeHtml(profile.email)}</p>
+                  <div class="card-actions-overlay">
+                    <div style="display: flex; flex-direction: column; gap: 4px; flex-grow: 1;">
+                      <p class="card-date">更新于：${formatDateTime(profile.updatedAt)}</p>
+                      ${
+                        snapshot.activeProfileId === profile.id
+                          ? `<div class="env-active-label"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg> 当前生效中</div>`
+                          : `<button class="button button-secondary" style="width:100%" data-action="switch-antigravity" data-id="${profile.id}" data-name="${escapeHtml(profile.name)}" ${state.busy ? "disabled" : ""}>切换到此账号</button>`
+                      }
+                    </div>
+                  </div>
+                </article>
+              `,
+            )
+            .join("")}
+        </div>
+      </section>
+    </section>
+  `;
+}
+
 function renderCardsPage(snapshot: AppSnapshot): string {
   const activeProfile =
     snapshot.profiles.find((profile) => profile.id === snapshot.activeProfileId) ?? null;
@@ -1383,6 +1656,14 @@ function renderEditorPage(): string {
 
       ${renderFlash()}
 
+      ${state.editor.mode === "existing" && state.editor.hasTargetChanges
+        ? `
+          <aside class="flash flash-info" data-role="editor-live-change-notice">
+            <span>当前运行中的配置有变动，请保存以同步回这套 Profile。</span>
+          </aside>
+        `
+        : ""}
+
       <section class="editor-meta">
         <div class="meta-chip">
           <span>创建时间</span>
@@ -1447,21 +1728,24 @@ function renderEditorPage(): string {
 function render(): void {
   const snapshot = state.snapshot;
 
-  if (!snapshot) {
-    app.innerHTML = `
-      <main class="app-shell">
-        <section class="loading-page" data-page="cards">
-          <p class="eyebrow">Codex Profiles</p>
-          <h1>正在读取配置…</h1>
-        </section>
-      </main>
+  let content = "";
+  if (state.platform === "antigravity") {
+    content = renderAntigravityPage();
+  } else if (!snapshot) {
+    content = `
+      <section class="loading-page" data-page="cards">
+        <p class="eyebrow">Codex Profiles</p>
+        <h1>正在读取配置…</h1>
+      </section>
     `;
-    return;
+  } else {
+    content = state.view === "cards" ? renderCardsPage(snapshot) : renderEditorPage();
   }
 
   app.innerHTML = `
     <main class="app-shell">
-      ${state.view === "cards" ? renderCardsPage(snapshot) : renderEditorPage()}
+      ${renderPlatformTabs()}
+      ${content}
     </main>
   `;
 
@@ -1494,11 +1778,15 @@ function bindEvents(): void {
       const action = button.dataset.action;
 
       if (action === "refresh") {
-        if (state.activeTab === "network") {
+        if (state.platform === "antigravity") {
+          await refreshAntigravitySnapshot();
+        } else if (state.activeTab === "network") {
           await fetchNetworkProfiles();
         } else {
           await refreshSnapshot();
         }
+      } else if (action === "switch-platform" && button.dataset.platform) {
+        await switchPlatform(button.dataset.platform as PlatformMode);
       } else if (action === "tab-local") {
         state.activeTab = "local";
         render();
@@ -1529,6 +1817,18 @@ function bindEvents(): void {
         await openEditorForNewProfile();
       } else if (action === "view-profile-details" && button.dataset.id) {
         await openEditorForProfile(button.dataset.id);
+      } else if (action === "import-current-antigravity") {
+        await handleImportCurrentAntigravity();
+      } else if (action === "restore-antigravity-backup") {
+        await handleRestoreAntigravityBackup();
+      } else if (action === "reveal-antigravity-source") {
+        await handleRevealAntigravitySource();
+      } else if (
+        action === "switch-antigravity" &&
+        button.dataset.id &&
+        button.dataset.name
+      ) {
+        await handleSwitchAntigravityProfile(button.dataset.id, button.dataset.name);
       } else if (action === "switch" && button.dataset.id && button.dataset.name) {
         await switchProfile(button.dataset.id, button.dataset.name);
       } else if (action === "delete-profile" && button.dataset.id && button.dataset.name) {

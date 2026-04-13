@@ -264,6 +264,38 @@ fn get_profile_document_returns_saved_auth_and_config_contents() {
 }
 
 #[test]
+fn get_profile_document_for_active_profile_reads_live_target_config_contents() {
+    let (_app_dir, target_dir, mut manager) = temp_manager();
+
+    let profile = manager
+        .import_profile(ProfileInput {
+            name: "Live Config".into(),
+            notes: "active profile".into(),
+            auth_json: oauth_auth_json("live@example.com", "user-live", "acct-live"),
+            config_toml: official_config_toml("gpt-5"),
+        })
+        .expect("import");
+
+    manager
+        .switch_profile(&profile.id)
+        .expect("switch active profile");
+
+    fs::write(
+        target_dir.path().join("config.toml"),
+        official_config_toml("gpt-5.4"),
+    )
+    .expect("rewrite target config");
+
+    let document = manager
+        .get_profile_document(&profile.id)
+        .expect("load active document");
+
+    assert_eq!(document.id, profile.id);
+    assert_eq!(document.name, "Live Config");
+    assert!(document.config_toml.contains("model = \"gpt-5.4\""));
+}
+
+#[test]
 fn update_profile_rewrites_saved_contents_and_metadata() {
     let (_app_dir, _target_dir, manager) = temp_manager();
 

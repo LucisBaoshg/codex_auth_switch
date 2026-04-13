@@ -18,6 +18,15 @@
 - 切换前自动备份当前生效文件
 - 自动识别当前目标目录对应的是哪一套 profile
 
+## Antigravity 支持
+
+- 在同一个桌面应用里新增 `Antigravity` 平台页签
+- 从本机当前已登录的 `Antigravity.app` 导入账号状态
+- 把 Antigravity 登录状态保存为可重复切换的本地快照
+- 切换前自动备份当前 `state.vscdb` 里的登录相关键值
+- 一键恢复最近一次 Antigravity 备份
+- 切换完成后自动重启 `Antigravity.app`
+
 ## 默认目标路径
 
 - macOS / Linux: `~/.codex`
