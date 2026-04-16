@@ -718,6 +718,87 @@ test("opens the detail editor when clicking view-details on a profile card", asy
   expect(document.querySelector("#editor-config-toml")).not.toBeNull();
 });
 
+test("opens network shared profile details in readonly mode", async () => {
+  const fetchMock = vi.fn(async (input: string) => {
+    if (input === "http://sub2api.ite.tapcash.com/codex/api/profiles") {
+      return {
+        ok: true,
+        json: async () => [
+          {
+            id: "remote-1",
+            name: "Team Shared",
+            description: "团队共享配置",
+            createdAt: "2026-04-16T00:00:00Z",
+            files: ["auth.json", "config.toml"],
+          },
+        ],
+      };
+    }
+
+    if (input === "http://sub2api.ite.tapcash.com/codex/api/profiles/remote-1") {
+      return {
+        ok: true,
+        json: async () => ({
+          id: "remote-1",
+          name: "Team Shared",
+          description: "团队共享配置",
+          createdAt: "2026-04-16T00:00:00Z",
+          files: ["auth.json", "config.toml"],
+        }),
+      };
+    }
+
+    if (input === "http://sub2api.ite.tapcash.com/codex/api/profiles/remote-1/auth.json") {
+      return {
+        ok: true,
+        text: async () => '{"token":"remote-token"}',
+      };
+    }
+
+    if (input === "http://sub2api.ite.tapcash.com/codex/api/profiles/remote-1/config.toml") {
+      return {
+        ok: true,
+        text: async () => 'model = "gpt-5.4"\n',
+      };
+    }
+
+    throw new Error(`unexpected fetch: ${input}`);
+  });
+
+  vi.stubGlobal("fetch", fetchMock);
+
+  await import("../src/main");
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="tab-network"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+  await flushUi();
+  await flushUi();
+  await flushUi();
+
+  const detailButton = document.querySelector<HTMLButtonElement>(
+    '[data-action="view-network-profile-details"][data-id="remote-1"]',
+  );
+  expect(detailButton).not.toBeNull();
+  detailButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+  await flushUi();
+  await flushUi();
+  await flushUi();
+  await flushUi();
+  await flushUi();
+
+  expect(document.querySelector('[data-page="editor"]')).not.toBeNull();
+  expect(document.querySelector<HTMLInputElement>("#editor-name")?.disabled).toBe(true);
+  expect(document.querySelector<HTMLTextAreaElement>("#editor-auth-json")?.disabled).toBe(true);
+  expect(document.querySelector<HTMLTextAreaElement>("#editor-config-toml")?.disabled).toBe(true);
+  expect(document.querySelector('[data-role="editor-readonly-notice"]')).not.toBeNull();
+  expect(document.querySelector('[data-action="save-editor"]')).toBeNull();
+  expect(document.querySelector('[data-action="save-and-switch"]')).toBeNull();
+});
+
 test("deletes a saved profile after confirmation", async () => {
   const initialSnapshot = {
     targetDir: "/Users/example/.codex",

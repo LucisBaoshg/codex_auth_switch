@@ -77,6 +77,8 @@ type ProfileDocument = {
   configToml: string;
   loadedFromTarget: boolean;
   hasTargetChanges: boolean;
+  readOnly?: boolean;
+  source?: "local" | "network";
 };
 
 type AppSnapshot = {
@@ -127,6 +129,8 @@ type EditorState = {
   updatedAt: string | null;
   loadedFromTarget: boolean;
   hasTargetChanges: boolean;
+  readOnly: boolean;
+  source: "local" | "network";
 };
 
 type NetworkProfile = {
@@ -136,6 +140,8 @@ type NetworkProfile = {
   createdAt: string;
   files: string[];
 };
+
+const NETWORK_PROFILES_API = "http://sub2api.ite.tapcash.com/codex/api/profiles";
 
 const isTauriRuntime = "__TAURI_INTERNALS__" in window;
 const appRoot = document.querySelector<HTMLDivElement>("#app");
@@ -165,6 +171,8 @@ theme = "system"
     updatedAt: null,
     loadedFromTarget: false,
     hasTargetChanges: false,
+    readOnly: false,
+    source: "local",
   };
 }
 
@@ -391,6 +399,8 @@ function createEditorFromInput(mode: EditorMode, input: ProfileInput): EditorSta
     updatedAt: null,
     loadedFromTarget: false,
     hasTargetChanges: false,
+    readOnly: false,
+    source: "local",
   };
 }
 
@@ -429,6 +439,8 @@ function applyEditorDocument(document: ProfileDocument): void {
     updatedAt: document.updatedAt,
     loadedFromTarget: document.loadedFromTarget,
     hasTargetChanges: document.hasTargetChanges,
+    readOnly: document.readOnly ?? false,
+    source: document.source ?? "local",
   };
 }
 
@@ -690,6 +702,11 @@ async function openEditorForProfile(profileId: string): Promise<void> {
 }
 
 async function saveEditorProfile(andSwitch: boolean): Promise<void> {
+  if (state.editor.readOnly) {
+    setFlash("error", "网络共享配置仅支持查看，不能直接编辑或保存。");
+    return;
+  }
+
   const name = state.editor.name.trim();
   if (!name) {
     setFlash("error", "请先填写 profile 名称。");
@@ -748,6 +765,8 @@ async function saveEditorProfile(andSwitch: boolean): Promise<void> {
             updatedAt: profileSummary.updatedAt,
             loadedFromTarget: false,
             hasTargetChanges: false,
+            readOnly: false,
+            source: "local",
           };
         }
       }
@@ -769,7 +788,7 @@ async function fetchNetworkProfiles(): Promise<void> {
   state.networkLoading = true;
   render();
   try {
-    const res = await fetch("http://sub2api.ite.tapcash.com/codex/api/profiles");
+    const res = await fetch(NETWORK_PROFILES_API);
     if (!res.ok) throw new Error("加载网络共享配置失败");
     state.networkProfiles = await res.json();
   } catch (error) {
@@ -780,33 +799,60 @@ async function fetchNetworkProfiles(): Promise<void> {
   }
 }
 
+async function fetchNetworkProfileDocument(networkProfileId: string): Promise<ProfileDocument> {
+  const res = await fetch(`${NETWORK_PROFILES_API}/${networkProfileId}`);
+  if (!res.ok) {
+    throw new Error("获取网络配置详情失败");
+  }
+
+  const profileData = (await res.json()) as NetworkProfile;
+
+  let authJson = "{}";
+  let configToml = "";
+
+  if (profileData.files?.includes("auth.json")) {
+    const authRes = await fetch(`${NETWORK_PROFILES_API}/${networkProfileId}/auth.json`);
+    if (authRes.ok) {
+      authJson = await authRes.text();
+    }
+  }
+
+  if (profileData.files?.includes("config.toml")) {
+    const configRes = await fetch(`${NETWORK_PROFILES_API}/${networkProfileId}/config.toml`);
+    if (configRes.ok) {
+      configToml = await configRes.text();
+    }
+  }
+
+  return {
+    id: profileData.id,
+    name: profileData.name,
+    notes: profileData.description || "从网络资源库获取的共享配置",
+    authTypeLabel: "远程资源",
+    createdAt: profileData.createdAt,
+    updatedAt: profileData.createdAt,
+    authJson,
+    configToml,
+    loadedFromTarget: false,
+    hasTargetChanges: false,
+    readOnly: true,
+    source: "network",
+  };
+}
+
 async function downloadAndApplyNetworkProfile(networkProfileId: string, profileName: string): Promise<void> {
   const confirmed = await nativeConfirm(`确定要下载网络配置「${profileName}」吗？\n如果同名配置已存在，将会生效使用并覆盖运行中环境。`, "下载并应用", false);
   if (!confirmed) return;
 
   setBusy(true);
   try {
-    const res = await fetch(`http://sub2api.ite.tapcash.com/codex/api/profiles/${networkProfileId}`);
-    if (!res.ok) throw new Error("获取网络配置详情失败");
-    const profileData = await res.json();
-
-    let authJson = "";
-    let configToml = "";
-
-    if (profileData.files && profileData.files.includes("auth.json")) {
-      const authRes = await fetch(`http://sub2api.ite.tapcash.com/codex/api/profiles/${networkProfileId}/auth.json`);
-      if (authRes.ok) authJson = await authRes.text();
-    }
-    if (profileData.files && profileData.files.includes("config.toml")) {
-      const configRes = await fetch(`http://sub2api.ite.tapcash.com/codex/api/profiles/${networkProfileId}/config.toml`);
-      if (configRes.ok) configToml = await configRes.text();
-    }
+    const document = await fetchNetworkProfileDocument(networkProfileId);
 
     const payload: ProfileInput = {
       name: profileName,
-      notes: profileData.description || "从网络资源库获取的共享配置",
-      authJson: authJson || "{}",
-      configToml: configToml || "",
+      notes: document.notes,
+      authJson: document.authJson,
+      configToml: document.configToml,
     };
 
     if (isTauriRuntime) {
@@ -828,6 +874,21 @@ async function downloadAndApplyNetworkProfile(networkProfileId: string, profileN
     setFlash("error", error instanceof Error ? error.message : String(error));
   } finally {
     setBusy(false);
+    render();
+  }
+}
+
+async function openEditorForNetworkProfile(networkProfileId: string): Promise<void> {
+  setBusy(true);
+  try {
+    const document = await fetchNetworkProfileDocument(networkProfileId);
+    applyEditorDocument(document);
+    state.view = "editor";
+    clearFlash();
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    state.busy = false;
     render();
   }
 }
@@ -1590,6 +1651,17 @@ function renderCardsPage(snapshot: AppSnapshot): string {
                       安装并应用
                     </button>
                   </div>
+                  <div class="card-secondary-actions" style="align-self: flex-end; padding-bottom: 2px;">
+                    <button
+                      class="icon-button"
+                      title="查看共享配置详情"
+                      data-action="view-network-profile-details"
+                      data-id="${profile.id}"
+                      ${state.busy ? "disabled" : ""}
+                    >
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                    </button>
+                  </div>
                 </div>
               </article>
             `).join("")}
@@ -1603,15 +1675,20 @@ function renderCardsPage(snapshot: AppSnapshot): string {
 
 function renderEditorPage(): string {
   const existing = state.editor.mode === "existing";
+  const readOnly = state.editor.readOnly;
   const title =
-    state.editor.mode === "fromCurrent"
+    readOnly
+      ? "查看网络共享配置"
+      : state.editor.mode === "fromCurrent"
       ? "保存当前 Codex 配置为新 Profile"
       : existing
         ? "查看和编辑 Profile"
         : "手动创建新 Profile";
 
   const subtitle =
-    state.editor.mode === "fromCurrent"
+    readOnly
+      ? "该配置来自网络共享库，仅供查看，不能直接编辑或保存。"
+      : state.editor.mode === "fromCurrent"
       ? "把当前 `.codex` 里的内容复制成一套新的 profile。"
       : existing
         ? "你现在编辑的是已保存 profile 的完整配置文本。"
@@ -1631,30 +1708,42 @@ function renderEditorPage(): string {
             <p class="page-copy">${subtitle}</p>
           </div>
         </div>
-        <div class="editor-header-actions">
-          ${
-            existing
-              ? `
-                <button class="button button-secondary" data-action="save-editor" ${state.busy ? "disabled" : ""}>
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:2px;"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
-                  保存修改
-                </button>
-              `
-              : `
-                <button class="button button-secondary" data-action="save-editor" ${state.busy ? "disabled" : ""}>
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:2px;"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-                  创建配置
-                </button>
-              `
-          }
-          <button class="button button-primary" data-action="save-and-switch" ${state.busy ? "disabled" : ""}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:2px;"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
-            ${existing ? "保存并立即启动" : "创建并立即启动"}
-          </button>
-        </div>
+        ${readOnly
+          ? ""
+          : `
+            <div class="editor-header-actions">
+              ${
+                existing
+                  ? `
+                    <button class="button button-secondary" data-action="save-editor" ${state.busy ? "disabled" : ""}>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:2px;"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
+                      保存修改
+                    </button>
+                  `
+                  : `
+                    <button class="button button-secondary" data-action="save-editor" ${state.busy ? "disabled" : ""}>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:2px;"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                      创建配置
+                    </button>
+                  `
+              }
+              <button class="button button-primary" data-action="save-and-switch" ${state.busy ? "disabled" : ""}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:2px;"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                ${existing ? "保存并立即启动" : "创建并立即启动"}
+              </button>
+            </div>
+          `}
       </header>
 
       ${renderFlash()}
+
+      ${readOnly
+        ? `
+          <aside class="flash flash-info" data-role="editor-readonly-notice">
+            <span>网络共享配置仅支持查看详情，不能直接编辑或保存。</span>
+          </aside>
+        `
+        : ""}
 
       ${state.editor.mode === "existing" && state.editor.hasTargetChanges
         ? `
@@ -1683,7 +1772,7 @@ function renderEditorPage(): string {
             type="text"
             value="${escapeHtml(state.editor.name)}"
             placeholder="例如：淘宝 1 / Work / Backup"
-            ${state.busy ? "disabled" : ""}
+            ${state.busy || readOnly ? "disabled" : ""}
           />
         </label>
 
@@ -1693,7 +1782,7 @@ function renderEditorPage(): string {
             id="editor-notes"
             rows="3"
             placeholder="写一点识别信息，比如账号用途、邮箱、额度状态"
-            ${state.busy ? "disabled" : ""}
+            ${state.busy || readOnly ? "disabled" : ""}
           >${escapeHtml(state.editor.notes)}</textarea>
         </label>
 
@@ -1705,7 +1794,7 @@ function renderEditorPage(): string {
               class="code-textarea"
               rows="18"
               spellcheck="false"
-              ${state.busy ? "disabled" : ""}
+              ${state.busy || readOnly ? "disabled" : ""}
             >${escapeHtml(state.editor.authJson)}</textarea>
           </label>
 
@@ -1716,7 +1805,7 @@ function renderEditorPage(): string {
               class="code-textarea"
               rows="18"
               spellcheck="false"
-              ${state.busy ? "disabled" : ""}
+              ${state.busy || readOnly ? "disabled" : ""}
             >${escapeHtml(state.editor.configToml)}</textarea>
           </label>
         </div>
@@ -1799,6 +1888,8 @@ function bindEvents(): void {
         }
       } else if (action === "download-and-apply" && button.dataset.id && button.dataset.name) {
         await downloadAndApplyNetworkProfile(button.dataset.id, button.dataset.name);
+      } else if (action === "view-network-profile-details" && button.dataset.id) {
+        await openEditorForNetworkProfile(button.dataset.id);
       } else if (action === "enable-codex-usage") {
         await setCodexUsageApiEnabled(true);
       } else if (action === "disable-codex-usage") {
