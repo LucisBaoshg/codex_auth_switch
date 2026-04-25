@@ -8,8 +8,8 @@ use crate::antigravity::models::{
 use crate::core::{
     check_for_update, check_install_location as resolve_install_location,
     install_update as perform_install_update, restart_codex_app, AppSnapshot,
-    InstallLocationStatus, ProfileDocument, ProfileInput, ProfileManager, UpdateCheckResult,
-    UpdateInstallRequest,
+    InstallLocationStatus, ProfileDocument, ProfileInput, ProfileManager, SessionRecoveryReport,
+    SessionRepairResult, UpdateCheckResult, UpdateInstallRequest,
 };
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
@@ -52,8 +52,7 @@ where
 #[tauri::command]
 fn load_snapshot(app: AppHandle) -> Result<AppSnapshot, String> {
     let manager = manager_from_app(&app)?;
-    // 在程序初次获取快照或用户手动刷新时，主动牵引/同步一次会话数据库，保证启动即对齐
-    let _ = manager.fix_session_database_and_configs();
+    let _ = manager.run_automatic_session_maintenance();
     manager.snapshot().map_err(|error| error.to_string())
 }
 
@@ -250,6 +249,29 @@ fn fix_session_database(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn diagnose_codex_sessions(app: AppHandle) -> Result<SessionRecoveryReport, String> {
+    run_blocking_manager_task(app, move |manager| {
+        manager
+            .diagnose_codex_sessions()
+            .map_err(|error| error.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn repair_codex_sessions(
+    app: AppHandle,
+    repair_times_from_session_index: bool,
+) -> Result<SessionRepairResult, String> {
+    run_blocking_manager_task(app, move |manager| {
+        manager
+            .repair_codex_sessions(repair_times_from_session_index)
+            .map_err(|error| error.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
 fn check_update() -> Result<UpdateCheckResult, String> {
     check_for_update().map_err(|error| error.to_string())
 }
@@ -289,6 +311,8 @@ pub fn run() {
             open_target_dir,
             restart_codex,
             fix_session_database,
+            diagnose_codex_sessions,
+            repair_codex_sessions,
             check_update,
             install_update,
             check_install_location

@@ -1,10 +1,12 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::{DateTime, SecondsFormat, TimeZone, Utc};
+use filetime::{set_file_mtime, FileTime};
 use rusqlite::Connection;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -146,6 +148,116 @@ pub struct InstallLocationStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SessionRecoveryCounts {
+    pub session_index_entries: usize,
+    pub db_threads: usize,
+    pub archived: usize,
+    pub unarchived: usize,
+    pub has_user_event_true: usize,
+    pub has_user_event_false: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRecoveryCandidates {
+    pub missing_rollout_files: usize,
+    pub has_user_event_false_but_rollout_has_user_message: usize,
+    pub db_time_mismatch_with_session_index: usize,
+    pub rollout_mtime_mismatch_with_session_index: usize,
+    pub db_thread_ids_missing_from_session_index: usize,
+    pub session_index_ids_missing_from_db: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MissingRolloutSample {
+    pub id: String,
+    pub archived: bool,
+    pub rollout_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HasUserEventMismatchSample {
+    pub id: String,
+    pub archived: bool,
+    pub cwd: Option<String>,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTimeMismatchSample {
+    pub id: String,
+    pub cwd: Option<String>,
+    pub db_updated_at_ms: i64,
+    pub indexed_updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RolloutMtimeMismatchSample {
+    pub id: String,
+    pub rollout_path: String,
+    pub rollout_mtime_ms: i64,
+    pub indexed_updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedRootOutsideRecentWindowSample {
+    pub root: String,
+    pub latest_thread_id: String,
+    pub latest_title: Option<String>,
+    pub latest_updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRecoverySamples {
+    pub missing_rollout_files: Vec<MissingRolloutSample>,
+    pub has_user_event_false_but_rollout_has_user_message: Vec<HasUserEventMismatchSample>,
+    pub db_time_mismatch_with_session_index: Vec<SessionTimeMismatchSample>,
+    pub rollout_mtime_mismatch_with_session_index: Vec<RolloutMtimeMismatchSample>,
+    pub saved_roots_with_chats_outside_recent_window: Vec<SavedRootOutsideRecentWindowSample>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRecoveryReport {
+    pub codex_home: String,
+    pub db_path: String,
+    pub session_index_path: String,
+    pub recent_limit: usize,
+    pub sqlite_integrity: String,
+    pub counts: SessionRecoveryCounts,
+    pub repair_candidates: SessionRecoveryCandidates,
+    pub samples: SessionRecoverySamples,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRepairUpdateCounts {
+    pub has_user_event: usize,
+    pub db_time: usize,
+    pub rollout_mtime: usize,
+    pub time_mismatches_not_repaired: usize,
+    pub skipped_missing_rollout_files: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRepairResult {
+    pub repaired: bool,
+    pub backup_path: String,
+    pub audit_path: String,
+    pub updates: SessionRepairUpdateCounts,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RemoteSyncResult {
     pub synced: usize,
     pub imported: usize,
@@ -231,11 +343,41 @@ struct ProfileMetadata {
     pub third_party_latency: Option<ThirdPartyLatencySnapshot>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionIndexEntry {
     id: String,
     thread_name: String,
     updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct SessionRecoveryIndexEntry {
+    ms: i64,
+    sec: i64,
+}
+
+#[derive(Debug, Clone)]
+struct SessionRecoveryThread {
+    id: String,
+    rollout_path: Option<PathBuf>,
+    updated_at: i64,
+    updated_at_ms: i64,
+    cwd: Option<String>,
+    title: Option<String>,
+    has_user_event: bool,
+    archived: bool,
+}
+
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionRepairAudit {
+    backup_path: String,
+    audit_path: String,
+    has_user_event_updates: Vec<HasUserEventMismatchSample>,
+    db_time_updates: Vec<SessionTimeMismatchSample>,
+    rollout_mtime_updates: Vec<RolloutMtimeMismatchSample>,
+    time_mismatches_not_repaired: Vec<SessionTimeMismatchSample>,
+    skipped_missing_rollout_files: Vec<MissingRolloutSample>,
 }
 
 #[derive(Debug)]
@@ -267,6 +409,14 @@ pub enum AppError {
     #[error("{0}")]
     Message(String),
 }
+
+#[derive(Clone, Copy)]
+enum SessionStateSyncMode {
+    Copy,
+    Move,
+}
+
+const SESSION_RECOVERY_RECENT_LIMIT: usize = 50;
 
 pub struct ProfileManager {
     app_data_dir: PathBuf,
@@ -439,8 +589,8 @@ impl ProfileManager {
             {
                 let target_auth_json = fs::read_to_string(self.target_auth_path())?;
                 let target_config_toml = fs::read_to_string(self.target_config_path())?;
-                let has_target_changes = target_auth_json != saved_auth_json
-                    || target_config_toml != saved_config_toml;
+                let has_target_changes =
+                    target_auth_json != saved_auth_json || target_config_toml != saved_config_toml;
 
                 (
                     target_auth_json,
@@ -621,8 +771,52 @@ impl ProfileManager {
 
     pub fn fix_session_database_and_configs(&self) -> Result<(), AppError> {
         let target_dir = self.target_dir.clone();
-        let target_config = target_dir.join("config.toml");
-        let target_auth = target_dir.join("auth.json");
+        let active_provider = self.repair_configs_and_resolve_active_provider()?;
+        self.repair_workspace_project_order(&target_dir);
+        self.update_session_databases(&target_dir, &active_provider);
+        self.update_session_jsonl(&target_dir, &active_provider);
+        self.rebuild_session_index(&target_dir);
+
+        Ok(())
+    }
+
+    pub fn run_automatic_session_maintenance(&self) -> Result<(), AppError> {
+        let target_dir = self.target_dir.clone();
+        let active_provider = self.repair_configs_and_resolve_active_provider()?;
+        self.repair_workspace_project_order(&target_dir);
+        self.update_session_databases(&target_dir, &active_provider);
+        self.update_session_jsonl(&target_dir, &active_provider);
+
+        if let Some(report) = self.build_session_recovery_report(false)? {
+            if report.sqlite_integrity == "ok"
+                && report
+                    .repair_candidates
+                    .has_user_event_false_but_rollout_has_user_message
+                    > 0
+            {
+                let _ = self.repair_codex_sessions_internal(false, false)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn diagnose_codex_sessions(&self) -> Result<SessionRecoveryReport, AppError> {
+        self.build_session_recovery_report(true)?
+            .ok_or_else(|| AppError::Message("The target Codex directory does not contain readable session state.".into()))
+    }
+
+    pub fn repair_codex_sessions(
+        &self,
+        repair_times_from_session_index: bool,
+    ) -> Result<SessionRepairResult, AppError> {
+        self.repair_codex_sessions_internal(repair_times_from_session_index, true)?
+            .ok_or_else(|| AppError::Message("The target Codex directory does not contain repairable session state.".into()))
+    }
+
+    fn repair_configs_and_resolve_active_provider(&self) -> Result<String, AppError> {
+        let target_config = self.target_dir.join("config.toml");
+        let target_auth = self.target_dir.join("auth.json");
         let mut active_provider = "openai".to_string();
 
         if target_config.exists() {
@@ -688,25 +882,283 @@ impl ProfileManager {
             }
         }
 
-        self.update_session_databases(&target_dir, &active_provider);
-        self.update_session_jsonl(&target_dir, &active_provider);
-        self.rebuild_session_index(&target_dir);
+        Ok(active_provider)
+    }
 
-        Ok(())
+    fn build_session_recovery_report(
+        &self,
+        strict: bool,
+    ) -> Result<Option<SessionRecoveryReport>, AppError> {
+        let Some(db_path) = primary_state_database_path(&self.target_dir) else {
+            if strict {
+                return Err(AppError::Message(
+                    "No readable state_*.sqlite database was found in the target Codex directory."
+                        .into(),
+                ));
+            }
+            return Ok(None);
+        };
+        let session_index_path = self.target_dir.join("session_index.jsonl");
+        if !session_index_path.exists() {
+            if strict {
+                return Err(AppError::Message(
+                    "session_index.jsonl was not found in the target Codex directory.".into(),
+                ));
+            }
+            return Ok(None);
+        }
+
+        let Some(conn) = open_valid_state_database(&db_path) else {
+            if strict {
+                return Err(AppError::Message(
+                    "The primary session database is invalid or unreadable.".into(),
+                ));
+            }
+            return Ok(None);
+        };
+        let session_index = read_session_recovery_index_entries(&session_index_path)?;
+        let threads = match read_session_recovery_threads(&conn) {
+            Ok(threads) => threads,
+            Err(error) => {
+                if strict {
+                    return Err(AppError::Message(format!(
+                        "Failed to inspect the session database: {error}"
+                    )));
+                }
+                return Ok(None);
+            }
+        };
+        let sqlite_integrity = match sqlite_integrity_check(&conn) {
+            Ok(value) => value,
+            Err(error) => {
+                if strict {
+                    return Err(AppError::Message(format!(
+                        "Failed to run SQLite integrity_check: {error}"
+                    )));
+                }
+                return Ok(None);
+            }
+        };
+
+        Ok(Some(assemble_session_recovery_report(
+            &self.target_dir,
+            &db_path,
+            &session_index_path,
+            session_index,
+            threads,
+            sqlite_integrity,
+            SESSION_RECOVERY_RECENT_LIMIT,
+        )?))
+    }
+
+    fn repair_codex_sessions_internal(
+        &self,
+        repair_times_from_session_index: bool,
+        strict: bool,
+    ) -> Result<Option<SessionRepairResult>, AppError> {
+        let Some(report) = self.build_session_recovery_report(strict)? else {
+            return Ok(None);
+        };
+        if report.sqlite_integrity != "ok" {
+            if strict {
+                return Err(AppError::Message(format!(
+                    "Refusing to repair because SQLite integrity_check returned: {}",
+                    report.sqlite_integrity
+                )));
+            }
+            return Ok(None);
+        }
+
+        let has_safe_updates = report
+            .repair_candidates
+            .has_user_event_false_but_rollout_has_user_message
+            > 0;
+        let has_time_updates = repair_times_from_session_index
+            && (report.repair_candidates.db_time_mismatch_with_session_index > 0
+                || report.repair_candidates.rollout_mtime_mismatch_with_session_index > 0);
+        if !has_safe_updates && !has_time_updates {
+            return Ok(Some(SessionRepairResult {
+                repaired: false,
+                backup_path: String::new(),
+                audit_path: String::new(),
+                updates: SessionRepairUpdateCounts::default(),
+                note: if repair_times_from_session_index {
+                    "No session repair candidates were found, including timestamp repair candidates.".into()
+                } else {
+                    "No safe session repair candidates were found.".into()
+                },
+            }));
+        }
+
+        let db_path = PathBuf::from(&report.db_path);
+        let session_index_path = PathBuf::from(&report.session_index_path);
+        let session_index = read_session_recovery_index_entries(&session_index_path)?;
+        let mut conn = open_valid_state_database(&db_path).ok_or_else(|| {
+            AppError::Message("The primary session database became unreadable during repair.".into())
+        })?;
+        let threads = read_session_recovery_threads(&conn)
+            .map_err(|error| AppError::Message(format!("Failed to read session threads: {error}")))?;
+
+        let stamp = Utc::now().format("%Y%m%d-%H%M%S").to_string();
+        let temp_dir = std::env::temp_dir();
+        let backup_path = temp_dir.join(format!(
+            "codex-state-before-session-recovery-{}-{}.sqlite",
+            stamp,
+            Uuid::new_v4().simple()
+        ));
+        let audit_path = temp_dir.join(format!(
+            "codex-session-recovery-audit-{}-{}.json",
+            stamp,
+            Uuid::new_v4().simple()
+        ));
+        fs::copy(&db_path, &backup_path)?;
+
+        let mut audit = SessionRepairAudit {
+            backup_path: backup_path.to_string_lossy().to_string(),
+            audit_path: audit_path.to_string_lossy().to_string(),
+            ..SessionRepairAudit::default()
+        };
+
+        {
+            let transaction = conn.transaction().map_err(|error| {
+                AppError::Message(format!("Failed to open a repair transaction: {error}"))
+            })?;
+            for thread in threads {
+                let Some(rollout_path) = thread.rollout_path.clone() else {
+                    audit.skipped_missing_rollout_files.push(MissingRolloutSample {
+                        id: thread.id.clone(),
+                        archived: thread.archived,
+                        rollout_path: None,
+                    });
+                    continue;
+                };
+                if !rollout_path.exists() {
+                    audit.skipped_missing_rollout_files.push(MissingRolloutSample {
+                        id: thread.id.clone(),
+                        archived: thread.archived,
+                        rollout_path: Some(rollout_path.to_string_lossy().to_string()),
+                    });
+                    continue;
+                }
+
+                if !thread.has_user_event && rollout_has_user_message(&rollout_path) {
+                    transaction.execute(
+                        "UPDATE threads SET has_user_event = 1 WHERE id = ?1",
+                        [&thread.id],
+                    ).map_err(|error| {
+                        AppError::Message(format!(
+                            "Failed to update has_user_event for thread {}: {error}",
+                            thread.id
+                        ))
+                    })?;
+                    audit
+                        .has_user_event_updates
+                        .push(HasUserEventMismatchSample {
+                            id: thread.id.clone(),
+                            archived: thread.archived,
+                            cwd: thread.cwd.clone(),
+                            title: thread.title.clone(),
+                        });
+                }
+
+                let Some(indexed) = session_index.get(&thread.id) else {
+                    continue;
+                };
+                let db_time_differs =
+                    thread.updated_at != indexed.sec || thread.updated_at_ms != indexed.ms;
+                let rollout_mtime_ms = file_mtime_millis(&rollout_path)?;
+                let mtime_differs = (rollout_mtime_ms - indexed.ms).abs() > 1_000;
+
+                if !repair_times_from_session_index && (db_time_differs || mtime_differs) {
+                    audit
+                        .time_mismatches_not_repaired
+                        .push(SessionTimeMismatchSample {
+                            id: thread.id.clone(),
+                            cwd: thread.cwd.clone(),
+                            db_updated_at_ms: thread.updated_at_ms,
+                            indexed_updated_at_ms: indexed.ms,
+                        });
+                    continue;
+                }
+
+                if repair_times_from_session_index && db_time_differs {
+                    transaction.execute(
+                        "UPDATE threads SET updated_at = ?1, updated_at_ms = ?2 WHERE id = ?3",
+                        rusqlite::params![indexed.sec, indexed.ms, &thread.id],
+                    ).map_err(|error| {
+                        AppError::Message(format!(
+                            "Failed to update timestamps for thread {}: {error}",
+                            thread.id
+                        ))
+                    })?;
+                    audit.db_time_updates.push(SessionTimeMismatchSample {
+                        id: thread.id.clone(),
+                        cwd: thread.cwd.clone(),
+                        db_updated_at_ms: thread.updated_at_ms,
+                        indexed_updated_at_ms: indexed.ms,
+                    });
+                }
+
+                if repair_times_from_session_index && mtime_differs {
+                    set_rollout_mtime_millis(&rollout_path, indexed.ms)?;
+                    audit
+                        .rollout_mtime_updates
+                        .push(RolloutMtimeMismatchSample {
+                            id: thread.id.clone(),
+                            rollout_path: rollout_path.to_string_lossy().to_string(),
+                            rollout_mtime_ms,
+                            indexed_updated_at_ms: indexed.ms,
+                    });
+                }
+            }
+            transaction.commit().map_err(|error| {
+                AppError::Message(format!("Failed to commit session repair transaction: {error}"))
+            })?;
+        }
+
+        let post_integrity = sqlite_integrity_check(&conn)
+            .map_err(|error| AppError::Message(format!("Failed to verify SQLite integrity: {error}")))?;
+        if post_integrity != "ok" {
+            return Err(AppError::Message(format!(
+                "SQLite integrity_check failed after repair: {post_integrity}"
+            )));
+        }
+
+        fs::write(&audit_path, serde_json::to_string_pretty(&audit)?)?;
+
+        Ok(Some(SessionRepairResult {
+            repaired: true,
+            backup_path: backup_path.to_string_lossy().to_string(),
+            audit_path: audit_path.to_string_lossy().to_string(),
+            updates: SessionRepairUpdateCounts {
+                has_user_event: audit.has_user_event_updates.len(),
+                db_time: audit.db_time_updates.len(),
+                rollout_mtime: audit.rollout_mtime_updates.len(),
+                time_mismatches_not_repaired: audit.time_mismatches_not_repaired.len(),
+                skipped_missing_rollout_files: audit.skipped_missing_rollout_files.len(),
+            },
+            note: if repair_times_from_session_index {
+                "Timestamp repair was enabled.".into()
+            } else {
+                "Timestamp repair was not enabled. Use advanced repair only for broad batch timestamp corruption.".into()
+            },
+        }))
     }
 
     fn update_session_databases(&self, target_dir: &Path, provider: &str) {
         if let Ok(entries) = fs::read_dir(target_dir) {
             for entry in entries.flatten() {
+                let path = entry.path();
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
                 if !name_str.starts_with("state_") || !name_str.ends_with(".sqlite") {
                     continue;
                 }
 
-                if let Ok(conn) = Connection::open(entry.path()) {
-                    let _ = conn.execute("UPDATE threads SET model_provider = ?1", [provider]);
-                }
+                let Some(conn) = open_valid_state_database(&path) else {
+                    continue;
+                };
+                let _ = conn.execute("UPDATE threads SET model_provider = ?1", [provider]);
             }
         }
     }
@@ -753,12 +1205,148 @@ impl ProfileManager {
         }
     }
 
+    fn repair_workspace_project_order(&self, target_dir: &Path) {
+        let path = target_dir.join(".codex-global-state.json");
+        let Ok(content) = fs::read_to_string(&path) else {
+            return;
+        };
+        let Ok(mut state) = serde_json::from_str::<serde_json::Value>(&content) else {
+            return;
+        };
+        let Some(root) = state.as_object_mut() else {
+            return;
+        };
+
+        let saved_roots = root
+            .get("electron-saved-workspace-roots")
+            .and_then(|value| value.as_array())
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|value| value.as_str())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        if saved_roots.is_empty() {
+            return;
+        }
+
+        let saved_roots_value = serde_json::Value::Array(
+            saved_roots
+                .iter()
+                .cloned()
+                .map(serde_json::Value::String)
+                .collect(),
+        );
+        let saved_roots_changed = root
+            .get("electron-saved-workspace-roots")
+            .map(|value| value != &saved_roots_value)
+            .unwrap_or(true);
+
+        let order_value = root
+            .entry("project-order".to_string())
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        let Some(existing_order) = order_value.as_array() else {
+            return;
+        };
+
+        let mut seen = HashSet::new();
+        let mut repaired_order = Vec::new();
+
+        for value in existing_order {
+            let Some(path) = value.as_str() else {
+                continue;
+            };
+            if seen.insert(path.to_string()) {
+                repaired_order.push(serde_json::Value::String(path.to_string()));
+            }
+        }
+
+        let mut changed = repaired_order.len() != existing_order.len();
+        for path in &saved_roots {
+            if seen.insert(path.clone()) {
+                repaired_order.push(serde_json::Value::String(path.clone()));
+                changed = true;
+            }
+        }
+
+        let saved_root_set = saved_roots.iter().cloned().collect::<HashSet<_>>();
+        let existing_active_roots = root
+            .get("active-workspace-roots")
+            .and_then(|value| value.as_array())
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|value| value.as_str())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let mut active_seen = HashSet::new();
+        let mut repaired_active_roots = Vec::new();
+        for path in existing_active_roots {
+            if !saved_root_set.contains(&path) {
+                continue;
+            }
+
+            if active_seen.insert(path.clone()) {
+                repaired_active_roots.push(path);
+            }
+        }
+
+        // Once the saved project roster is repaired, the previously focused workspace root
+        // can keep the Electron UI pinned to a stale single-project view.
+        if changed && !repaired_active_roots.is_empty() {
+            repaired_active_roots.clear();
+        }
+
+        let active_roots_value = serde_json::Value::Array(
+            repaired_active_roots
+                .iter()
+                .cloned()
+                .map(serde_json::Value::String)
+                .collect(),
+        );
+        let active_roots_changed = root
+            .get("active-workspace-roots")
+            .map(|value| value != &active_roots_value)
+            .unwrap_or(false);
+
+        if !saved_roots_changed && !changed && !active_roots_changed {
+            return;
+        }
+
+        if saved_roots_changed {
+            root.insert(
+                "electron-saved-workspace-roots".to_string(),
+                saved_roots_value,
+            );
+        }
+
+        root.insert(
+            "project-order".to_string(),
+            serde_json::Value::Array(repaired_order),
+        );
+
+        if active_roots_changed {
+            root.insert("active-workspace-roots".to_string(), active_roots_value);
+        }
+
+        if let Ok(serialized) = serde_json::to_string_pretty(&state) {
+            let _ = fs::write(path, serialized);
+        }
+    }
+
     fn rebuild_session_index(&self, target_dir: &Path) {
         let Some(state_db_path) = primary_state_database_path(target_dir) else {
             return;
         };
+        let existing_entries = read_session_index_entries(target_dir);
 
-        let Ok(conn) = Connection::open(state_db_path) else {
+        let Some(conn) = open_valid_state_database(&state_db_path) else {
             return;
         };
         let Ok(columns) = thread_table_columns(&conn) else {
@@ -782,6 +1370,8 @@ impl ProfileManager {
             return;
         };
         let Ok(rows) = stmt.query_map([], |row| {
+            let id = row.get::<_, String>(0)?;
+            let mut thread_name = row.get::<_, String>(1)?;
             let updated_at = row.get::<_, i64>(2)?;
             let updated_at = Utc
                 .timestamp_opt(updated_at, 0)
@@ -789,9 +1379,19 @@ impl ProfileManager {
                 .map(|value| value.to_rfc3339_opts(SecondsFormat::Micros, true))
                 .unwrap_or_else(|| "1970-01-01T00:00:00.000000Z".to_string());
 
+            if thread_name.trim().is_empty() {
+                if let Some(existing_name) = existing_entries
+                    .get(&id)
+                    .map(|entry| entry.thread_name.trim())
+                    .filter(|name| !name.is_empty())
+                {
+                    thread_name = existing_name.to_string();
+                }
+            }
+
             Ok(SessionIndexEntry {
-                id: row.get(0)?,
-                thread_name: row.get(1)?,
+                id,
+                thread_name,
                 updated_at,
             })
         }) else {
@@ -844,11 +1444,12 @@ impl ProfileManager {
         } else {
             None
         };
+        let active_profile = self.detect_active_profile()?;
 
         if let (Some(current_auth_json), Some(current_config_toml), Some(active_profile)) = (
             current_auth_json.as_ref(),
             current_config_toml.as_ref(),
-            self.detect_active_profile()?,
+            active_profile.as_ref(),
         ) {
             if active_profile.id != profile_id {
                 self.sync_runtime_state_to_profile(
@@ -856,6 +1457,19 @@ impl ProfileManager {
                     current_auth_json,
                     current_config_toml,
                 )?;
+
+                if self.profile_has_session_state(profile_id)? {
+                    self.sync_target_session_state_to_profile(
+                        &active_profile.id,
+                        SessionStateSyncMode::Move,
+                    )?;
+                    self.restore_profile_session_state_to_target(profile_id)?;
+                } else {
+                    self.sync_target_session_state_to_profile(
+                        &active_profile.id,
+                        SessionStateSyncMode::Copy,
+                    )?;
+                }
             }
         }
 
@@ -890,8 +1504,8 @@ impl ProfileManager {
         })?;
         self.persist_state()?;
 
-        // 自动触发一次底层的全域会话搬迁，使得每次 Switch 后无需手动点击按钮也能享受会话无缝流转
-        let _ = self.fix_session_database_and_configs();
+        // 切换后先做轻量自动维护：修共享配置、修 workspace roster，并只做安全会话修复。
+        let _ = self.run_automatic_session_maintenance();
 
         Ok(SwitchResult {
             profile_id: profile_id.to_string(),
@@ -1240,6 +1854,60 @@ impl ProfileManager {
         )?;
 
         self.write_profile_metadata(&profile_dir, &metadata)
+    }
+
+    fn profile_session_state_dir(&self, profile_id: &str) -> Result<PathBuf, AppError> {
+        Ok(self.profile_dir(profile_id)?.join("session-state"))
+    }
+
+    fn profile_has_session_state(&self, profile_id: &str) -> Result<bool, AppError> {
+        Ok(!session_state_entries(&self.profile_session_state_dir(profile_id)?)?.is_empty())
+    }
+
+    fn sync_target_session_state_to_profile(
+        &self,
+        profile_id: &str,
+        mode: SessionStateSyncMode,
+    ) -> Result<(), AppError> {
+        let entries = session_state_entries(&self.target_dir)?;
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let session_state_dir = self.profile_session_state_dir(profile_id)?;
+        self.replace_session_state_root(&self.target_dir, &session_state_dir, &entries, mode)
+    }
+
+    fn restore_profile_session_state_to_target(&self, profile_id: &str) -> Result<(), AppError> {
+        let session_state_dir = self.profile_session_state_dir(profile_id)?;
+        let entries = session_state_entries(&session_state_dir)?;
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        self.replace_session_state_root(
+            &session_state_dir,
+            &self.target_dir,
+            &entries,
+            SessionStateSyncMode::Move,
+        )
+    }
+
+    fn replace_session_state_root(
+        &self,
+        source_root: &Path,
+        destination_root: &Path,
+        entries: &[PathBuf],
+        mode: SessionStateSyncMode,
+    ) -> Result<(), AppError> {
+        clear_session_state_root(destination_root)?;
+        fs::create_dir_all(destination_root)?;
+
+        for entry in entries {
+            sync_session_state_entry(source_root, destination_root, entry, mode)?;
+        }
+
+        Ok(())
     }
 
     fn profile_dir(&self, profile_id: &str) -> Result<PathBuf, AppError> {
@@ -2089,6 +2757,513 @@ fn primary_state_database_path(target_dir: &Path) -> Option<PathBuf> {
         })
         .max_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)))
         .map(|(_, _, path)| path)
+}
+
+fn open_valid_state_database(path: &Path) -> Option<Connection> {
+    let mut file = fs::File::open(path).ok()?;
+    let mut header = [0_u8; 16];
+    if file.read_exact(&mut header).is_err() {
+        return None;
+    }
+    if &header != b"SQLite format 3\0" {
+        return None;
+    }
+
+    Connection::open(path).ok()
+}
+
+fn sqlite_integrity_check(conn: &Connection) -> Result<String, rusqlite::Error> {
+    conn.query_row("PRAGMA integrity_check;", [], |row| row.get(0))
+}
+
+fn read_session_recovery_index_entries(
+    path: &Path,
+) -> Result<HashMap<String, SessionRecoveryIndexEntry>, AppError> {
+    let file = fs::File::open(path)?;
+    let mut entries = HashMap::new();
+
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let Ok(entry) = serde_json::from_str::<SessionIndexEntry>(trimmed) else {
+            continue;
+        };
+        let Ok(parsed) = DateTime::parse_from_rfc3339(&entry.updated_at) else {
+            continue;
+        };
+        let ms = parsed.timestamp_millis();
+        entries.insert(
+            entry.id.clone(),
+            SessionRecoveryIndexEntry {
+                ms,
+                sec: ms.div_euclid(1_000),
+            },
+        );
+    }
+
+    Ok(entries)
+}
+
+fn read_session_recovery_threads(
+    conn: &Connection,
+) -> Result<Vec<SessionRecoveryThread>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT id, rollout_path, updated_at, updated_at_ms, cwd, title, has_user_event, archived
+         FROM threads
+         ORDER BY updated_at_ms DESC, id DESC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(SessionRecoveryThread {
+            id: row.get(0)?,
+            rollout_path: row.get::<_, Option<String>>(1)?.map(PathBuf::from),
+            updated_at: row.get(2)?,
+            updated_at_ms: row.get(3)?,
+            cwd: row.get(4)?,
+            title: row.get(5)?,
+            has_user_event: row.get::<_, i64>(6)? == 1,
+            archived: row.get::<_, i64>(7)? == 1,
+        })
+    })?;
+
+    let mut threads = Vec::new();
+    for row in rows {
+        threads.push(row?);
+    }
+    Ok(threads)
+}
+
+fn assemble_session_recovery_report(
+    target_dir: &Path,
+    db_path: &Path,
+    session_index_path: &Path,
+    session_index: HashMap<String, SessionRecoveryIndexEntry>,
+    threads: Vec<SessionRecoveryThread>,
+    sqlite_integrity: String,
+    recent_limit: usize,
+) -> Result<SessionRecoveryReport, AppError> {
+    let mut missing_rollout_files = Vec::new();
+    let mut has_user_event_false_but_rollout_has_user_message = Vec::new();
+    let mut db_time_mismatch_with_session_index = Vec::new();
+    let mut rollout_mtime_mismatch_with_session_index = Vec::new();
+    let indexed_thread_ids = session_index.keys().cloned().collect::<HashSet<_>>();
+    let thread_ids = threads
+        .iter()
+        .map(|thread| thread.id.clone())
+        .collect::<HashSet<_>>();
+
+    let mut archived = 0;
+    let mut unarchived = 0;
+    let mut has_user_event_true = 0;
+    let mut has_user_event_false = 0;
+
+    for thread in &threads {
+        if thread.archived {
+            archived += 1;
+        } else {
+            unarchived += 1;
+        }
+        if thread.has_user_event {
+            has_user_event_true += 1;
+        } else {
+            has_user_event_false += 1;
+        }
+
+        let Some(rollout_path) = thread.rollout_path.as_ref() else {
+            missing_rollout_files.push(MissingRolloutSample {
+                id: thread.id.clone(),
+                archived: thread.archived,
+                rollout_path: None,
+            });
+            continue;
+        };
+        if !rollout_path.exists() {
+            missing_rollout_files.push(MissingRolloutSample {
+                id: thread.id.clone(),
+                archived: thread.archived,
+                rollout_path: Some(rollout_path.to_string_lossy().to_string()),
+            });
+            continue;
+        }
+
+        if !thread.has_user_event && rollout_has_user_message(rollout_path) {
+            has_user_event_false_but_rollout_has_user_message.push(
+                HasUserEventMismatchSample {
+                    id: thread.id.clone(),
+                    archived: thread.archived,
+                    cwd: thread.cwd.clone(),
+                    title: thread.title.clone(),
+                },
+            );
+        }
+
+        let Some(indexed) = session_index.get(&thread.id) else {
+            continue;
+        };
+        if thread.updated_at != indexed.sec || thread.updated_at_ms != indexed.ms {
+            db_time_mismatch_with_session_index.push(SessionTimeMismatchSample {
+                id: thread.id.clone(),
+                cwd: thread.cwd.clone(),
+                db_updated_at_ms: thread.updated_at_ms,
+                indexed_updated_at_ms: indexed.ms,
+            });
+        }
+
+        let rollout_mtime_ms = file_mtime_millis(rollout_path)?;
+        if (rollout_mtime_ms - indexed.ms).abs() > 1_000 {
+            rollout_mtime_mismatch_with_session_index.push(RolloutMtimeMismatchSample {
+                id: thread.id.clone(),
+                rollout_path: rollout_path.to_string_lossy().to_string(),
+                rollout_mtime_ms,
+                indexed_updated_at_ms: indexed.ms,
+            });
+        }
+    }
+
+    let db_thread_ids_missing_from_session_index = threads
+        .iter()
+        .filter(|thread| !indexed_thread_ids.contains(&thread.id))
+        .count();
+    let session_index_ids_missing_from_db = session_index
+        .keys()
+        .filter(|id| !thread_ids.contains(*id))
+        .count();
+    let saved_roots_with_chats_outside_recent_window = find_saved_roots_outside_recent_window(
+        target_dir.join(".codex-global-state.json"),
+        &threads,
+        recent_limit,
+    );
+
+    Ok(SessionRecoveryReport {
+        codex_home: target_dir.to_string_lossy().to_string(),
+        db_path: db_path.to_string_lossy().to_string(),
+        session_index_path: session_index_path.to_string_lossy().to_string(),
+        recent_limit,
+        sqlite_integrity,
+        counts: SessionRecoveryCounts {
+            session_index_entries: session_index.len(),
+            db_threads: threads.len(),
+            archived,
+            unarchived,
+            has_user_event_true,
+            has_user_event_false,
+        },
+        repair_candidates: SessionRecoveryCandidates {
+            missing_rollout_files: missing_rollout_files.len(),
+            has_user_event_false_but_rollout_has_user_message:
+                has_user_event_false_but_rollout_has_user_message.len(),
+            db_time_mismatch_with_session_index: db_time_mismatch_with_session_index.len(),
+            rollout_mtime_mismatch_with_session_index:
+                rollout_mtime_mismatch_with_session_index.len(),
+            db_thread_ids_missing_from_session_index,
+            session_index_ids_missing_from_db,
+        },
+        samples: SessionRecoverySamples {
+            missing_rollout_files: missing_rollout_files.into_iter().take(20).collect(),
+            has_user_event_false_but_rollout_has_user_message:
+                has_user_event_false_but_rollout_has_user_message
+                    .into_iter()
+                    .take(20)
+                    .collect(),
+            db_time_mismatch_with_session_index: db_time_mismatch_with_session_index
+                .into_iter()
+                .take(20)
+                .collect(),
+            rollout_mtime_mismatch_with_session_index:
+                rollout_mtime_mismatch_with_session_index
+                    .into_iter()
+                    .take(20)
+                    .collect(),
+            saved_roots_with_chats_outside_recent_window:
+                saved_roots_with_chats_outside_recent_window
+                    .into_iter()
+                    .take(30)
+                    .collect(),
+        },
+        notes: vec![
+            "savedRootsWithChatsOutsideRecentWindow 通常只是侧边栏 recent-window 限制，不代表会话损坏。".into(),
+            "默认安全修复不会改旧会话时间戳，也不会把旧聊天强行顶回最近列表。".into(),
+            "只有在批量时间戳被异常污染时，才建议使用高级时间修复。".into(),
+        ],
+    })
+}
+
+fn find_saved_roots_outside_recent_window(
+    global_state_path: PathBuf,
+    threads: &[SessionRecoveryThread],
+    recent_limit: usize,
+) -> Vec<SavedRootOutsideRecentWindowSample> {
+    let Ok(content) = fs::read_to_string(global_state_path) else {
+        return Vec::new();
+    };
+    let Ok(state) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return Vec::new();
+    };
+    let saved_roots = state
+        .get("electron-saved-workspace-roots")
+        .and_then(|value| value.as_array())
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|value| value.as_str())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut visible_threads = threads
+        .iter()
+        .filter(|thread| !thread.archived && thread.has_user_event)
+        .cloned()
+        .collect::<Vec<_>>();
+    visible_threads.sort_by(|left, right| {
+        right
+            .updated_at_ms
+            .cmp(&left.updated_at_ms)
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    let visible_roots = visible_threads
+        .into_iter()
+        .take(recent_limit)
+        .filter_map(|thread| thread.cwd)
+        .collect::<HashSet<_>>();
+
+    let mut latest_by_cwd = HashMap::<String, &SessionRecoveryThread>::new();
+    for thread in threads
+        .iter()
+        .filter(|thread| !thread.archived && thread.has_user_event)
+    {
+        let Some(cwd) = thread.cwd.as_ref() else {
+            continue;
+        };
+        match latest_by_cwd.get(cwd) {
+            Some(existing)
+                if existing.updated_at_ms > thread.updated_at_ms
+                    || (existing.updated_at_ms == thread.updated_at_ms
+                        && existing.id.as_str() >= thread.id.as_str()) => {}
+            _ => {
+                latest_by_cwd.insert(cwd.clone(), thread);
+            }
+        }
+    }
+
+    saved_roots
+        .into_iter()
+        .filter_map(|root| {
+            let latest = latest_by_cwd.get(&root)?;
+            if visible_roots.contains(&root) {
+                return None;
+            }
+
+            Some(SavedRootOutsideRecentWindowSample {
+                root,
+                latest_thread_id: latest.id.clone(),
+                latest_title: latest.title.clone(),
+                latest_updated_at: Utc
+                    .timestamp_millis_opt(latest.updated_at_ms)
+                    .single()
+                    .map(|value| value.to_rfc3339_opts(SecondsFormat::Millis, true))
+                    .unwrap_or_else(|| "1970-01-01T00:00:00.000Z".into()),
+            })
+        })
+        .collect()
+}
+
+fn rollout_has_user_message(path: &Path) -> bool {
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+
+    for line in BufReader::new(file).lines().map_while(Result::ok) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        if contains_user_message(&value) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn contains_user_message(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Array(entries) => entries.iter().any(contains_user_message),
+        serde_json::Value::Object(map) => {
+            let role = map
+                .get("role")
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_ascii_lowercase());
+            let kind = map
+                .get("type")
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_ascii_lowercase());
+
+            if role.as_deref() == Some("user") {
+                return true;
+            }
+            if matches!(
+                kind.as_deref(),
+                Some("user-message") | Some("usermessage") | Some("user_message")
+            ) {
+                return true;
+            }
+
+            map.values().any(contains_user_message)
+        }
+        _ => false,
+    }
+}
+
+fn file_mtime_millis(path: &Path) -> Result<i64, AppError> {
+    let metadata = fs::metadata(path)?;
+    let modified = FileTime::from_last_modification_time(&metadata);
+    Ok(modified.unix_seconds() * 1_000 + i64::from(modified.nanoseconds() / 1_000_000))
+}
+
+fn set_rollout_mtime_millis(path: &Path, millis: i64) -> Result<(), AppError> {
+    let seconds = millis.div_euclid(1_000);
+    let millis = millis.rem_euclid(1_000) as u32;
+    set_file_mtime(path, FileTime::from_unix_time(seconds, millis * 1_000_000))?;
+    Ok(())
+}
+
+fn session_state_entries(root: &Path) -> Result<Vec<PathBuf>, AppError> {
+    let mut entries = Vec::new();
+
+    for name in [
+        ".codex-global-state.json",
+        "session_index.jsonl",
+        "history.jsonl",
+        "sessions",
+        "archived_sessions",
+    ] {
+        let path = root.join(name);
+        if path.exists() {
+            entries.push(PathBuf::from(name));
+        }
+    }
+
+    if root.exists() {
+        let mut state_entries = fs::read_dir(root)?
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with("state_") {
+                    Some(PathBuf::from(name))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        state_entries.sort();
+        entries.extend(state_entries);
+    }
+
+    Ok(entries)
+}
+
+fn clear_session_state_root(root: &Path) -> Result<(), AppError> {
+    for entry in session_state_entries(root)? {
+        remove_path_if_exists(&root.join(entry))?;
+    }
+
+    Ok(())
+}
+
+fn sync_session_state_entry(
+    source_root: &Path,
+    destination_root: &Path,
+    relative_path: &Path,
+    mode: SessionStateSyncMode,
+) -> Result<(), AppError> {
+    let source_path = source_root.join(relative_path);
+    let destination_path = destination_root.join(relative_path);
+    if let Some(parent) = destination_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    match mode {
+        SessionStateSyncMode::Copy => copy_path_recursively(&source_path, &destination_path)?,
+        SessionStateSyncMode::Move => move_path_recursively(&source_path, &destination_path)?,
+    }
+
+    Ok(())
+}
+
+fn copy_path_recursively(source: &Path, destination: &Path) -> Result<(), AppError> {
+    if source.is_dir() {
+        fs::create_dir_all(destination)?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            let source_path = entry.path();
+            let destination_path = destination.join(entry.file_name());
+            copy_path_recursively(&source_path, &destination_path)?;
+        }
+    } else {
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(source, destination)?;
+    }
+
+    Ok(())
+}
+
+fn move_path_recursively(source: &Path, destination: &Path) -> Result<(), AppError> {
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    match fs::rename(source, destination) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            copy_path_recursively(source, destination)?;
+            remove_path_if_exists(source)
+        }
+    }
+}
+
+fn remove_path_if_exists(path: &Path) -> Result<(), AppError> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    if path.is_dir() {
+        fs::remove_dir_all(path)?;
+    } else {
+        fs::remove_file(path)?;
+    }
+
+    Ok(())
+}
+
+fn read_session_index_entries(target_dir: &Path) -> HashMap<String, SessionIndexEntry> {
+    let path = target_dir.join("session_index.jsonl");
+    let Ok(file) = fs::File::open(path) else {
+        return HashMap::new();
+    };
+
+    let mut entries = HashMap::new();
+    for line in BufReader::new(file).lines().map_while(Result::ok) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if let Ok(entry) = serde_json::from_str::<SessionIndexEntry>(trimmed) {
+            entries.insert(entry.id.clone(), entry);
+        }
+    }
+
+    entries
 }
 
 fn thread_table_columns(conn: &Connection) -> Result<Vec<String>, rusqlite::Error> {

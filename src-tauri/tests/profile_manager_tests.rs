@@ -1,9 +1,24 @@
 use codex_auth_switch_lib::core::{restart_codex_script, ProfileInput, ProfileManager};
+use chrono::{SecondsFormat, TimeZone, Utc};
+use filetime::{set_file_mtime, FileTime};
 use rusqlite::Connection;
 use serde_json::json;
 use std::env;
+use std::ffi::OsString;
 use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use tempfile::TempDir;
+
+struct RecoveryThreadSeed {
+    id: String,
+    cwd: String,
+    title: String,
+    rollout_path: PathBuf,
+    updated_at_ms: i64,
+    has_user_event: bool,
+    archived: bool,
+}
 
 fn api_key_auth_json(token: &str) -> String {
     format!(r#"{{"OPENAI_API_KEY":"{token}"}}"#)
@@ -125,6 +140,253 @@ fn temp_manager() -> (TempDir, TempDir, ProfileManager) {
     .expect("create manager");
 
     (app_dir, target_dir, manager)
+}
+
+fn write_session_state_root(root: &Path, label: &str) {
+    fs::create_dir_all(root).expect("create session state root");
+    fs::create_dir_all(root.join("sessions").join("2026")).expect("create sessions dir");
+    fs::create_dir_all(root.join("archived_sessions")).expect("create archived dir");
+
+    fs::write(
+        root.join(".codex-global-state.json"),
+        serde_json::to_string_pretty(&json!({
+            "project-order": [format!("/tmp/{label}")],
+            "electron-saved-workspace-roots": [format!("/tmp/{label}")],
+            "label": label
+        }))
+        .expect("serialize global state"),
+    )
+    .expect("write global state");
+    fs::write(
+        root.join("session_index.jsonl"),
+        format!(
+            r#"{{"id":"{label}-thread","thread_name":"{label} thread","updated_at":"1970-01-01T00:00:01Z"}}"#
+        ),
+    )
+    .expect("write session index");
+    fs::write(
+        root.join("history.jsonl"),
+        format!(r#"{{"label":"{label}","kind":"history"}}"#),
+    )
+    .expect("write history");
+    fs::write(root.join("state_5.sqlite"), format!("sqlite-{label}")).expect("write sqlite");
+    fs::write(root.join("state_5.sqlite-wal"), format!("wal-{label}")).expect("write wal");
+    fs::write(root.join("state_5.sqlite-shm"), format!("shm-{label}")).expect("write shm");
+    fs::write(
+        root.join("sessions").join("2026").join(format!("{label}.jsonl")),
+        format!(r#"{{"label":"{label}","kind":"session"}}"#),
+    )
+    .expect("write session file");
+    fs::write(
+        root.join("archived_sessions")
+            .join(format!("{label}-archived.jsonl")),
+        format!(r#"{{"label":"{label}","kind":"archived"}}"#),
+    )
+    .expect("write archived session file");
+}
+
+fn assert_session_state_root(root: &Path, label: &str) {
+    let global_state = fs::read_to_string(root.join(".codex-global-state.json"))
+        .expect("read global state");
+    let session_index =
+        fs::read_to_string(root.join("session_index.jsonl")).expect("read session index");
+    let history = fs::read_to_string(root.join("history.jsonl")).expect("read history");
+    let sqlite = fs::read_to_string(root.join("state_5.sqlite")).expect("read sqlite");
+    let wal = fs::read_to_string(root.join("state_5.sqlite-wal")).expect("read wal");
+    let shm = fs::read_to_string(root.join("state_5.sqlite-shm")).expect("read shm");
+    let session = fs::read_to_string(root.join("sessions").join("2026").join(format!("{label}.jsonl")))
+        .expect("read session file");
+    let archived = fs::read_to_string(
+        root.join("archived_sessions")
+            .join(format!("{label}-archived.jsonl")),
+    )
+    .expect("read archived session file");
+
+    assert!(global_state.contains(&format!(r#""label": "{label}""#)));
+    assert!(session_index.contains(&format!(r#""id":"{label}-thread""#)));
+    assert!(history.contains(&format!(r#""label":"{label}""#)));
+    assert_eq!(sqlite, format!("sqlite-{label}"));
+    assert_eq!(wal, format!("wal-{label}"));
+    assert_eq!(shm, format!("shm-{label}"));
+    assert!(session.contains(&format!(r#""label":"{label}""#)));
+    assert!(archived.contains(&format!(r#""label":"{label}""#)));
+}
+
+fn profile_session_state_dir(app_dir: &TempDir, profile_id: &str) -> PathBuf {
+    app_dir
+        .path()
+        .join("profiles")
+        .join(profile_id)
+        .join("session-state")
+}
+
+fn session_index_updated_at(ms: i64) -> String {
+    Utc.timestamp_millis_opt(ms)
+        .single()
+        .expect("valid millis")
+        .to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn file_time_from_millis(ms: i64) -> FileTime {
+    let seconds = ms.div_euclid(1_000);
+    let millis = ms.rem_euclid(1_000) as u32;
+    FileTime::from_unix_time(seconds, millis * 1_000_000)
+}
+
+fn file_mtime_millis(path: &Path) -> i64 {
+    let metadata = fs::metadata(path).expect("read file metadata");
+    let modified = FileTime::from_last_modification_time(&metadata);
+    modified.unix_seconds() * 1_000 + i64::from(modified.nanoseconds() / 1_000_000)
+}
+
+fn write_recovery_rollout(path: &Path, has_user_message: bool) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create rollout parent");
+    }
+
+    let line = if has_user_message {
+        json!({
+            "event": {
+                "type": "user_message",
+                "payload": {
+                    "role": "user",
+                    "text": "hello"
+                }
+            }
+        })
+    } else {
+        json!({
+            "event": {
+                "type": "assistant_message",
+                "payload": {
+                    "role": "assistant",
+                    "text": "hello"
+                }
+            }
+        })
+    };
+
+    fs::write(path, format!("{line}\n")).expect("write rollout");
+}
+
+fn write_recovery_session_index(root: &Path, entries: &[(&str, &str, i64)]) {
+    let content = entries
+        .iter()
+        .map(|(id, title, updated_at_ms)| {
+            serde_json::to_string(&json!({
+                "id": id,
+                "thread_name": title,
+                "updated_at": session_index_updated_at(*updated_at_ms)
+            }))
+            .expect("serialize session index entry")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(root.join("session_index.jsonl"), format!("{content}\n")).expect("write session index");
+}
+
+fn seed_recovery_database(root: &Path, threads: &[RecoveryThreadSeed]) {
+    let db_path = root.join("state_5.sqlite");
+    let conn = Connection::open(&db_path).expect("open recovery db");
+    conn.execute_batch(
+        "CREATE TABLE threads (
+            id TEXT PRIMARY KEY,
+            rollout_path TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            updated_at_ms INTEGER NOT NULL,
+            source TEXT,
+            cwd TEXT,
+            title TEXT,
+            has_user_event INTEGER NOT NULL DEFAULT 0,
+            archived INTEGER NOT NULL DEFAULT 0
+        );",
+    )
+    .expect("create recovery threads");
+
+    for thread in threads {
+        conn.execute(
+            "INSERT INTO threads (
+                id,
+                rollout_path,
+                created_at,
+                updated_at,
+                created_at_ms,
+                updated_at_ms,
+                source,
+                cwd,
+                title,
+                has_user_event,
+                archived
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            (
+                &thread.id,
+                thread.rollout_path.to_string_lossy().to_string(),
+                thread.updated_at_ms / 1000 - 5,
+                thread.updated_at_ms / 1000,
+                thread.updated_at_ms - 5_000,
+                thread.updated_at_ms,
+                "local",
+                &thread.cwd,
+                &thread.title,
+                i64::from(thread.has_user_event),
+                i64::from(thread.archived),
+            ),
+        )
+        .expect("insert recovery thread");
+    }
+}
+
+fn read_recovery_thread_state(root: &Path, id: &str) -> (i64, i64, bool) {
+    let conn = Connection::open(root.join("state_5.sqlite")).expect("open recovery db for read");
+    conn.query_row(
+        "SELECT updated_at, updated_at_ms, has_user_event FROM threads WHERE id = ?1",
+        [id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? == 1)),
+    )
+    .expect("query recovery thread")
+}
+
+fn with_process_env_lock<T>(task: impl FnOnce() -> T) -> T {
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("lock process env");
+    task()
+}
+
+struct ScopedEnvVar {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl ScopedEnvVar {
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let previous = env::var_os(key);
+        env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for ScopedEnvVar {
+    fn drop(&mut self) {
+        if let Some(value) = &self.previous {
+            env::set_var(self.key, value);
+        } else {
+            env::remove_var(self.key);
+        }
+    }
+}
+
+fn with_test_codex_env<T>(home_dir: &Path, task: impl FnOnce() -> T) -> T {
+    with_process_env_lock(|| {
+        let _home = ScopedEnvVar::set("HOME", home_dir.as_os_str());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home_dir.as_os_str());
+        let _path = ScopedEnvVar::set("PATH", "");
+        task()
+    })
 }
 
 #[test]
@@ -683,6 +945,297 @@ fn switch_profile_keeps_shared_sections_when_target_config_is_missing() {
 }
 
 #[test]
+fn switch_profile_captures_live_session_state_for_previous_profile_without_clearing_target_when_target_profile_has_no_snapshot() {
+    let (app_dir, target_dir, mut manager) = temp_manager();
+
+    let profile_a = manager
+        .import_profile(ProfileInput {
+            name: "Profile A".into(),
+            notes: String::new(),
+            auth_json: oauth_auth_json("a@example.com", "user-a", "acct-a"),
+            config_toml: official_config_toml("gpt-5"),
+        })
+        .expect("import a");
+    let profile_b = manager
+        .import_profile(ProfileInput {
+            name: "Profile B".into(),
+            notes: String::new(),
+            auth_json: api_key_auth_json("sk-b"),
+            config_toml: third_party_config_toml("gpt-5"),
+        })
+        .expect("import b");
+
+    manager
+        .switch_profile(&profile_a.id)
+        .expect("switch to a");
+    write_session_state_root(target_dir.path(), "alpha");
+
+    manager
+        .switch_profile(&profile_b.id)
+        .expect("switch to b without snapshot");
+
+    assert_session_state_root(&profile_session_state_dir(&app_dir, &profile_a.id), "alpha");
+    assert_session_state_root(target_dir.path(), "alpha");
+}
+
+#[test]
+fn switch_profile_restores_saved_session_state_for_selected_profile() {
+    let (app_dir, target_dir, mut manager) = temp_manager();
+
+    let profile_a = manager
+        .import_profile(ProfileInput {
+            name: "Profile A".into(),
+            notes: String::new(),
+            auth_json: oauth_auth_json("a@example.com", "user-a", "acct-a"),
+            config_toml: official_config_toml("gpt-5"),
+        })
+        .expect("import a");
+    let profile_b = manager
+        .import_profile(ProfileInput {
+            name: "Profile B".into(),
+            notes: String::new(),
+            auth_json: api_key_auth_json("sk-b"),
+            config_toml: third_party_config_toml("gpt-5"),
+        })
+        .expect("import b");
+
+    write_session_state_root(&profile_session_state_dir(&app_dir, &profile_a.id), "alpha");
+
+    manager
+        .switch_profile(&profile_b.id)
+        .expect("switch to b");
+    write_session_state_root(target_dir.path(), "beta");
+
+    manager
+        .switch_profile(&profile_a.id)
+        .expect("switch back to a");
+
+    assert_session_state_root(target_dir.path(), "alpha");
+    assert_session_state_root(&profile_session_state_dir(&app_dir, &profile_b.id), "beta");
+}
+
+#[test]
+fn diagnose_codex_sessions_reports_saved_roots_outside_recent_window_without_marking_corruption() {
+    let (_app_dir, target_dir, manager) = temp_manager();
+
+    let mut threads = Vec::new();
+    let mut session_index_entries = Vec::new();
+    for index in 0..51 {
+        let id = format!("thread-{index}");
+        let cwd = format!("/tmp/project-{index}");
+        let title = format!("Thread {index}");
+        let updated_at_ms = (index as i64 + 1) * 1_000;
+        let rollout_path = target_dir
+            .path()
+            .join("sessions")
+            .join("2026")
+            .join(format!("{id}.jsonl"));
+        write_recovery_rollout(&rollout_path, true);
+        set_file_mtime(&rollout_path, file_time_from_millis(updated_at_ms)).expect("set rollout mtime");
+
+        threads.push(RecoveryThreadSeed {
+            id: id.clone(),
+            cwd: cwd.clone(),
+            title: title.clone(),
+            rollout_path,
+            updated_at_ms,
+            has_user_event: true,
+            archived: false,
+        });
+        session_index_entries.push((id, title, updated_at_ms));
+    }
+    seed_recovery_database(target_dir.path(), &threads);
+    let index_refs = session_index_entries
+        .iter()
+        .map(|(id, title, updated_at_ms)| (id.as_str(), title.as_str(), *updated_at_ms))
+        .collect::<Vec<_>>();
+    write_recovery_session_index(target_dir.path(), &index_refs);
+    fs::write(
+        target_dir.path().join(".codex-global-state.json"),
+        serde_json::to_string_pretty(&json!({
+            "electron-saved-workspace-roots": ["/tmp/project-0"],
+            "project-order": ["/tmp/project-0"]
+        }))
+        .expect("serialize global state"),
+    )
+    .expect("write global state");
+
+    let report = manager
+        .diagnose_codex_sessions()
+        .expect("diagnose codex sessions");
+
+    assert_eq!(report.sqlite_integrity, "ok");
+    assert_eq!(report.counts.db_threads, 51);
+    assert_eq!(report.repair_candidates.missing_rollout_files, 0);
+    assert_eq!(
+        report
+            .repair_candidates
+            .has_user_event_false_but_rollout_has_user_message,
+        0
+    );
+    assert_eq!(report.samples.saved_roots_with_chats_outside_recent_window.len(), 1);
+    assert_eq!(
+        report.samples.saved_roots_with_chats_outside_recent_window[0].root,
+        "/tmp/project-0"
+    );
+}
+
+#[test]
+fn repair_codex_sessions_sets_has_user_event_without_rewriting_times_by_default() {
+    let (_app_dir, target_dir, manager) = temp_manager();
+
+    let rollout_path = target_dir
+        .path()
+        .join("sessions")
+        .join("2026")
+        .join("alpha.jsonl");
+    write_recovery_rollout(&rollout_path, true);
+    set_file_mtime(&rollout_path, file_time_from_millis(7_000)).expect("set rollout mtime");
+    seed_recovery_database(
+        target_dir.path(),
+        &[RecoveryThreadSeed {
+            id: "alpha".into(),
+            cwd: "/tmp/alpha".into(),
+            title: "Alpha".into(),
+            rollout_path: rollout_path.clone(),
+            updated_at_ms: 1_000,
+            has_user_event: false,
+            archived: false,
+        }],
+    );
+    write_recovery_session_index(target_dir.path(), &[("alpha", "Alpha", 9_000)]);
+
+    let result = manager
+        .repair_codex_sessions(false)
+        .expect("default session repair");
+
+    let (updated_at, updated_at_ms, has_user_event) =
+        read_recovery_thread_state(target_dir.path(), "alpha");
+    assert_eq!(updated_at, 1);
+    assert_eq!(updated_at_ms, 1_000);
+    assert!(has_user_event);
+    assert_eq!(file_mtime_millis(&rollout_path), 7_000);
+    assert_eq!(result.updates.has_user_event, 1);
+    assert_eq!(result.updates.db_time, 0);
+    assert_eq!(result.updates.rollout_mtime, 0);
+    assert!(Path::new(&result.backup_path).exists());
+    assert!(Path::new(&result.audit_path).exists());
+}
+
+#[test]
+fn repair_codex_sessions_can_restore_times_from_session_index_when_requested() {
+    let (_app_dir, target_dir, manager) = temp_manager();
+
+    let rollout_path = target_dir
+        .path()
+        .join("sessions")
+        .join("2026")
+        .join("beta.jsonl");
+    write_recovery_rollout(&rollout_path, true);
+    set_file_mtime(&rollout_path, file_time_from_millis(7_000)).expect("set rollout mtime");
+    seed_recovery_database(
+        target_dir.path(),
+        &[RecoveryThreadSeed {
+            id: "beta".into(),
+            cwd: "/tmp/beta".into(),
+            title: "Beta".into(),
+            rollout_path: rollout_path.clone(),
+            updated_at_ms: 1_000,
+            has_user_event: true,
+            archived: false,
+        }],
+    );
+    write_recovery_session_index(target_dir.path(), &[("beta", "Beta", 9_000)]);
+
+    let result = manager
+        .repair_codex_sessions(true)
+        .expect("advanced session repair");
+
+    let (updated_at, updated_at_ms, has_user_event) =
+        read_recovery_thread_state(target_dir.path(), "beta");
+    assert_eq!(updated_at, 9);
+    assert_eq!(updated_at_ms, 9_000);
+    assert!(has_user_event);
+    assert_eq!(file_mtime_millis(&rollout_path), 9_000);
+    assert_eq!(result.updates.has_user_event, 0);
+    assert_eq!(result.updates.db_time, 1);
+    assert_eq!(result.updates.rollout_mtime, 1);
+}
+
+#[test]
+fn switch_profile_applies_safe_session_repair_after_restoring_saved_session_state() {
+    let (app_dir, target_dir, mut manager) = temp_manager();
+
+    let profile_a = manager
+        .import_profile(ProfileInput {
+            name: "Profile A".into(),
+            notes: String::new(),
+            auth_json: oauth_auth_json("a@example.com", "user-a", "acct-a"),
+            config_toml: official_config_toml("gpt-5"),
+        })
+        .expect("import a");
+    let profile_b = manager
+        .import_profile(ProfileInput {
+            name: "Profile B".into(),
+            notes: String::new(),
+            auth_json: api_key_auth_json("sk-b"),
+            config_toml: third_party_config_toml("gpt-5"),
+        })
+        .expect("import b");
+
+    manager
+        .switch_profile(&profile_b.id)
+        .expect("switch to b first");
+
+    let profile_a_session_dir = profile_session_state_dir(&app_dir, &profile_a.id);
+    let rollout_path = profile_a_session_dir
+        .join("sessions")
+        .join("2026")
+        .join("alpha-repair.jsonl");
+    write_recovery_rollout(&rollout_path, true);
+    set_file_mtime(&rollout_path, file_time_from_millis(1_000)).expect("set rollout mtime");
+    seed_recovery_database(
+        &profile_a_session_dir,
+        &[RecoveryThreadSeed {
+            id: "alpha-repair".into(),
+            cwd: "/tmp/alpha-repair".into(),
+            title: "Alpha Repair".into(),
+            rollout_path: rollout_path.clone(),
+            updated_at_ms: 1_000,
+            has_user_event: false,
+            archived: false,
+        }],
+    );
+    let restored_rollout_path = target_dir
+        .path()
+        .join("sessions")
+        .join("2026")
+        .join("alpha-repair.jsonl");
+    let conn = Connection::open(profile_a_session_dir.join("state_5.sqlite"))
+        .expect("open profile session db");
+    conn.execute(
+        "UPDATE threads SET rollout_path = ?1 WHERE id = ?2",
+        (
+            restored_rollout_path.to_string_lossy().to_string(),
+            "alpha-repair",
+        ),
+    )
+    .expect("rewrite rollout path for restored target");
+    drop(conn);
+    write_recovery_session_index(
+        &profile_a_session_dir,
+        &[("alpha-repair", "Alpha Repair", 1_000)],
+    );
+
+    manager
+        .switch_profile(&profile_a.id)
+        .expect("switch back to a");
+
+    let (_, _, has_user_event) = read_recovery_thread_state(target_dir.path(), "alpha-repair");
+    assert!(has_user_event);
+}
+
+#[test]
 fn fix_session_database_updates_sqlite_and_jsonl_without_shell_tools() {
     let home_dir = TempDir::new().expect("temp home");
     let app_dir = TempDir::new().expect("temp app");
@@ -718,28 +1271,13 @@ fn fix_session_database_updates_sqlite_and_jsonl_without_shell_tools() {
     )
     .expect("seed archived sessions");
 
-    let old_home = env::var("HOME").ok();
-    let old_userprofile = env::var("USERPROFILE").ok();
-    let old_path = env::var("PATH").ok();
-    env::set_var("HOME", home_dir.path());
-    env::set_var("USERPROFILE", home_dir.path());
-    env::set_var("PATH", "");
-
-    let manager =
-        ProfileManager::load_or_default(app_dir.path().to_path_buf()).expect("load manager");
-    manager
-        .fix_session_database_and_configs()
-        .expect("fix sessions");
-
-    if let Some(value) = old_home {
-        env::set_var("HOME", value);
-    }
-    if let Some(value) = old_userprofile {
-        env::set_var("USERPROFILE", value);
-    }
-    if let Some(value) = old_path {
-        env::set_var("PATH", value);
-    }
+    with_test_codex_env(home_dir.path(), || {
+        let manager =
+            ProfileManager::load_or_default(app_dir.path().to_path_buf()).expect("load manager");
+        manager
+            .fix_session_database_and_configs()
+            .expect("fix sessions");
+    });
 
     let conn = Connection::open(&db_path).expect("reopen sqlite");
     let provider: String = conn
@@ -749,8 +1287,7 @@ fn fix_session_database_updates_sqlite_and_jsonl_without_shell_tools() {
         .expect("query provider");
     assert_eq!(provider, "openai_custom");
 
-    let sessions_content =
-        fs::read_to_string(sessions_dir.join("one.jsonl")).expect("read sessions");
+    let sessions_content = fs::read_to_string(sessions_dir.join("one.jsonl")).expect("read sessions");
     let archived_content =
         fs::read_to_string(archived_dir.join("two.jsonl")).expect("read archived");
     assert!(sessions_content.contains("\"model_provider\":\"openai_custom\""));
@@ -844,28 +1381,13 @@ fn fix_session_database_rebuilds_session_index_from_threads_table() {
     )
     .expect("seed stale session index");
 
-    let old_home = env::var("HOME").ok();
-    let old_userprofile = env::var("USERPROFILE").ok();
-    let old_path = env::var("PATH").ok();
-    env::set_var("HOME", home_dir.path());
-    env::set_var("USERPROFILE", home_dir.path());
-    env::set_var("PATH", "");
-
-    let manager =
-        ProfileManager::load_or_default(app_dir.path().to_path_buf()).expect("load manager");
-    manager
-        .fix_session_database_and_configs()
-        .expect("repair sessions and index");
-
-    if let Some(value) = old_home {
-        env::set_var("HOME", value);
-    }
-    if let Some(value) = old_userprofile {
-        env::set_var("USERPROFILE", value);
-    }
-    if let Some(value) = old_path {
-        env::set_var("PATH", value);
-    }
+    with_test_codex_env(home_dir.path(), || {
+        let manager =
+            ProfileManager::load_or_default(app_dir.path().to_path_buf()).expect("load manager");
+        manager
+            .fix_session_database_and_configs()
+            .expect("repair sessions and index");
+    });
 
     let session_index = fs::read_to_string(codex_dir.join("session_index.jsonl"))
         .expect("read rebuilt session index");
@@ -881,6 +1403,229 @@ fn fix_session_database_rebuilds_session_index_from_threads_table() {
     assert_eq!(entries[1]["thread_name"], "Fresh Title");
     assert!(entries.iter().all(|entry| entry["id"] != "ghost-thread"));
     assert!(entries.iter().all(|entry| entry["id"] != "archived-thread"));
+}
+
+#[test]
+fn fix_session_database_repairs_missing_workspace_project_order_entries() {
+    let home_dir = TempDir::new().expect("temp home");
+    let app_dir = TempDir::new().expect("temp app");
+    let codex_dir = home_dir.path().join(".codex");
+    fs::create_dir_all(&codex_dir).expect("create codex dir");
+
+    fs::write(
+        codex_dir.join("config.toml"),
+        r#"model_provider = "openai_custom""#,
+    )
+    .expect("seed config");
+    fs::write(
+        codex_dir.join(".codex-global-state.json"),
+        serde_json::to_string_pretty(&json!({
+            "electron-saved-workspace-roots": [
+                "/tmp/alpha",
+                "/tmp/beta",
+                "/tmp/gamma"
+            ],
+            "project-order": [
+                "/tmp/alpha"
+            ],
+            "electron-workspace-root-labels": {
+                "/tmp/gamma": "gamma-label"
+            }
+        }))
+        .expect("serialize global state"),
+    )
+    .expect("seed global state");
+
+    with_test_codex_env(home_dir.path(), || {
+        let manager =
+            ProfileManager::load_or_default(app_dir.path().to_path_buf()).expect("load manager");
+        manager
+            .fix_session_database_and_configs()
+            .expect("repair workspace order");
+    });
+
+    let global_state: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(codex_dir.join(".codex-global-state.json")).expect("read global state"),
+    )
+    .expect("parse global state");
+
+    assert_eq!(
+        global_state.get("project-order"),
+        Some(&json!(["/tmp/alpha", "/tmp/beta", "/tmp/gamma"]))
+    );
+    assert_eq!(
+        global_state
+            .get("electron-workspace-root-labels")
+            .and_then(|value| value.get("/tmp/gamma"))
+            .and_then(|value| value.as_str()),
+        Some("gamma-label")
+    );
+}
+
+#[test]
+fn fix_session_database_clears_active_workspace_roots_after_workspace_order_repair() {
+    let home_dir = TempDir::new().expect("temp home");
+    let app_dir = TempDir::new().expect("temp app");
+    let codex_dir = home_dir.path().join(".codex");
+    fs::create_dir_all(&codex_dir).expect("create codex dir");
+
+    fs::write(
+        codex_dir.join("config.toml"),
+        r#"model_provider = "openai_custom""#,
+    )
+    .expect("seed config");
+    fs::write(
+        codex_dir.join(".codex-global-state.json"),
+        serde_json::to_string_pretty(&json!({
+            "active-workspace-roots": [
+                "/tmp/sharing-session"
+            ],
+            "electron-saved-workspace-roots": [
+                "/tmp/sharing-session",
+                "/tmp/alpha",
+                "/tmp/beta"
+            ],
+            "project-order": [
+                "/tmp/sharing-session"
+            ]
+        }))
+        .expect("serialize global state"),
+    )
+    .expect("seed global state");
+
+    with_test_codex_env(home_dir.path(), || {
+        let manager =
+            ProfileManager::load_or_default(app_dir.path().to_path_buf()).expect("load manager");
+        manager
+            .fix_session_database_and_configs()
+            .expect("repair workspace state");
+    });
+
+    let global_state: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(codex_dir.join(".codex-global-state.json")).expect("read global state"),
+    )
+    .expect("parse global state");
+
+    assert_eq!(
+        global_state.get("project-order"),
+        Some(&json!(["/tmp/sharing-session", "/tmp/alpha", "/tmp/beta"]))
+    );
+    assert_eq!(
+        global_state.get("active-workspace-roots"),
+        Some(&json!([]))
+    );
+}
+
+#[test]
+fn fix_session_database_preserves_active_workspace_roots_when_workspace_state_is_consistent() {
+    let home_dir = TempDir::new().expect("temp home");
+    let app_dir = TempDir::new().expect("temp app");
+    let codex_dir = home_dir.path().join(".codex");
+    fs::create_dir_all(&codex_dir).expect("create codex dir");
+
+    fs::write(
+        codex_dir.join("config.toml"),
+        r#"model_provider = "openai_custom""#,
+    )
+    .expect("seed config");
+    fs::write(
+        codex_dir.join(".codex-global-state.json"),
+        serde_json::to_string_pretty(&json!({
+            "active-workspace-roots": [
+                "/tmp/alpha"
+            ],
+            "electron-saved-workspace-roots": [
+                "/tmp/alpha",
+                "/tmp/beta"
+            ],
+            "project-order": [
+                "/tmp/alpha",
+                "/tmp/beta"
+            ]
+        }))
+        .expect("serialize global state"),
+    )
+    .expect("seed global state");
+
+    with_test_codex_env(home_dir.path(), || {
+        let manager =
+            ProfileManager::load_or_default(app_dir.path().to_path_buf()).expect("load manager");
+        manager
+            .fix_session_database_and_configs()
+            .expect("repair workspace state");
+    });
+
+    let global_state: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(codex_dir.join(".codex-global-state.json")).expect("read global state"),
+    )
+    .expect("parse global state");
+
+    assert_eq!(
+        global_state.get("active-workspace-roots"),
+        Some(&json!(["/tmp/alpha"]))
+    );
+}
+
+#[test]
+fn fix_session_database_preserves_existing_session_title_when_thread_title_is_blank() {
+    let home_dir = TempDir::new().expect("temp home");
+    let app_dir = TempDir::new().expect("temp app");
+    let codex_dir = home_dir.path().join(".codex");
+    fs::create_dir_all(&codex_dir).expect("create codex dir");
+
+    fs::write(
+        codex_dir.join("config.toml"),
+        r#"model_provider = "openai_custom""#,
+    )
+    .expect("seed config");
+
+    let db_path = codex_dir.join("state_1.sqlite");
+    let conn = Connection::open(&db_path).expect("open sqlite");
+    conn.execute(
+        "CREATE TABLE threads (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            model_provider TEXT NOT NULL,
+            archived INTEGER NOT NULL DEFAULT 0
+        )",
+        [],
+    )
+    .expect("create threads table");
+    conn.execute(
+        "INSERT INTO threads (id, title, updated_at, model_provider, archived) VALUES (?1, ?2, ?3, ?4, ?5)",
+        ("blank-title-thread", "", 100_i64, "openai", 0_i64),
+    )
+    .expect("seed blank title thread");
+    drop(conn);
+
+    fs::write(
+        codex_dir.join("session_index.jsonl"),
+        concat!(
+            r#"{"id":"blank-title-thread","thread_name":"Recovered Title","updated_at":"1970-01-01T00:00:01Z"}"#,
+            "\n"
+        ),
+    )
+    .expect("seed existing session index");
+
+    with_test_codex_env(home_dir.path(), || {
+        let manager =
+            ProfileManager::load_or_default(app_dir.path().to_path_buf()).expect("load manager");
+        manager
+            .fix_session_database_and_configs()
+            .expect("repair sessions and index");
+    });
+
+    let session_index = fs::read_to_string(codex_dir.join("session_index.jsonl"))
+        .expect("read rebuilt session index");
+    let entries = session_index
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("parse index entry"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["id"], "blank-title-thread");
+    assert_eq!(entries[0]["thread_name"], "Recovered Title");
 }
 
 #[test]

@@ -1,6 +1,5 @@
 use crate::antigravity::db::{
-    build_account_snapshot, ensure_payload_has_oauth_token, read_live_payload,
-    replace_live_payload,
+    build_account_snapshot, ensure_payload_has_oauth_token, read_live_payload, replace_live_payload,
 };
 use crate::antigravity::models::{
     AntigravityBackupMeta, AntigravityIdentity, AntigravityPayload, AntigravityProfileMeta,
@@ -427,7 +426,10 @@ impl AntigravityManager {
         }
     }
 
-    fn create_recovery_point(&self, current: &AntigravityPayload) -> Result<String, AntigravityError> {
+    fn create_recovery_point(
+        &self,
+        current: &AntigravityPayload,
+    ) -> Result<String, AntigravityError> {
         let recovery_id = format!(
             "{}-{}",
             Utc::now().format("%Y%m%d-%H%M%S"),

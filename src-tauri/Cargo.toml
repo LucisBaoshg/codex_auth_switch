@@ -1,6 +1,6 @@
 [package]
 name = "codex-auth-switch"
-version = "1.4.13"
+version = "1.4.14"
 description = "A desktop utility for switching between Codex auth profiles"
 authors = ["Codex"]
 edition = "2021"
@@ -17,6 +17,7 @@ tauri-build = { version = "2", features = [] }
 base64 = "0.22"
 chrono = { version = "0.4", features = ["clock", "serde"] }
 dirs = "6"
+filetime = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

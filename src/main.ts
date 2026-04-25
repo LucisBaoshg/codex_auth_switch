@@ -118,6 +118,82 @@ type InstallLocationStatus = {
   message: string | null;
 };
 
+type SessionRecoveryCounts = {
+  sessionIndexEntries: number;
+  dbThreads: number;
+  archived: number;
+  unarchived: number;
+  hasUserEventTrue: number;
+  hasUserEventFalse: number;
+};
+
+type SessionRecoveryCandidates = {
+  missingRolloutFiles: number;
+  hasUserEventFalseButRolloutHasUserMessage: number;
+  dbTimeMismatchWithSessionIndex: number;
+  rolloutMtimeMismatchWithSessionIndex: number;
+  dbThreadIdsMissingFromSessionIndex: number;
+  sessionIndexIdsMissingFromDb: number;
+};
+
+type SavedRootOutsideRecentWindowSample = {
+  root: string;
+  latestThreadId: string;
+  latestTitle: string | null;
+  latestUpdatedAt: string;
+};
+
+type SessionRecoverySamples = {
+  missingRolloutFiles: Array<{ id: string; archived: boolean; rolloutPath: string | null }>;
+  hasUserEventFalseButRolloutHasUserMessage: Array<{
+    id: string;
+    archived: boolean;
+    cwd: string | null;
+    title: string | null;
+  }>;
+  dbTimeMismatchWithSessionIndex: Array<{
+    id: string;
+    cwd: string | null;
+    dbUpdatedAtMs: number;
+    indexedUpdatedAtMs: number;
+  }>;
+  rolloutMtimeMismatchWithSessionIndex: Array<{
+    id: string;
+    rolloutPath: string;
+    rolloutMtimeMs: number;
+    indexedUpdatedAtMs: number;
+  }>;
+  savedRootsWithChatsOutsideRecentWindow: SavedRootOutsideRecentWindowSample[];
+};
+
+type SessionRecoveryReport = {
+  codexHome: string;
+  dbPath: string;
+  sessionIndexPath: string;
+  recentLimit: number;
+  sqliteIntegrity: string;
+  counts: SessionRecoveryCounts;
+  repairCandidates: SessionRecoveryCandidates;
+  samples: SessionRecoverySamples;
+  notes: string[];
+};
+
+type SessionRepairUpdateCounts = {
+  hasUserEvent: number;
+  dbTime: number;
+  rolloutMtime: number;
+  timeMismatchesNotRepaired: number;
+  skippedMissingRolloutFiles: number;
+};
+
+type SessionRepairResult = {
+  repaired: boolean;
+  backupPath: string;
+  auditPath: string;
+  updates: SessionRepairUpdateCounts;
+  note: string;
+};
+
 type EditorState = {
   mode: EditorMode;
   profileId: string | null;
@@ -279,6 +355,8 @@ const state: {
     checking: boolean;
     lastResult: UpdateCheckResult | null;
   };
+  sessionRecoveryReport: SessionRecoveryReport | null;
+  sessionRecoveryLastResult: SessionRepairResult | null;
 } = {
   platform: "codex",
   snapshot: null,
@@ -297,6 +375,8 @@ const state: {
     checking: false,
     lastResult: null,
   },
+  sessionRecoveryReport: null,
+  sessionRecoveryLastResult: null,
 };
 
 function setFlash(kind: FlashKind, text: string): void {
@@ -345,9 +425,14 @@ function latencyProbeActionKey(profileId: string): string {
 }
 
 const refreshAllUsageActionKey = "codex-usage:all";
+const diagnoseCodexSessionsActionKey = "session-recovery:diagnose";
+const repairCodexSessionsActionKey = "session-recovery:repair";
+const repairCodexSessionsAdvancedActionKey = "session-recovery:repair-times";
 
 function setSnapshot(snapshot: AppSnapshot): void {
   state.snapshot = snapshot;
+  state.sessionRecoveryReport = null;
+  state.sessionRecoveryLastResult = null;
   if (!snapshot.profiles.some((profile) => profile.id === state.selectedProfileId)) {
     state.selectedProfileId =
       snapshot.activeProfileId ??
@@ -1085,6 +1170,67 @@ async function refreshProfileLatencyProbe(profileId: string, profileName: string
   }
 }
 
+async function diagnoseCodexSessions(showFlash = true): Promise<void> {
+  if (!isTauriRuntime) {
+    setFlash("info", "浏览器预览模式无法诊断本地 Codex 会话。");
+    return;
+  }
+
+  beginPendingAction(diagnoseCodexSessionsActionKey);
+  try {
+    const report = await desktopInvoke<SessionRecoveryReport>("diagnose_codex_sessions");
+    state.sessionRecoveryReport = report;
+    if (showFlash) {
+      setFlash("info", formatSessionRecoveryFlash(report));
+    } else {
+      render();
+    }
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    endPendingAction(diagnoseCodexSessionsActionKey);
+  }
+}
+
+async function repairCodexSessions(repairTimesFromSessionIndex: boolean): Promise<void> {
+  if (!isTauriRuntime) {
+    setFlash("info", "浏览器预览模式无法修复本地 Codex 会话。");
+    return;
+  }
+
+  if (repairTimesFromSessionIndex) {
+    const confirmed = await nativeConfirm(
+      "高级时间修复会把数据库时间和 rollout mtime 回写成 session_index.jsonl 里的值。只建议用于批量时间戳污染，不适合一两个正在活跃的会话。继续吗？",
+      "继续修复",
+      true,
+    );
+    if (!confirmed) {
+      return;
+    }
+  }
+
+  const actionKey = repairTimesFromSessionIndex
+    ? repairCodexSessionsAdvancedActionKey
+    : repairCodexSessionsActionKey;
+  beginPendingAction(actionKey);
+  try {
+    const result = await desktopInvoke<SessionRepairResult>("repair_codex_sessions", {
+      repairTimesFromSessionIndex,
+    });
+    state.sessionRecoveryLastResult = result;
+    if (result.repaired) {
+      setFlash("success", formatSessionRepairFlash(result, repairTimesFromSessionIndex));
+    } else {
+      setFlash("info", formatSessionRepairFlash(result, repairTimesFromSessionIndex));
+    }
+    await diagnoseCodexSessions(false);
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    endPendingAction(actionKey);
+  }
+}
+
 function formatDateTime(value: string | null): string {
   if (!value) {
     return "还没有";
@@ -1284,6 +1430,151 @@ function renderThirdPartyLatencyPanel(profile: ProfileSummary): string {
             : ""
         }
       </div>
+    </section>
+  `;
+}
+
+function totalSafeRepairCandidates(report: SessionRecoveryReport): number {
+  return (
+    report.repairCandidates.missingRolloutFiles +
+    report.repairCandidates.hasUserEventFalseButRolloutHasUserMessage +
+    report.repairCandidates.dbThreadIdsMissingFromSessionIndex +
+    report.repairCandidates.sessionIndexIdsMissingFromDb
+  );
+}
+
+function totalTimeRepairCandidates(report: SessionRecoveryReport): number {
+  return (
+    report.repairCandidates.dbTimeMismatchWithSessionIndex +
+    report.repairCandidates.rolloutMtimeMismatchWithSessionIndex
+  );
+}
+
+function formatSessionRecoveryFlash(report: SessionRecoveryReport): string {
+  const safeCandidates = totalSafeRepairCandidates(report);
+  const timeCandidates = totalTimeRepairCandidates(report);
+  const outsideRecent =
+    report.samples.savedRootsWithChatsOutsideRecentWindow.length;
+
+  if (safeCandidates === 0 && timeCandidates === 0) {
+    if (outsideRecent > 0) {
+      return `诊断完成：未发现真实索引损坏，但有 ${outsideRecent} 个旧项目落在 recent 窗口之外。`;
+    }
+    return "诊断完成：未发现需要修复的会话索引问题。";
+  }
+
+  return `诊断完成：安全修复候选 ${safeCandidates} 项，时间修复候选 ${timeCandidates} 项。`;
+}
+
+function formatSessionRepairFlash(result: SessionRepairResult, advanced: boolean): string {
+  if (!result.repaired) {
+    return result.note;
+  }
+
+  const updates = result.updates;
+  const repairedSummary = [
+    updates.hasUserEvent > 0 ? `has_user_event ${updates.hasUserEvent} 项` : null,
+    updates.dbTime > 0 ? `数据库时间 ${updates.dbTime} 项` : null,
+    updates.rolloutMtime > 0 ? `rollout mtime ${updates.rolloutMtime} 项` : null,
+  ]
+    .filter(Boolean)
+    .join("，");
+
+  return advanced
+    ? `高级修复已完成：${repairedSummary || "没有需要回写的时间戳"}。`
+    : `安全修复已完成：${repairedSummary || "没有需要落盘的修复项"}。`;
+}
+
+function renderSessionRecoveryPanel(): string {
+  const report = state.sessionRecoveryReport;
+  const lastResult = state.sessionRecoveryLastResult;
+  const diagnosing = isPendingAction(diagnoseCodexSessionsActionKey);
+  const repairing = isPendingAction(repairCodexSessionsActionKey);
+  const repairingAdvanced = isPendingAction(repairCodexSessionsAdvancedActionKey);
+
+  return `
+    <section class="session-recovery-panel" data-role="session-recovery-panel">
+      <div class="session-recovery-head">
+        <div class="session-recovery-copy">
+          <strong>Codex 会话诊断</strong>
+          <span class="session-recovery-updated">
+            ${
+              report
+                ? `SQLite：${escapeHtml(report.sqliteIntegrity)} · recent window：${escapeHtml(String(report.recentLimit))}`
+                : "按需运行诊断。默认只修真实索引不一致，不改旧会话时间。"
+            }
+          </span>
+        </div>
+        <div class="session-recovery-actions">
+          <button
+            class="button button-ghost usage-refresh-button"
+            data-action="diagnose-codex-sessions"
+            ${state.busy || diagnosing || repairing || repairingAdvanced ? "disabled" : ""}
+          >
+            ${diagnosing ? "诊断中..." : "诊断会话"}
+          </button>
+          <button
+            class="button button-secondary usage-refresh-button"
+            data-action="repair-codex-sessions"
+            ${state.busy || diagnosing || repairing || repairingAdvanced ? "disabled" : ""}
+          >
+            ${repairing ? "修复中..." : "安全修复"}
+          </button>
+          <button
+            class="button button-ghost usage-refresh-button"
+            data-action="repair-codex-sessions-advanced"
+            ${state.busy || diagnosing || repairing || repairingAdvanced ? "disabled" : ""}
+          >
+            ${repairingAdvanced ? "修复中..." : "高级时间修复"}
+          </button>
+        </div>
+      </div>
+      ${
+        report
+          ? `
+            <div class="session-recovery-stats">
+              <div class="session-recovery-stat">
+                <span>安全修复候选</span>
+                <strong>${escapeHtml(String(totalSafeRepairCandidates(report)))}</strong>
+              </div>
+              <div class="session-recovery-stat">
+                <span>时间修复候选</span>
+                <strong>${escapeHtml(String(totalTimeRepairCandidates(report)))}</strong>
+              </div>
+              <div class="session-recovery-stat">
+                <span>侧边栏窗口外项目</span>
+                <strong>${escapeHtml(
+                  String(report.samples.savedRootsWithChatsOutsideRecentWindow.length),
+                )}</strong>
+              </div>
+              <div class="session-recovery-stat">
+                <span>未归档线程</span>
+                <strong>${escapeHtml(String(report.counts.unarchived))}</strong>
+              </div>
+            </div>
+            <div class="session-recovery-meta">
+              <span>session_index：${escapeHtml(String(report.counts.sessionIndexEntries))}</span>
+              <span>db threads：${escapeHtml(String(report.counts.dbThreads))}</span>
+              ${
+                report.samples.savedRootsWithChatsOutsideRecentWindow[0]
+                  ? `<span>样例：${escapeHtml(
+                      report.samples.savedRootsWithChatsOutsideRecentWindow[0].root,
+                    )}</span>`
+                  : ""
+              }
+            </div>
+          `
+          : `
+            <p class="session-recovery-empty">
+              旧项目显示“暂无聊天”不一定是损坏，也可能只是 Codex 侧边栏 recent-window 限制。
+            </p>
+          `
+      }
+      ${
+        lastResult
+          ? `<p class="session-recovery-result">${escapeHtml(lastResult.note)}</p>`
+          : ""
+      }
     </section>
   `;
 }
@@ -1531,6 +1822,7 @@ function renderCardsPage(snapshot: AppSnapshot): string {
             </button>
           </div>
         </div>
+        ${renderSessionRecoveryPanel()}
         <div class="card-grid">
           <button class="card add-profile-card" data-role="add-card" data-action="new-profile" ${state.busy ? "disabled" : ""}>
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
@@ -1874,6 +2166,12 @@ function bindEvents(): void {
         } else {
           await refreshSnapshot();
         }
+      } else if (action === "diagnose-codex-sessions") {
+        await diagnoseCodexSessions(true);
+      } else if (action === "repair-codex-sessions") {
+        await repairCodexSessions(false);
+      } else if (action === "repair-codex-sessions-advanced") {
+        await repairCodexSessions(true);
       } else if (action === "switch-platform" && button.dataset.platform) {
         await switchPlatform(button.dataset.platform as PlatformMode);
       } else if (action === "tab-local") {

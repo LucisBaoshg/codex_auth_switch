@@ -304,7 +304,10 @@ fn build_account_snapshot_preserves_identity_and_storage_flags() {
     );
 
     assert_eq!(snapshot.format_version, 1);
-    assert_eq!(snapshot.identity.email.as_deref(), Some("alice@example.com"));
+    assert_eq!(
+        snapshot.identity.email.as_deref(),
+        Some("alice@example.com")
+    );
     assert_eq!(
         snapshot.identity.profile_url.as_deref(),
         Some("https://example.test/avatar.png")

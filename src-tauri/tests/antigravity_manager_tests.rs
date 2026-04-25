@@ -75,7 +75,9 @@ impl AntigravityProcessController for MutatingRestartProcessController {
                     (key.as_str(), value.as_str()),
                 )?;
             }
-            if let (Some(path), Some(contents)) = (&self.storage_json_path, &self.storage_json_contents) {
+            if let (Some(path), Some(contents)) =
+                (&self.storage_json_path, &self.storage_json_contents)
+            {
                 fs::write(path, contents)?;
             }
         }
@@ -116,9 +118,10 @@ fn import_current_profile_persists_meta_payload_and_snapshot() {
     let payload: AntigravityPayload =
         serde_json::from_str(&fs::read_to_string(profile_dir.join("payload.json")).unwrap())
             .unwrap();
-    let account_snapshot: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(profile_dir.join("account_snapshot.json")).unwrap())
-            .unwrap();
+    let account_snapshot: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(profile_dir.join("account_snapshot.json")).unwrap(),
+    )
+    .unwrap();
     let snapshot = manager.snapshot().unwrap();
 
     assert!(profile_dir.join("account_snapshot.json").exists());
@@ -193,10 +196,7 @@ fn switch_profile_creates_backup_updates_live_db_and_state() {
         serde_json::from_str(&fs::read_to_string(backup_dir.join("payload.json")).unwrap())
             .unwrap();
     let snapshot = manager.snapshot().unwrap();
-    let recovery_points_dir = app_data
-        .path()
-        .join("antigravity")
-        .join("recovery-points");
+    let recovery_points_dir = app_data.path().join("antigravity").join("recovery-points");
     let recovery_entries = fs::read_dir(&recovery_points_dir)
         .unwrap()
         .filter_map(Result::ok)
@@ -364,7 +364,10 @@ fn switch_profile_rolls_back_when_post_switch_validation_fails() {
         .write_live_payload_for_tests(original_payload)
         .unwrap();
 
-    let error = manager.switch_profile(&imported.id).unwrap_err().to_string();
+    let error = manager
+        .switch_profile(&imported.id)
+        .unwrap_err()
+        .to_string();
     let live = manager.read_live_payload_for_tests().unwrap();
     let restored_storage_json = fs::read_to_string(&storage_json_path).unwrap();
 

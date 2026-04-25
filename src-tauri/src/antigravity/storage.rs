@@ -4,7 +4,9 @@ use serde_json::Value;
 use std::fs;
 use std::path::Path;
 
-pub fn read_storage_json_flags(path: &Path) -> Result<AntigravityStorageJsonFlags, AntigravityError> {
+pub fn read_storage_json_flags(
+    path: &Path,
+) -> Result<AntigravityStorageJsonFlags, AntigravityError> {
     if !path.exists() {
         return Ok(AntigravityStorageJsonFlags::default());
     }
