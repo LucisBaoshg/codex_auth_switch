@@ -1,12 +1,13 @@
 [package]
 name = "codex-auth-switch-cli"
-version = "1.4.14"
+version = "1.4.15"
 edition = "2021"
 
 [dependencies]
 base64 = "0.22"
 chrono = { version = "0.4", features = ["clock", "serde"] }
 dirs = "6"
+filetime = "0.2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
