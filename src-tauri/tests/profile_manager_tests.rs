@@ -945,7 +945,7 @@ fn switch_profile_keeps_shared_sections_when_target_config_is_missing() {
 }
 
 #[test]
-fn switch_profile_captures_live_session_state_for_previous_profile_without_clearing_target_when_target_profile_has_no_snapshot() {
+fn switch_profile_keeps_live_session_state_shared_without_per_profile_snapshot() {
     let (app_dir, target_dir, mut manager) = temp_manager();
 
     let profile_a = manager
@@ -965,21 +965,17 @@ fn switch_profile_captures_live_session_state_for_previous_profile_without_clear
         })
         .expect("import b");
 
-    manager
-        .switch_profile(&profile_a.id)
-        .expect("switch to a");
+    manager.switch_profile(&profile_a.id).expect("switch to a");
     write_session_state_root(target_dir.path(), "alpha");
 
-    manager
-        .switch_profile(&profile_b.id)
-        .expect("switch to b without snapshot");
+    manager.switch_profile(&profile_b.id).expect("switch to b");
 
-    assert_session_state_root(&profile_session_state_dir(&app_dir, &profile_a.id), "alpha");
     assert_session_state_root(target_dir.path(), "alpha");
+    assert!(!profile_session_state_dir(&app_dir, &profile_a.id).exists());
 }
 
 #[test]
-fn switch_profile_restores_saved_session_state_for_selected_profile() {
+fn switch_profile_ignores_stale_profile_session_state_snapshot() {
     let (app_dir, target_dir, mut manager) = temp_manager();
 
     let profile_a = manager
@@ -1001,17 +997,15 @@ fn switch_profile_restores_saved_session_state_for_selected_profile() {
 
     write_session_state_root(&profile_session_state_dir(&app_dir, &profile_a.id), "alpha");
 
-    manager
-        .switch_profile(&profile_b.id)
-        .expect("switch to b");
+    manager.switch_profile(&profile_b.id).expect("switch to b");
     write_session_state_root(target_dir.path(), "beta");
 
     manager
         .switch_profile(&profile_a.id)
         .expect("switch back to a");
 
-    assert_session_state_root(target_dir.path(), "alpha");
-    assert_session_state_root(&profile_session_state_dir(&app_dir, &profile_b.id), "beta");
+    assert_session_state_root(target_dir.path(), "beta");
+    assert!(!profile_session_state_dir(&app_dir, &profile_b.id).exists());
 }
 
 #[test]
@@ -1163,76 +1157,43 @@ fn repair_codex_sessions_can_restore_times_from_session_index_when_requested() {
 }
 
 #[test]
-fn switch_profile_applies_safe_session_repair_after_restoring_saved_session_state() {
-    let (app_dir, target_dir, mut manager) = temp_manager();
+fn switch_profile_does_not_repair_shared_session_state() {
+    let (_app_dir, target_dir, mut manager) = temp_manager();
 
-    let profile_a = manager
+    let profile = manager
         .import_profile(ProfileInput {
-            name: "Profile A".into(),
+            name: "Profile".into(),
             notes: String::new(),
-            auth_json: oauth_auth_json("a@example.com", "user-a", "acct-a"),
+            auth_json: oauth_auth_json("profile@example.com", "user-profile", "acct-profile"),
             config_toml: official_config_toml("gpt-5"),
         })
-        .expect("import a");
-    let profile_b = manager
-        .import_profile(ProfileInput {
-            name: "Profile B".into(),
-            notes: String::new(),
-            auth_json: api_key_auth_json("sk-b"),
-            config_toml: third_party_config_toml("gpt-5"),
-        })
-        .expect("import b");
+        .expect("import profile");
 
-    manager
-        .switch_profile(&profile_b.id)
-        .expect("switch to b first");
-
-    let profile_a_session_dir = profile_session_state_dir(&app_dir, &profile_a.id);
-    let rollout_path = profile_a_session_dir
+    let rollout_path = target_dir
+        .path()
         .join("sessions")
         .join("2026")
-        .join("alpha-repair.jsonl");
+        .join("shared.jsonl");
     write_recovery_rollout(&rollout_path, true);
     set_file_mtime(&rollout_path, file_time_from_millis(1_000)).expect("set rollout mtime");
     seed_recovery_database(
-        &profile_a_session_dir,
+        target_dir.path(),
         &[RecoveryThreadSeed {
-            id: "alpha-repair".into(),
-            cwd: "/tmp/alpha-repair".into(),
-            title: "Alpha Repair".into(),
-            rollout_path: rollout_path.clone(),
+            id: "shared".into(),
+            cwd: "/tmp/shared".into(),
+            title: "Shared".into(),
+            rollout_path,
             updated_at_ms: 1_000,
             has_user_event: false,
             archived: false,
         }],
     );
-    let restored_rollout_path = target_dir
-        .path()
-        .join("sessions")
-        .join("2026")
-        .join("alpha-repair.jsonl");
-    let conn = Connection::open(profile_a_session_dir.join("state_5.sqlite"))
-        .expect("open profile session db");
-    conn.execute(
-        "UPDATE threads SET rollout_path = ?1 WHERE id = ?2",
-        (
-            restored_rollout_path.to_string_lossy().to_string(),
-            "alpha-repair",
-        ),
-    )
-    .expect("rewrite rollout path for restored target");
-    drop(conn);
-    write_recovery_session_index(
-        &profile_a_session_dir,
-        &[("alpha-repair", "Alpha Repair", 1_000)],
-    );
+    write_recovery_session_index(target_dir.path(), &[("shared", "Shared", 1_000)]);
 
-    manager
-        .switch_profile(&profile_a.id)
-        .expect("switch back to a");
+    manager.switch_profile(&profile.id).expect("switch profile");
 
-    let (_, _, has_user_event) = read_recovery_thread_state(target_dir.path(), "alpha-repair");
-    assert!(has_user_event);
+    let (_, _, has_user_event) = read_recovery_thread_state(target_dir.path(), "shared");
+    assert!(!has_user_event);
 }
 
 #[test]

@@ -410,12 +410,6 @@ pub enum AppError {
     Message(String),
 }
 
-#[derive(Clone, Copy)]
-enum SessionStateSyncMode {
-    Copy,
-    Move,
-}
-
 const SESSION_RECOVERY_RECENT_LIMIT: usize = 50;
 
 pub struct ProfileManager {
@@ -1457,19 +1451,6 @@ impl ProfileManager {
                     current_auth_json,
                     current_config_toml,
                 )?;
-
-                if self.profile_has_session_state(profile_id)? {
-                    self.sync_target_session_state_to_profile(
-                        &active_profile.id,
-                        SessionStateSyncMode::Move,
-                    )?;
-                    self.restore_profile_session_state_to_target(profile_id)?;
-                } else {
-                    self.sync_target_session_state_to_profile(
-                        &active_profile.id,
-                        SessionStateSyncMode::Copy,
-                    )?;
-                }
             }
         }
 
@@ -1503,9 +1484,6 @@ impl ProfileManager {
             updated_at: switched_at,
         })?;
         self.persist_state()?;
-
-        // 切换后先做轻量自动维护：修共享配置、修 workspace roster，并只做安全会话修复。
-        let _ = self.run_automatic_session_maintenance();
 
         Ok(SwitchResult {
             profile_id: profile_id.to_string(),
@@ -1854,60 +1832,6 @@ impl ProfileManager {
         )?;
 
         self.write_profile_metadata(&profile_dir, &metadata)
-    }
-
-    fn profile_session_state_dir(&self, profile_id: &str) -> Result<PathBuf, AppError> {
-        Ok(self.profile_dir(profile_id)?.join("session-state"))
-    }
-
-    fn profile_has_session_state(&self, profile_id: &str) -> Result<bool, AppError> {
-        Ok(!session_state_entries(&self.profile_session_state_dir(profile_id)?)?.is_empty())
-    }
-
-    fn sync_target_session_state_to_profile(
-        &self,
-        profile_id: &str,
-        mode: SessionStateSyncMode,
-    ) -> Result<(), AppError> {
-        let entries = session_state_entries(&self.target_dir)?;
-        if entries.is_empty() {
-            return Ok(());
-        }
-
-        let session_state_dir = self.profile_session_state_dir(profile_id)?;
-        self.replace_session_state_root(&self.target_dir, &session_state_dir, &entries, mode)
-    }
-
-    fn restore_profile_session_state_to_target(&self, profile_id: &str) -> Result<(), AppError> {
-        let session_state_dir = self.profile_session_state_dir(profile_id)?;
-        let entries = session_state_entries(&session_state_dir)?;
-        if entries.is_empty() {
-            return Ok(());
-        }
-
-        self.replace_session_state_root(
-            &session_state_dir,
-            &self.target_dir,
-            &entries,
-            SessionStateSyncMode::Move,
-        )
-    }
-
-    fn replace_session_state_root(
-        &self,
-        source_root: &Path,
-        destination_root: &Path,
-        entries: &[PathBuf],
-        mode: SessionStateSyncMode,
-    ) -> Result<(), AppError> {
-        clear_session_state_root(destination_root)?;
-        fs::create_dir_all(destination_root)?;
-
-        for entry in entries {
-            sync_session_state_entry(source_root, destination_root, entry, mode)?;
-        }
-
-        Ok(())
     }
 
     fn profile_dir(&self, profile_id: &str) -> Result<PathBuf, AppError> {
@@ -3132,116 +3056,6 @@ fn set_rollout_mtime_millis(path: &Path, millis: i64) -> Result<(), AppError> {
     let seconds = millis.div_euclid(1_000);
     let millis = millis.rem_euclid(1_000) as u32;
     set_file_mtime(path, FileTime::from_unix_time(seconds, millis * 1_000_000))?;
-    Ok(())
-}
-
-fn session_state_entries(root: &Path) -> Result<Vec<PathBuf>, AppError> {
-    let mut entries = Vec::new();
-
-    for name in [
-        ".codex-global-state.json",
-        "session_index.jsonl",
-        "history.jsonl",
-        "sessions",
-        "archived_sessions",
-    ] {
-        let path = root.join(name);
-        if path.exists() {
-            entries.push(PathBuf::from(name));
-        }
-    }
-
-    if root.exists() {
-        let mut state_entries = fs::read_dir(root)?
-            .filter_map(|entry| {
-                let entry = entry.ok()?;
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with("state_") {
-                    Some(PathBuf::from(name))
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-        state_entries.sort();
-        entries.extend(state_entries);
-    }
-
-    Ok(entries)
-}
-
-fn clear_session_state_root(root: &Path) -> Result<(), AppError> {
-    for entry in session_state_entries(root)? {
-        remove_path_if_exists(&root.join(entry))?;
-    }
-
-    Ok(())
-}
-
-fn sync_session_state_entry(
-    source_root: &Path,
-    destination_root: &Path,
-    relative_path: &Path,
-    mode: SessionStateSyncMode,
-) -> Result<(), AppError> {
-    let source_path = source_root.join(relative_path);
-    let destination_path = destination_root.join(relative_path);
-    if let Some(parent) = destination_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    match mode {
-        SessionStateSyncMode::Copy => copy_path_recursively(&source_path, &destination_path)?,
-        SessionStateSyncMode::Move => move_path_recursively(&source_path, &destination_path)?,
-    }
-
-    Ok(())
-}
-
-fn copy_path_recursively(source: &Path, destination: &Path) -> Result<(), AppError> {
-    if source.is_dir() {
-        fs::create_dir_all(destination)?;
-        for entry in fs::read_dir(source)? {
-            let entry = entry?;
-            let source_path = entry.path();
-            let destination_path = destination.join(entry.file_name());
-            copy_path_recursively(&source_path, &destination_path)?;
-        }
-    } else {
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::copy(source, destination)?;
-    }
-
-    Ok(())
-}
-
-fn move_path_recursively(source: &Path, destination: &Path) -> Result<(), AppError> {
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    match fs::rename(source, destination) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            copy_path_recursively(source, destination)?;
-            remove_path_if_exists(source)
-        }
-    }
-}
-
-fn remove_path_if_exists(path: &Path) -> Result<(), AppError> {
-    if !path.exists() {
-        return Ok(());
-    }
-
-    if path.is_dir() {
-        fs::remove_dir_all(path)?;
-    } else {
-        fs::remove_file(path)?;
-    }
-
     Ok(())
 }
 
