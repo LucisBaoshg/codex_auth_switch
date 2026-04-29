@@ -1,14 +1,14 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::{DateTime, SecondsFormat, TimeZone, Utc};
-use filetime::{set_file_mtime, FileTime};
+use filetime::{set_file_mtime, set_file_times, FileTime};
 use rusqlite::Connection;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(target_os = "macos")]
@@ -155,6 +155,8 @@ pub struct SessionRecoveryCounts {
     pub unarchived: usize,
     pub has_user_event_true: usize,
     pub has_user_event_false: usize,
+    pub inferred_current_model_provider: Option<String>,
+    pub model_provider_counts: HashMap<String, usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,6 +168,7 @@ pub struct SessionRecoveryCandidates {
     pub rollout_mtime_mismatch_with_session_index: usize,
     pub db_thread_ids_missing_from_session_index: usize,
     pub session_index_ids_missing_from_db: usize,
+    pub app_default_model_provider_mismatch: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -366,6 +369,7 @@ struct SessionRecoveryThread {
     title: Option<String>,
     has_user_event: bool,
     archived: bool,
+    model_provider: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -378,6 +382,25 @@ struct SessionRepairAudit {
     rollout_mtime_updates: Vec<RolloutMtimeMismatchSample>,
     time_mismatches_not_repaired: Vec<SessionTimeMismatchSample>,
     skipped_missing_rollout_files: Vec<MissingRolloutSample>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionProviderRepairAudit {
+    db_backup_path: String,
+    rollout_backup_dir: String,
+    provider: String,
+    db_updates: Vec<String>,
+    rollout_updates: Vec<String>,
+    skipped_missing_rollout_files: Vec<MissingRolloutSample>,
+    skipped_without_session_meta: Vec<String>,
+}
+
+#[derive(Debug)]
+struct SessionProviderRepairCandidate {
+    id: String,
+    rollout_path: Option<PathBuf>,
+    archived: bool,
 }
 
 #[derive(Debug)]
@@ -629,6 +652,9 @@ impl ProfileManager {
 
         let profile_dir = self.profile_dir(profile_id)?;
         let existing_metadata = self.read_profile_metadata(&profile_dir)?;
+        let is_active_profile = self
+            .detect_active_profile()?
+            .is_some_and(|profile| profile.id == profile_id);
         let next_auth_hash = auth_match_hash(&input.auth_json)?;
         let next_config_hash = managed_config_hash(&input.auth_json, &normalized_config)?;
         let preserved_codex_usage = if existing_metadata.auth_hash == next_auth_hash {
@@ -644,7 +670,7 @@ impl ProfileManager {
             None
         };
 
-        fs::write(profile_dir.join("auth.json"), input.auth_json)?;
+        fs::write(profile_dir.join("auth.json"), &input.auth_json)?;
         fs::write(profile_dir.join("config.toml"), &normalized_config)?;
 
         let metadata = self.compose_profile_metadata(
@@ -661,6 +687,17 @@ impl ProfileManager {
         )?;
 
         self.write_profile_metadata(&profile_dir, &metadata)?;
+        if is_active_profile {
+            fs::create_dir_all(&self.target_dir)?;
+            fs::write(self.target_auth_path(), &input.auth_json)?;
+            fs::write(self.target_config_path(), &normalized_config)?;
+            self.persist_target_marker(TargetMarkerFile {
+                profile_id: metadata.id.clone(),
+                auth_hash: metadata.auth_hash.clone(),
+                config_hash: metadata.config_hash.clone(),
+                updated_at: Utc::now(),
+            })?;
+        }
         Ok(ProfileSummary::from(metadata))
     }
 
@@ -767,37 +804,17 @@ impl ProfileManager {
         let target_dir = self.target_dir.clone();
         let active_provider = self.repair_configs_and_resolve_active_provider()?;
         self.repair_workspace_project_order(&target_dir);
-        self.update_session_databases(&target_dir, &active_provider);
-        self.update_session_jsonl(&target_dir, &active_provider);
-        self.rebuild_session_index(&target_dir);
-
-        Ok(())
-    }
-
-    pub fn run_automatic_session_maintenance(&self) -> Result<(), AppError> {
-        let target_dir = self.target_dir.clone();
-        let active_provider = self.repair_configs_and_resolve_active_provider()?;
-        self.repair_workspace_project_order(&target_dir);
-        self.update_session_databases(&target_dir, &active_provider);
-        self.update_session_jsonl(&target_dir, &active_provider);
-
-        if let Some(report) = self.build_session_recovery_report(false)? {
-            if report.sqlite_integrity == "ok"
-                && report
-                    .repair_candidates
-                    .has_user_event_false_but_rollout_has_user_message
-                    > 0
-            {
-                let _ = self.repair_codex_sessions_internal(false, false)?;
-            }
-        }
+        let _ = self.repair_session_model_provider_for_switch(&active_provider)?;
 
         Ok(())
     }
 
     pub fn diagnose_codex_sessions(&self) -> Result<SessionRecoveryReport, AppError> {
-        self.build_session_recovery_report(true)?
-            .ok_or_else(|| AppError::Message("The target Codex directory does not contain readable session state.".into()))
+        self.build_session_recovery_report(true)?.ok_or_else(|| {
+            AppError::Message(
+                "The target Codex directory does not contain readable session state.".into(),
+            )
+        })
     }
 
     pub fn repair_codex_sessions(
@@ -805,7 +822,11 @@ impl ProfileManager {
         repair_times_from_session_index: bool,
     ) -> Result<SessionRepairResult, AppError> {
         self.repair_codex_sessions_internal(repair_times_from_session_index, true)?
-            .ok_or_else(|| AppError::Message("The target Codex directory does not contain repairable session state.".into()))
+            .ok_or_else(|| {
+                AppError::Message(
+                    "The target Codex directory does not contain repairable session state.".into(),
+                )
+            })
     }
 
     fn repair_configs_and_resolve_active_provider(&self) -> Result<String, AppError> {
@@ -831,19 +852,7 @@ impl ProfileManager {
                     let _ = fs::write(&target_config, &repaired);
                 }
 
-                for line in repaired.lines() {
-                    let trimmed = line.trim();
-                    if trimmed.starts_with("model_provider") && trimmed.contains('=') {
-                        if let Some(start) = trimmed.find('"').or_else(|| trimmed.find('\'')) {
-                            if let Some(end) = trimmed.rfind('"').or_else(|| trimmed.rfind('\'')) {
-                                if start < end {
-                                    active_provider = trimmed[start + 1..end].to_string();
-                                }
-                            }
-                        }
-                        break;
-                    }
-                }
+                active_provider = model_provider_from_config_toml(&repaired)?;
             }
         }
 
@@ -969,7 +978,10 @@ impl ProfileManager {
             > 0;
         let has_time_updates = repair_times_from_session_index
             && (report.repair_candidates.db_time_mismatch_with_session_index > 0
-                || report.repair_candidates.rollout_mtime_mismatch_with_session_index > 0);
+                || report
+                    .repair_candidates
+                    .rollout_mtime_mismatch_with_session_index
+                    > 0);
         if !has_safe_updates && !has_time_updates {
             return Ok(Some(SessionRepairResult {
                 repaired: false,
@@ -988,10 +1000,13 @@ impl ProfileManager {
         let session_index_path = PathBuf::from(&report.session_index_path);
         let session_index = read_session_recovery_index_entries(&session_index_path)?;
         let mut conn = open_valid_state_database(&db_path).ok_or_else(|| {
-            AppError::Message("The primary session database became unreadable during repair.".into())
+            AppError::Message(
+                "The primary session database became unreadable during repair.".into(),
+            )
         })?;
-        let threads = read_session_recovery_threads(&conn)
-            .map_err(|error| AppError::Message(format!("Failed to read session threads: {error}")))?;
+        let threads = read_session_recovery_threads(&conn).map_err(|error| {
+            AppError::Message(format!("Failed to read session threads: {error}"))
+        })?;
 
         let stamp = Utc::now().format("%Y%m%d-%H%M%S").to_string();
         let temp_dir = std::env::temp_dir();
@@ -1019,32 +1034,38 @@ impl ProfileManager {
             })?;
             for thread in threads {
                 let Some(rollout_path) = thread.rollout_path.clone() else {
-                    audit.skipped_missing_rollout_files.push(MissingRolloutSample {
-                        id: thread.id.clone(),
-                        archived: thread.archived,
-                        rollout_path: None,
-                    });
+                    audit
+                        .skipped_missing_rollout_files
+                        .push(MissingRolloutSample {
+                            id: thread.id.clone(),
+                            archived: thread.archived,
+                            rollout_path: None,
+                        });
                     continue;
                 };
                 if !rollout_path.exists() {
-                    audit.skipped_missing_rollout_files.push(MissingRolloutSample {
-                        id: thread.id.clone(),
-                        archived: thread.archived,
-                        rollout_path: Some(rollout_path.to_string_lossy().to_string()),
-                    });
+                    audit
+                        .skipped_missing_rollout_files
+                        .push(MissingRolloutSample {
+                            id: thread.id.clone(),
+                            archived: thread.archived,
+                            rollout_path: Some(rollout_path.to_string_lossy().to_string()),
+                        });
                     continue;
                 }
 
                 if !thread.has_user_event && rollout_has_user_message(&rollout_path) {
-                    transaction.execute(
-                        "UPDATE threads SET has_user_event = 1 WHERE id = ?1",
-                        [&thread.id],
-                    ).map_err(|error| {
-                        AppError::Message(format!(
-                            "Failed to update has_user_event for thread {}: {error}",
-                            thread.id
-                        ))
-                    })?;
+                    transaction
+                        .execute(
+                            "UPDATE threads SET has_user_event = 1 WHERE id = ?1",
+                            [&thread.id],
+                        )
+                        .map_err(|error| {
+                            AppError::Message(format!(
+                                "Failed to update has_user_event for thread {}: {error}",
+                                thread.id
+                            ))
+                        })?;
                     audit
                         .has_user_event_updates
                         .push(HasUserEventMismatchSample {
@@ -1076,15 +1097,17 @@ impl ProfileManager {
                 }
 
                 if repair_times_from_session_index && db_time_differs {
-                    transaction.execute(
-                        "UPDATE threads SET updated_at = ?1, updated_at_ms = ?2 WHERE id = ?3",
-                        rusqlite::params![indexed.sec, indexed.ms, &thread.id],
-                    ).map_err(|error| {
-                        AppError::Message(format!(
-                            "Failed to update timestamps for thread {}: {error}",
-                            thread.id
-                        ))
-                    })?;
+                    transaction
+                        .execute(
+                            "UPDATE threads SET updated_at = ?1, updated_at_ms = ?2 WHERE id = ?3",
+                            rusqlite::params![indexed.sec, indexed.ms, &thread.id],
+                        )
+                        .map_err(|error| {
+                            AppError::Message(format!(
+                                "Failed to update timestamps for thread {}: {error}",
+                                thread.id
+                            ))
+                        })?;
                     audit.db_time_updates.push(SessionTimeMismatchSample {
                         id: thread.id.clone(),
                         cwd: thread.cwd.clone(),
@@ -1102,16 +1125,19 @@ impl ProfileManager {
                             rollout_path: rollout_path.to_string_lossy().to_string(),
                             rollout_mtime_ms,
                             indexed_updated_at_ms: indexed.ms,
-                    });
+                        });
                 }
             }
             transaction.commit().map_err(|error| {
-                AppError::Message(format!("Failed to commit session repair transaction: {error}"))
+                AppError::Message(format!(
+                    "Failed to commit session repair transaction: {error}"
+                ))
             })?;
         }
 
-        let post_integrity = sqlite_integrity_check(&conn)
-            .map_err(|error| AppError::Message(format!("Failed to verify SQLite integrity: {error}")))?;
+        let post_integrity = sqlite_integrity_check(&conn).map_err(|error| {
+            AppError::Message(format!("Failed to verify SQLite integrity: {error}"))
+        })?;
         if post_integrity != "ok" {
             return Err(AppError::Message(format!(
                 "SQLite integrity_check failed after repair: {post_integrity}"
@@ -1139,64 +1165,175 @@ impl ProfileManager {
         }))
     }
 
-    fn update_session_databases(&self, target_dir: &Path, provider: &str) {
-        if let Ok(entries) = fs::read_dir(target_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let name = entry.file_name();
-                let name_str = name.to_string_lossy();
-                if !name_str.starts_with("state_") || !name_str.ends_with(".sqlite") {
-                    continue;
-                }
-
-                let Some(conn) = open_valid_state_database(&path) else {
-                    continue;
-                };
-                let _ = conn.execute("UPDATE threads SET model_provider = ?1", [provider]);
-            }
-        }
-    }
-
-    fn update_session_jsonl(&self, target_dir: &Path, provider: &str) {
-        let sessions_dir = target_dir.join("sessions");
-        let archived_dir = target_dir.join("archived_sessions");
-
-        for dir in [sessions_dir, archived_dir] {
-            self.update_jsonl_dir(&dir, provider);
-        }
-    }
-
-    fn update_jsonl_dir(&self, dir: &Path, provider: &str) {
-        if !dir.exists() {
-            return;
+    fn repair_session_model_provider_for_switch(
+        &self,
+        provider: &str,
+    ) -> Result<Option<SessionProviderRepairAudit>, AppError> {
+        let Some(db_path) = primary_state_database_path(&self.target_dir) else {
+            return Ok(None);
+        };
+        let mut conn = match open_valid_state_database(&db_path) {
+            Some(conn) => conn,
+            None => return Ok(None),
+        };
+        if sqlite_integrity_check(&conn).map_err(|error| {
+            AppError::Message(format!("Failed to run SQLite integrity_check: {error}"))
+        })? != "ok"
+        {
+            return Ok(None);
         }
 
-        let mut stack = vec![dir.to_path_buf()];
-        while let Some(current) = stack.pop() {
-            let Ok(entries) = fs::read_dir(&current) else {
+        let columns = thread_table_columns(&conn).map_err(|error| {
+            AppError::Message(format!(
+                "Failed to inspect session database schema: {error}"
+            ))
+        })?;
+        let required_columns = [
+            "id",
+            "rollout_path",
+            "model_provider",
+            "archived",
+            "has_user_event",
+            "updated_at_ms",
+        ];
+        if required_columns
+            .iter()
+            .any(|required| !columns.iter().any(|column| column == required))
+        {
+            return Ok(None);
+        }
+
+        let candidates =
+            read_session_provider_repair_candidates(&conn, provider).map_err(|error| {
+                AppError::Message(format!(
+                    "Failed to read provider repair candidates: {error}"
+                ))
+            })?;
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+
+        let stamp = Utc::now().format("%Y%m%d-%H%M%S").to_string();
+        let temp_dir = std::env::temp_dir();
+        let db_backup_path = temp_dir.join(format!(
+            "codex-state-before-provider-switch-{}-{}.sqlite",
+            stamp,
+            Uuid::new_v4().simple()
+        ));
+        let rollout_backup_dir = temp_dir.join(format!(
+            "codex-rollouts-before-provider-switch-{}-{}",
+            stamp,
+            Uuid::new_v4().simple()
+        ));
+        fs::copy(&db_path, &db_backup_path)?;
+        fs::create_dir_all(&rollout_backup_dir)?;
+
+        let affected_ids = candidates
+            .iter()
+            .map(|candidate| candidate.id.clone())
+            .collect::<HashSet<_>>();
+        let mut audit = SessionProviderRepairAudit {
+            db_backup_path: db_backup_path.to_string_lossy().to_string(),
+            rollout_backup_dir: rollout_backup_dir.to_string_lossy().to_string(),
+            provider: provider.to_string(),
+            db_updates: Vec::new(),
+            rollout_updates: Vec::new(),
+            skipped_missing_rollout_files: Vec::new(),
+            skipped_without_session_meta: Vec::new(),
+        };
+
+        for candidate in &candidates {
+            let Some(rollout_path) = candidate.rollout_path.as_ref() else {
+                audit
+                    .skipped_missing_rollout_files
+                    .push(MissingRolloutSample {
+                        id: candidate.id.clone(),
+                        archived: candidate.archived,
+                        rollout_path: None,
+                    });
                 continue;
             };
+            if !rollout_path.exists() {
+                audit
+                    .skipped_missing_rollout_files
+                    .push(MissingRolloutSample {
+                        id: candidate.id.clone(),
+                        archived: candidate.archived,
+                        rollout_path: Some(rollout_path.to_string_lossy().to_string()),
+                    });
+                continue;
+            }
 
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    stack.push(path);
-                    continue;
-                }
+            let file_name = rollout_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("rollout.jsonl");
+            let backup_path = rollout_backup_dir.join(format!("{}-{file_name}", candidate.id));
+            let _ = fs::copy(rollout_path, backup_path)?;
 
-                if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
-                    continue;
-                }
-
-                let Ok(content) = fs::read_to_string(&path) else {
-                    continue;
-                };
-                let updated = replace_model_provider_values(&content, provider);
-                if updated != content {
-                    let _ = fs::write(&path, updated);
-                }
+            match update_rollout_session_meta_provider(rollout_path, &affected_ids, provider)? {
+                true => audit
+                    .rollout_updates
+                    .push(rollout_path.to_string_lossy().to_string()),
+                false => audit
+                    .skipped_without_session_meta
+                    .push(candidate.id.clone()),
             }
         }
+
+        {
+            let transaction = conn.transaction().map_err(|error| {
+                AppError::Message(format!(
+                    "Failed to open a provider repair transaction: {error}"
+                ))
+            })?;
+            for candidate in &candidates {
+                if audit
+                    .skipped_missing_rollout_files
+                    .iter()
+                    .any(|missing| missing.id == candidate.id)
+                {
+                    continue;
+                }
+                transaction
+                    .execute(
+                        "UPDATE threads SET model_provider = ?1 WHERE id = ?2 AND archived = 0 AND has_user_event = 1",
+                        rusqlite::params![provider, &candidate.id],
+                    )
+                    .map_err(|error| {
+                        AppError::Message(format!(
+                            "Failed to update model_provider for thread {}: {error}",
+                            candidate.id
+                        ))
+                    })?;
+                audit.db_updates.push(candidate.id.clone());
+            }
+            transaction.commit().map_err(|error| {
+                AppError::Message(format!(
+                    "Failed to commit provider repair transaction: {error}"
+                ))
+            })?;
+        }
+
+        let post_integrity = sqlite_integrity_check(&conn).map_err(|error| {
+            AppError::Message(format!(
+                "Failed to verify SQLite integrity after provider repair: {error}"
+            ))
+        })?;
+        if post_integrity != "ok" {
+            return Err(AppError::Message(format!(
+                "SQLite integrity_check failed after provider repair: {post_integrity}"
+            )));
+        }
+
+        let audit_path = temp_dir.join(format!(
+            "codex-provider-switch-repair-audit-{}-{}.json",
+            stamp,
+            Uuid::new_v4().simple()
+        ));
+        fs::write(&audit_path, serde_json::to_string_pretty(&audit)?)?;
+
+        Ok(Some(audit))
     }
 
     fn repair_workspace_project_order(&self, target_dir: &Path) {
@@ -1334,84 +1471,6 @@ impl ProfileManager {
         }
     }
 
-    fn rebuild_session_index(&self, target_dir: &Path) {
-        let Some(state_db_path) = primary_state_database_path(target_dir) else {
-            return;
-        };
-        let existing_entries = read_session_index_entries(target_dir);
-
-        let Some(conn) = open_valid_state_database(&state_db_path) else {
-            return;
-        };
-        let Ok(columns) = thread_table_columns(&conn) else {
-            return;
-        };
-
-        if !columns.iter().any(|column| column == "id")
-            || !columns.iter().any(|column| column == "title")
-            || !columns.iter().any(|column| column == "updated_at")
-        {
-            return;
-        }
-
-        let sql = if columns.iter().any(|column| column == "archived") {
-            "SELECT id, title, updated_at FROM threads WHERE archived = 0 ORDER BY updated_at ASC, id ASC"
-        } else {
-            "SELECT id, title, updated_at FROM threads ORDER BY updated_at ASC, id ASC"
-        };
-
-        let Ok(mut stmt) = conn.prepare(sql) else {
-            return;
-        };
-        let Ok(rows) = stmt.query_map([], |row| {
-            let id = row.get::<_, String>(0)?;
-            let mut thread_name = row.get::<_, String>(1)?;
-            let updated_at = row.get::<_, i64>(2)?;
-            let updated_at = Utc
-                .timestamp_opt(updated_at, 0)
-                .single()
-                .map(|value| value.to_rfc3339_opts(SecondsFormat::Micros, true))
-                .unwrap_or_else(|| "1970-01-01T00:00:00.000000Z".to_string());
-
-            if thread_name.trim().is_empty() {
-                if let Some(existing_name) = existing_entries
-                    .get(&id)
-                    .map(|entry| entry.thread_name.trim())
-                    .filter(|name| !name.is_empty())
-                {
-                    thread_name = existing_name.to_string();
-                }
-            }
-
-            Ok(SessionIndexEntry {
-                id,
-                thread_name,
-                updated_at,
-            })
-        }) else {
-            return;
-        };
-
-        let mut entries = Vec::new();
-        for row in rows.flatten() {
-            entries.push(row);
-        }
-
-        let Ok(file) = fs::File::create(target_dir.join("session_index.jsonl")) else {
-            return;
-        };
-        let mut writer = BufWriter::new(file);
-        for entry in entries {
-            if serde_json::to_writer(&mut writer, &entry).is_err() {
-                return;
-            }
-            if writer.write_all(b"\n").is_err() {
-                return;
-            }
-        }
-        let _ = writer.flush();
-    }
-
     pub fn switch_profile(&mut self, profile_id: &str) -> Result<SwitchResult, AppError> {
         self.ensure_target_profile_registered()?;
         let profile_dir = self.profile_dir(profile_id)?;
@@ -1438,6 +1497,11 @@ impl ProfileManager {
         } else {
             None
         };
+        let current_model_provider = current_config_toml
+            .as_deref()
+            .map(model_provider_from_config_toml)
+            .transpose()?
+            .unwrap_or_else(|| "openai".to_string());
         let active_profile = self.detect_active_profile()?;
 
         if let (Some(current_auth_json), Some(current_config_toml), Some(active_profile)) = (
@@ -1468,9 +1532,13 @@ impl ProfileManager {
                 &repair_illegal_config_toml(&next_profile_config),
             )?,
         };
+        let next_model_provider = model_provider_from_config_toml(&next_config_toml)?;
 
         fs::write(self.target_auth_path(), &next_auth_json)?;
         fs::write(self.target_config_path(), &next_config_toml)?;
+        if current_model_provider != next_model_provider {
+            let _ = self.repair_session_model_provider_for_switch(&next_model_provider)?;
+        }
         self.sync_runtime_state_to_profile(profile_id, &next_auth_json, &next_config_toml)?;
 
         let switched_at = Utc::now();
@@ -2609,56 +2677,106 @@ pub fn repair_illegal_config_toml(config_toml: &str) -> String {
     }
 }
 
-fn replace_model_provider_values(content: &str, provider: &str) -> String {
-    let key = "\"model_provider\"";
-    let mut output = String::with_capacity(content.len());
-    let mut index = 0;
+fn model_provider_from_config_toml(config_toml: &str) -> Result<String, AppError> {
+    let table = parse_toml_table(config_toml)?;
+    Ok(table
+        .get("model_provider")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("openai")
+        .to_string())
+}
 
-    while let Some(pos) = content[index..].find(key) {
-        let abs = index + pos;
-        output.push_str(&content[index..abs]);
-        output.push_str(key);
-        index = abs + key.len();
+fn update_rollout_session_meta_provider(
+    path: &Path,
+    affected_ids: &HashSet<String>,
+    provider: &str,
+) -> Result<bool, AppError> {
+    let metadata = fs::metadata(path)?;
+    let atime = FileTime::from_last_access_time(&metadata);
+    let mtime = FileTime::from_last_modification_time(&metadata);
+    let content = fs::read_to_string(path)?;
+    let had_trailing_newline = content.ends_with('\n');
+    let mut changed = false;
+    let mut updated_lines = Vec::new();
 
-        let rest = &content[index..];
-        let Some(colon_pos) = rest.find(':') else {
-            output.push_str(rest);
-            return output;
+    for line in content.lines() {
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(line) else {
+            updated_lines.push(line.to_string());
+            continue;
         };
-        output.push_str(&rest[..colon_pos + 1]);
-        index += colon_pos + 1;
 
-        let bytes = content.as_bytes();
-        while index < content.len() && bytes[index].is_ascii_whitespace() {
-            output.push(bytes[index] as char);
-            index += 1;
-        }
-
-        if index < content.len() && bytes[index] == b'"' {
-            output.push('"');
-            index += 1;
-            while index < content.len() {
-                let byte = bytes[index];
-                if byte == b'\\' {
-                    index = (index + 2).min(content.len());
-                    continue;
-                }
-                if byte == b'"' {
-                    index += 1;
-                    break;
-                }
-                index += 1;
-            }
-            output.push_str(provider);
-            output.push('"');
+        if update_session_meta_value_provider(&mut value, affected_ids, provider) {
+            changed = true;
+            updated_lines.push(serde_json::to_string(&value)?);
         } else {
-            output.push_str(&content[index..]);
-            return output;
+            updated_lines.push(line.to_string());
         }
     }
 
-    output.push_str(&content[index..]);
-    output
+    if changed {
+        let mut updated = updated_lines.join("\n");
+        if had_trailing_newline {
+            updated.push('\n');
+        }
+        fs::write(path, updated)?;
+        set_file_times(path, atime, mtime)?;
+    }
+
+    Ok(changed)
+}
+
+fn update_session_meta_value_provider(
+    value: &mut serde_json::Value,
+    affected_ids: &HashSet<String>,
+    provider: &str,
+) -> bool {
+    if value.get("type").and_then(|entry_type| entry_type.as_str()) == Some("session_meta") {
+        return update_session_meta_payload_provider(
+            value.get_mut("payload"),
+            affected_ids,
+            provider,
+        );
+    }
+
+    let payload = value
+        .get_mut("session_meta")
+        .and_then(|session_meta| session_meta.get_mut("payload"));
+    update_session_meta_payload_provider(payload, affected_ids, provider)
+}
+
+fn update_session_meta_payload_provider(
+    payload: Option<&mut serde_json::Value>,
+    affected_ids: &HashSet<String>,
+    provider: &str,
+) -> bool {
+    let Some(payload) = payload else {
+        return false;
+    };
+    let Some(payload_object) = payload.as_object_mut() else {
+        return false;
+    };
+    let Some(id) = payload_object
+        .get("id")
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            payload_object
+                .get("session_id")
+                .and_then(|value| value.as_str())
+        })
+    else {
+        return false;
+    };
+    if !affected_ids.contains(id) {
+        return false;
+    }
+
+    let next_provider = serde_json::Value::String(provider.to_string());
+    if payload_object.get("model_provider") == Some(&next_provider) {
+        return false;
+    }
+    payload_object.insert("model_provider".to_string(), next_provider);
+    true
 }
 
 fn primary_state_database_path(target_dir: &Path) -> Option<PathBuf> {
@@ -2694,6 +2812,33 @@ fn open_valid_state_database(path: &Path) -> Option<Connection> {
     }
 
     Connection::open(path).ok()
+}
+
+fn read_session_provider_repair_candidates(
+    conn: &Connection,
+    provider: &str,
+) -> Result<Vec<SessionProviderRepairCandidate>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT id, rollout_path, archived
+         FROM threads
+         WHERE archived = 0
+           AND has_user_event = 1
+           AND (model_provider IS NULL OR model_provider != ?1)
+         ORDER BY updated_at_ms DESC, id DESC",
+    )?;
+    let rows = stmt.query_map([provider], |row| {
+        Ok(SessionProviderRepairCandidate {
+            id: row.get(0)?,
+            rollout_path: row.get::<_, Option<String>>(1)?.map(PathBuf::from),
+            archived: row.get::<_, i64>(2)? == 1,
+        })
+    })?;
+
+    let mut candidates = Vec::new();
+    for row in rows {
+        candidates.push(row?);
+    }
+    Ok(candidates)
 }
 
 fn sqlite_integrity_check(conn: &Connection) -> Result<String, rusqlite::Error> {
@@ -2735,11 +2880,18 @@ fn read_session_recovery_index_entries(
 fn read_session_recovery_threads(
     conn: &Connection,
 ) -> Result<Vec<SessionRecoveryThread>, rusqlite::Error> {
-    let mut stmt = conn.prepare(
-        "SELECT id, rollout_path, updated_at, updated_at_ms, cwd, title, has_user_event, archived
+    let columns = thread_table_columns(conn)?;
+    let model_provider_expr = if columns.iter().any(|column| column == "model_provider") {
+        "model_provider"
+    } else {
+        "NULL"
+    };
+    let sql = format!(
+        "SELECT id, rollout_path, updated_at, updated_at_ms, cwd, title, has_user_event, archived, {model_provider_expr}
          FROM threads
-         ORDER BY updated_at_ms DESC, id DESC",
-    )?;
+         ORDER BY updated_at_ms DESC, id DESC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], |row| {
         Ok(SessionRecoveryThread {
             id: row.get(0)?,
@@ -2750,6 +2902,7 @@ fn read_session_recovery_threads(
             title: row.get(5)?,
             has_user_event: row.get::<_, i64>(6)? == 1,
             archived: row.get::<_, i64>(7)? == 1,
+            model_provider: row.get(8)?,
         })
     })?;
 
@@ -2783,6 +2936,7 @@ fn assemble_session_recovery_report(
     let mut unarchived = 0;
     let mut has_user_event_true = 0;
     let mut has_user_event_false = 0;
+    let mut model_provider_counts = HashMap::<String, usize>::new();
 
     for thread in &threads {
         if thread.archived {
@@ -2795,6 +2949,16 @@ fn assemble_session_recovery_report(
         } else {
             has_user_event_false += 1;
         }
+        let provider = thread
+            .model_provider
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("openai");
+        let provider_key = format!(
+            "{provider}\tarchived={}\thasUserEvent={}",
+            thread.archived, thread.has_user_event
+        );
+        *model_provider_counts.entry(provider_key).or_insert(0) += 1;
 
         let Some(rollout_path) = thread.rollout_path.as_ref() else {
             missing_rollout_files.push(MissingRolloutSample {
@@ -2814,14 +2978,12 @@ fn assemble_session_recovery_report(
         }
 
         if !thread.has_user_event && rollout_has_user_message(rollout_path) {
-            has_user_event_false_but_rollout_has_user_message.push(
-                HasUserEventMismatchSample {
-                    id: thread.id.clone(),
-                    archived: thread.archived,
-                    cwd: thread.cwd.clone(),
-                    title: thread.title.clone(),
-                },
-            );
+            has_user_event_false_but_rollout_has_user_message.push(HasUserEventMismatchSample {
+                id: thread.id.clone(),
+                archived: thread.archived,
+                cwd: thread.cwd.clone(),
+                title: thread.title.clone(),
+            });
         }
 
         let Some(indexed) = session_index.get(&thread.id) else {
@@ -2860,6 +3022,38 @@ fn assemble_session_recovery_report(
         &threads,
         recent_limit,
     );
+    let inferred_current_model_provider = threads
+        .iter()
+        .filter(|thread| !thread.archived && thread.has_user_event)
+        .max_by(|left, right| {
+            left.updated_at_ms
+                .cmp(&right.updated_at_ms)
+                .then_with(|| left.id.cmp(&right.id))
+        })
+        .and_then(|thread| {
+            thread
+                .model_provider
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string)
+        });
+    let app_default_model_provider_mismatch = inferred_current_model_provider
+        .as_deref()
+        .map(|provider| {
+            threads
+                .iter()
+                .filter(|thread| !thread.archived && thread.has_user_event)
+                .filter(|thread| {
+                    thread
+                        .model_provider
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or("openai")
+                        != provider
+                })
+                .count()
+        })
+        .unwrap_or(0);
 
     Ok(SessionRecoveryReport {
         codex_home: target_dir.to_string_lossy().to_string(),
@@ -2874,6 +3068,8 @@ fn assemble_session_recovery_report(
             unarchived,
             has_user_event_true,
             has_user_event_false,
+            inferred_current_model_provider,
+            model_provider_counts,
         },
         repair_candidates: SessionRecoveryCandidates {
             missing_rollout_files: missing_rollout_files.len(),
@@ -2884,6 +3080,7 @@ fn assemble_session_recovery_report(
                 rollout_mtime_mismatch_with_session_index.len(),
             db_thread_ids_missing_from_session_index,
             session_index_ids_missing_from_db,
+            app_default_model_provider_mismatch,
         },
         samples: SessionRecoverySamples {
             missing_rollout_files: missing_rollout_files.into_iter().take(20).collect(),
@@ -3057,27 +3254,6 @@ fn set_rollout_mtime_millis(path: &Path, millis: i64) -> Result<(), AppError> {
     let millis = millis.rem_euclid(1_000) as u32;
     set_file_mtime(path, FileTime::from_unix_time(seconds, millis * 1_000_000))?;
     Ok(())
-}
-
-fn read_session_index_entries(target_dir: &Path) -> HashMap<String, SessionIndexEntry> {
-    let path = target_dir.join("session_index.jsonl");
-    let Ok(file) = fs::File::open(path) else {
-        return HashMap::new();
-    };
-
-    let mut entries = HashMap::new();
-    for line in BufReader::new(file).lines().map_while(Result::ok) {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        if let Ok(entry) = serde_json::from_str::<SessionIndexEntry>(trimmed) {
-            entries.insert(entry.id.clone(), entry);
-        }
-    }
-
-    entries
 }
 
 fn thread_table_columns(conn: &Connection) -> Result<Vec<String>, rusqlite::Error> {

@@ -703,6 +703,93 @@ test("shows a manual-restart success message after switching profiles", async ()
   expect(invokeMock).toHaveBeenCalledWith("switch_profile", { profileId: "profile-1" });
 });
 
+test("shows an indeterminate provider sync dialog while switching profiles", async () => {
+  const initialSnapshot = {
+    targetDir: "/Users/example/.codex",
+    usingDefaultTargetDir: true,
+    targetExists: true,
+    targetAuthExists: true,
+    targetConfigExists: true,
+    targetUpdatedAt: "2026-03-20T00:00:00Z",
+    targetAuthTypeLabel: "第三方 API",
+    activeProfileId: "profile-2",
+    lastSelectedProfileId: "profile-2",
+    lastSwitchProfileId: "profile-2",
+    lastSwitchedAt: "2026-03-20T00:00:00Z",
+    profiles: [
+      {
+        id: "profile-1",
+        name: "Work Team",
+        notes: "工作主账号，常驻使用。",
+        authTypeLabel: "官方 OAuth",
+        createdAt: "2026-03-16T01:00:00Z",
+        updatedAt: "2026-03-18T12:20:00Z",
+        authHash: "7da2e87f1bc3",
+        configHash: "92ca2d10aa51",
+      },
+      {
+        id: "profile-2",
+        name: "淘宝 1",
+        notes: "主工作账号，额度稳定。",
+        authTypeLabel: "第三方 API",
+        createdAt: "2026-03-17T01:00:00Z",
+        updatedAt: "2026-03-19T04:12:00Z",
+        authHash: "d18ff783cb10",
+        configHash: "c450c91961af",
+      },
+    ],
+  };
+
+  const switchedSnapshot = {
+    ...initialSnapshot,
+    activeProfileId: "profile-1",
+    lastSelectedProfileId: "profile-1",
+    lastSwitchProfileId: "profile-1",
+  };
+
+  let resolveSwitch: ((snapshot: typeof switchedSnapshot) => void) | null = null;
+  const switchPromise = new Promise<typeof switchedSnapshot>((resolve) => {
+    resolveSwitch = resolve;
+  });
+
+  invokeMock.mockImplementation((command: string) => {
+    if (command === "load_snapshot") {
+      return Promise.resolve(initialSnapshot);
+    }
+    if (command === "switch_profile") {
+      return switchPromise;
+    }
+    return Promise.reject(new Error(`unexpected command: ${command}`));
+  });
+
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+
+  await import("../src/main");
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="switch"][data-id="profile-1"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+  await flushUi();
+
+  const dialog = document.querySelector('[data-role="profile-switch-busy-dialog"]');
+  expect(dialog).not.toBeNull();
+  expect(dialog?.getAttribute("aria-busy")).toBe("true");
+  expect(dialog?.textContent).toContain("切换中");
+  expect(dialog?.textContent).toContain("会话 provider 同步中");
+
+  resolveSwitch?.(switchedSnapshot);
+  await flushUi();
+  await flushUi();
+  await flushUi();
+
+  expect(document.querySelector('[data-role="profile-switch-busy-dialog"]')).toBeNull();
+});
+
 test("opens the detail editor when clicking view-details on a profile card", async () => {
   await import("../src/main");
   await flushUi();
@@ -718,9 +805,11 @@ test("opens the detail editor when clicking view-details on a profile card", asy
   expect(document.querySelector("#editor-config-toml")).not.toBeNull();
 });
 
-test("opens network shared profile details in readonly mode", async () => {
-  const fetchMock = vi.fn(async (input: string) => {
-    if (input === "http://sub2api.ite.tapcash.com/codex/api/profiles") {
+test("opens network shared profile details in readonly mode without browser cache", async () => {
+  const fetchMock = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
+    const url = input.toString();
+
+    if (url === "http://sub2api.ite.tapcash.com/codex/api/profiles") {
       return {
         ok: true,
         json: async () => [
@@ -735,7 +824,7 @@ test("opens network shared profile details in readonly mode", async () => {
       };
     }
 
-    if (input === "http://sub2api.ite.tapcash.com/codex/api/profiles/remote-1") {
+    if (url === "http://sub2api.ite.tapcash.com/codex/api/profiles/remote-1") {
       return {
         ok: true,
         json: async () => ({
@@ -748,14 +837,14 @@ test("opens network shared profile details in readonly mode", async () => {
       };
     }
 
-    if (input === "http://sub2api.ite.tapcash.com/codex/api/profiles/remote-1/auth.json") {
+    if (url === "http://sub2api.ite.tapcash.com/codex/api/profiles/remote-1/auth.json") {
       return {
         ok: true,
         text: async () => '{"token":"remote-token"}',
       };
     }
 
-    if (input === "http://sub2api.ite.tapcash.com/codex/api/profiles/remote-1/config.toml") {
+    if (url === "http://sub2api.ite.tapcash.com/codex/api/profiles/remote-1/config.toml") {
       return {
         ok: true,
         text: async () => 'model = "gpt-5.4"\n',
@@ -797,6 +886,22 @@ test("opens network shared profile details in readonly mode", async () => {
   expect(document.querySelector('[data-role="editor-readonly-notice"]')).not.toBeNull();
   expect(document.querySelector('[data-action="save-editor"]')).toBeNull();
   expect(document.querySelector('[data-action="save-and-switch"]')).toBeNull();
+  expect(fetchMock).toHaveBeenCalledWith(
+    "http://sub2api.ite.tapcash.com/codex/api/profiles",
+    { cache: "no-store" },
+  );
+  expect(fetchMock).toHaveBeenCalledWith(
+    "http://sub2api.ite.tapcash.com/codex/api/profiles/remote-1",
+    { cache: "no-store" },
+  );
+  expect(fetchMock).toHaveBeenCalledWith(
+    "http://sub2api.ite.tapcash.com/codex/api/profiles/remote-1/auth.json",
+    { cache: "no-store" },
+  );
+  expect(fetchMock).toHaveBeenCalledWith(
+    "http://sub2api.ite.tapcash.com/codex/api/profiles/remote-1/config.toml",
+    { cache: "no-store" },
+  );
 });
 
 test("deletes a saved profile after confirmation", async () => {

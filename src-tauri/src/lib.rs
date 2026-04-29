@@ -52,7 +52,6 @@ where
 #[tauri::command]
 fn load_snapshot(app: AppHandle) -> Result<AppSnapshot, String> {
     let manager = manager_from_app(&app)?;
-    let _ = manager.run_automatic_session_maintenance();
     manager.snapshot().map_err(|error| error.to_string())
 }
 

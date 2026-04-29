@@ -1,5 +1,5 @@
-use codex_auth_switch_lib::core::{restart_codex_script, ProfileInput, ProfileManager};
 use chrono::{SecondsFormat, TimeZone, Utc};
+use codex_auth_switch_lib::core::{restart_codex_script, ProfileInput, ProfileManager};
 use filetime::{set_file_mtime, FileTime};
 use rusqlite::Connection;
 use serde_json::json;
@@ -18,6 +18,7 @@ struct RecoveryThreadSeed {
     updated_at_ms: i64,
     has_user_event: bool,
     archived: bool,
+    model_provider: String,
 }
 
 fn api_key_auth_json(token: &str) -> String {
@@ -173,7 +174,9 @@ fn write_session_state_root(root: &Path, label: &str) {
     fs::write(root.join("state_5.sqlite-wal"), format!("wal-{label}")).expect("write wal");
     fs::write(root.join("state_5.sqlite-shm"), format!("shm-{label}")).expect("write shm");
     fs::write(
-        root.join("sessions").join("2026").join(format!("{label}.jsonl")),
+        root.join("sessions")
+            .join("2026")
+            .join(format!("{label}.jsonl")),
         format!(r#"{{"label":"{label}","kind":"session"}}"#),
     )
     .expect("write session file");
@@ -186,16 +189,20 @@ fn write_session_state_root(root: &Path, label: &str) {
 }
 
 fn assert_session_state_root(root: &Path, label: &str) {
-    let global_state = fs::read_to_string(root.join(".codex-global-state.json"))
-        .expect("read global state");
+    let global_state =
+        fs::read_to_string(root.join(".codex-global-state.json")).expect("read global state");
     let session_index =
         fs::read_to_string(root.join("session_index.jsonl")).expect("read session index");
     let history = fs::read_to_string(root.join("history.jsonl")).expect("read history");
     let sqlite = fs::read_to_string(root.join("state_5.sqlite")).expect("read sqlite");
     let wal = fs::read_to_string(root.join("state_5.sqlite-wal")).expect("read wal");
     let shm = fs::read_to_string(root.join("state_5.sqlite-shm")).expect("read shm");
-    let session = fs::read_to_string(root.join("sessions").join("2026").join(format!("{label}.jsonl")))
-        .expect("read session file");
+    let session = fs::read_to_string(
+        root.join("sessions")
+            .join("2026")
+            .join(format!("{label}.jsonl")),
+    )
+    .expect("read session file");
     let archived = fs::read_to_string(
         root.join("archived_sessions")
             .join(format!("{label}-archived.jsonl")),
@@ -269,6 +276,30 @@ fn write_recovery_rollout(path: &Path, has_user_message: bool) {
     fs::write(path, format!("{line}\n")).expect("write rollout");
 }
 
+fn write_provider_repair_rollout(path: &Path, id: &str, provider: &str) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create rollout parent");
+    }
+
+    let meta = json!({
+        "type": "session_meta",
+        "payload": {
+            "id": id,
+            "model_provider": provider
+        }
+    });
+    let user_message = json!({
+        "event": {
+            "type": "user_message",
+            "payload": {
+                "role": "user",
+                "text": "keep model_provider text untouched"
+            }
+        }
+    });
+    fs::write(path, format!("{meta}\n{user_message}\n")).expect("write provider rollout");
+}
+
 fn write_recovery_session_index(root: &Path, entries: &[(&str, &str, i64)]) {
     let content = entries
         .iter()
@@ -282,7 +313,8 @@ fn write_recovery_session_index(root: &Path, entries: &[(&str, &str, i64)]) {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    fs::write(root.join("session_index.jsonl"), format!("{content}\n")).expect("write session index");
+    fs::write(root.join("session_index.jsonl"), format!("{content}\n"))
+        .expect("write session index");
 }
 
 fn seed_recovery_database(root: &Path, threads: &[RecoveryThreadSeed]) {
@@ -297,6 +329,7 @@ fn seed_recovery_database(root: &Path, threads: &[RecoveryThreadSeed]) {
             created_at_ms INTEGER NOT NULL,
             updated_at_ms INTEGER NOT NULL,
             source TEXT,
+            model_provider TEXT,
             cwd TEXT,
             title TEXT,
             has_user_event INTEGER NOT NULL DEFAULT 0,
@@ -315,11 +348,12 @@ fn seed_recovery_database(root: &Path, threads: &[RecoveryThreadSeed]) {
                 created_at_ms,
                 updated_at_ms,
                 source,
+                model_provider,
                 cwd,
                 title,
                 has_user_event,
                 archived
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             (
                 &thread.id,
                 thread.rollout_path.to_string_lossy().to_string(),
@@ -328,6 +362,7 @@ fn seed_recovery_database(root: &Path, threads: &[RecoveryThreadSeed]) {
                 thread.updated_at_ms - 5_000,
                 thread.updated_at_ms,
                 "local",
+                &thread.model_provider,
                 &thread.cwd,
                 &thread.title,
                 i64::from(thread.has_user_event),
@@ -346,6 +381,16 @@ fn read_recovery_thread_state(root: &Path, id: &str) -> (i64, i64, bool) {
         |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? == 1)),
     )
     .expect("query recovery thread")
+}
+
+fn read_recovery_thread_provider(root: &Path, id: &str) -> String {
+    let conn = Connection::open(root.join("state_5.sqlite")).expect("open recovery db for read");
+    conn.query_row(
+        "SELECT model_provider FROM threads WHERE id = ?1",
+        [id],
+        |row| row.get(0),
+    )
+    .expect("query recovery thread provider")
 }
 
 fn with_process_env_lock<T>(task: impl FnOnce() -> T) -> T {
@@ -600,6 +645,53 @@ fn update_profile_rewrites_saved_contents_and_metadata() {
     );
     assert!(document.config_toml.contains("model = \"gpt-5\""));
     assert_eq!(updated.auth_type_label, "官方 OAuth");
+}
+
+#[test]
+fn update_active_profile_rewrites_live_target_files() {
+    let (_app_dir, target_dir, mut manager) = temp_manager();
+
+    let profile = manager
+        .import_profile(ProfileInput {
+            name: "Active Editable".into(),
+            notes: "before edit".into(),
+            auth_json: api_key_auth_json("sk-before"),
+            config_toml: third_party_config_toml("gpt-4.1"),
+        })
+        .expect("import");
+
+    manager
+        .switch_profile(&profile.id)
+        .expect("switch active profile");
+
+    manager
+        .update_profile(
+            &profile.id,
+            ProfileInput {
+                name: "Active Editable".into(),
+                notes: "after edit".into(),
+                auth_json: api_key_auth_json("sk-after"),
+                config_toml: third_party_config_toml("gpt-5.4"),
+            },
+        )
+        .expect("update active profile");
+
+    let live_auth =
+        fs::read_to_string(target_dir.path().join("auth.json")).expect("read live auth");
+    let live_config =
+        fs::read_to_string(target_dir.path().join("config.toml")).expect("read live config");
+
+    assert!(live_auth.contains("sk-after"));
+    assert!(live_config.contains("model = \"gpt-5.4\""));
+
+    let document = manager
+        .get_profile_document(&profile.id)
+        .expect("reload active document");
+
+    assert!(document.loaded_from_target);
+    assert!(!document.has_target_changes);
+    assert!(document.auth_json.contains("sk-after"));
+    assert!(document.config_toml.contains("model = \"gpt-5.4\""));
 }
 
 #[test]
@@ -1025,7 +1117,8 @@ fn diagnose_codex_sessions_reports_saved_roots_outside_recent_window_without_mar
             .join("2026")
             .join(format!("{id}.jsonl"));
         write_recovery_rollout(&rollout_path, true);
-        set_file_mtime(&rollout_path, file_time_from_millis(updated_at_ms)).expect("set rollout mtime");
+        set_file_mtime(&rollout_path, file_time_from_millis(updated_at_ms))
+            .expect("set rollout mtime");
 
         threads.push(RecoveryThreadSeed {
             id: id.clone(),
@@ -1035,6 +1128,7 @@ fn diagnose_codex_sessions_reports_saved_roots_outside_recent_window_without_mar
             updated_at_ms,
             has_user_event: true,
             archived: false,
+            model_provider: "openai".into(),
         });
         session_index_entries.push((id, title, updated_at_ms));
     }
@@ -1067,7 +1161,13 @@ fn diagnose_codex_sessions_reports_saved_roots_outside_recent_window_without_mar
             .has_user_event_false_but_rollout_has_user_message,
         0
     );
-    assert_eq!(report.samples.saved_roots_with_chats_outside_recent_window.len(), 1);
+    assert_eq!(
+        report
+            .samples
+            .saved_roots_with_chats_outside_recent_window
+            .len(),
+        1
+    );
     assert_eq!(
         report.samples.saved_roots_with_chats_outside_recent_window[0].root,
         "/tmp/project-0"
@@ -1095,6 +1195,7 @@ fn repair_codex_sessions_sets_has_user_event_without_rewriting_times_by_default(
             updated_at_ms: 1_000,
             has_user_event: false,
             archived: false,
+            model_provider: "openai".into(),
         }],
     );
     write_recovery_session_index(target_dir.path(), &[("alpha", "Alpha", 9_000)]);
@@ -1137,6 +1238,7 @@ fn repair_codex_sessions_can_restore_times_from_session_index_when_requested() {
             updated_at_ms: 1_000,
             has_user_event: true,
             archived: false,
+            model_provider: "openai".into(),
         }],
     );
     write_recovery_session_index(target_dir.path(), &[("beta", "Beta", 9_000)]);
@@ -1186,6 +1288,7 @@ fn switch_profile_does_not_repair_shared_session_state() {
             updated_at_ms: 1_000,
             has_user_event: false,
             archived: false,
+            model_provider: "openai".into(),
         }],
     );
     write_recovery_session_index(target_dir.path(), &[("shared", "Shared", 1_000)]);
@@ -1194,6 +1297,51 @@ fn switch_profile_does_not_repair_shared_session_state() {
 
     let (_, _, has_user_event) = read_recovery_thread_state(target_dir.path(), "shared");
     assert!(!has_user_event);
+}
+
+#[test]
+fn switch_profile_repairs_active_session_provider_when_model_provider_changes() {
+    let (_app_dir, target_dir, mut manager) = temp_manager();
+
+    let profile = manager
+        .import_profile(ProfileInput {
+            name: "Third Party".into(),
+            notes: String::new(),
+            auth_json: api_key_auth_json("sk-third"),
+            config_toml: third_party_config_toml("gpt-5"),
+        })
+        .expect("import profile");
+
+    let rollout_path = target_dir
+        .path()
+        .join("sessions")
+        .join("2026")
+        .join("shared.jsonl");
+    write_provider_repair_rollout(&rollout_path, "shared", "openai");
+    set_file_mtime(&rollout_path, file_time_from_millis(1_000)).expect("set rollout mtime");
+    seed_recovery_database(
+        target_dir.path(),
+        &[RecoveryThreadSeed {
+            id: "shared".into(),
+            cwd: "/tmp/shared".into(),
+            title: "Shared".into(),
+            rollout_path: rollout_path.clone(),
+            updated_at_ms: 1_000,
+            has_user_event: true,
+            archived: false,
+            model_provider: "openai".into(),
+        }],
+    );
+
+    manager.switch_profile(&profile.id).expect("switch profile");
+
+    assert_eq!(
+        read_recovery_thread_provider(target_dir.path(), "shared"),
+        "OpenAI"
+    );
+    let rollout = fs::read_to_string(&rollout_path).expect("read rollout");
+    assert!(rollout.contains(r#""model_provider":"OpenAI""#));
+    assert_eq!(file_mtime_millis(&rollout_path), 1_000);
 }
 
 #[test]
@@ -1211,26 +1359,38 @@ fn fix_session_database_updates_sqlite_and_jsonl_without_shell_tools() {
 
     let db_path = codex_dir.join("state_1.sqlite");
     let conn = Connection::open(&db_path).expect("open sqlite");
-    conn.execute("CREATE TABLE threads (model_provider TEXT)", [])
-        .expect("create table");
-    conn.execute("INSERT INTO threads (model_provider) VALUES ('openai')", [])
-        .expect("seed row");
-    drop(conn);
-
+    conn.execute_batch(
+        "CREATE TABLE threads (
+            id TEXT PRIMARY KEY,
+            rollout_path TEXT,
+            updated_at_ms INTEGER NOT NULL,
+            model_provider TEXT,
+            archived INTEGER NOT NULL DEFAULT 0,
+            has_user_event INTEGER NOT NULL DEFAULT 0
+        );",
+    )
+    .expect("create table");
     let sessions_dir = codex_dir.join("sessions");
     let archived_dir = codex_dir.join("archived_sessions");
     fs::create_dir_all(&sessions_dir).expect("create sessions dir");
     fs::create_dir_all(&archived_dir).expect("create archived sessions dir");
-    fs::write(
-        sessions_dir.join("one.jsonl"),
-        r#"{"session_meta":{"payload":{"model_provider":"openai"}}}"#,
+    let rollout_path = sessions_dir.join("one.jsonl");
+    write_provider_repair_rollout(&rollout_path, "active-thread", "openai");
+    set_file_mtime(&rollout_path, file_time_from_millis(1_000)).expect("set rollout mtime");
+    conn.execute(
+        "INSERT INTO threads (id, rollout_path, updated_at_ms, model_provider, archived, has_user_event)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        (
+            "active-thread",
+            rollout_path.to_string_lossy().to_string(),
+            1_000_i64,
+            "openai",
+            0_i64,
+            1_i64,
+        ),
     )
-    .expect("seed sessions");
-    fs::write(
-        archived_dir.join("two.jsonl"),
-        r#"{"session_meta":{"payload":{"model_provider":"openai"}}}"#,
-    )
-    .expect("seed archived sessions");
+    .expect("seed active row");
+    drop(conn);
 
     with_test_codex_env(home_dir.path(), || {
         let manager =
@@ -1248,11 +1408,10 @@ fn fix_session_database_updates_sqlite_and_jsonl_without_shell_tools() {
         .expect("query provider");
     assert_eq!(provider, "openai_custom");
 
-    let sessions_content = fs::read_to_string(sessions_dir.join("one.jsonl")).expect("read sessions");
-    let archived_content =
-        fs::read_to_string(archived_dir.join("two.jsonl")).expect("read archived");
+    let sessions_content =
+        fs::read_to_string(sessions_dir.join("one.jsonl")).expect("read sessions");
     assert!(sessions_content.contains("\"model_provider\":\"openai_custom\""));
-    assert!(archived_content.contains("\"model_provider\":\"openai_custom\""));
+    assert_eq!(file_mtime_millis(&rollout_path), 1_000);
 }
 
 #[test]
@@ -1289,7 +1448,7 @@ fn fix_session_database_sanitizes_official_oauth_config() {
 }
 
 #[test]
-fn fix_session_database_rebuilds_session_index_from_threads_table() {
+fn fix_session_database_does_not_rebuild_session_index_from_threads_table() {
     let home_dir = TempDir::new().expect("temp home");
     let app_dir = TempDir::new().expect("temp app");
     let codex_dir = home_dir.path().join(".codex");
@@ -1347,11 +1506,11 @@ fn fix_session_database_rebuilds_session_index_from_threads_table() {
             ProfileManager::load_or_default(app_dir.path().to_path_buf()).expect("load manager");
         manager
             .fix_session_database_and_configs()
-            .expect("repair sessions and index");
+            .expect("repair sessions");
     });
 
-    let session_index = fs::read_to_string(codex_dir.join("session_index.jsonl"))
-        .expect("read rebuilt session index");
+    let session_index =
+        fs::read_to_string(codex_dir.join("session_index.jsonl")).expect("read session index");
     let entries = session_index
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("parse index entry"))
@@ -1359,10 +1518,10 @@ fn fix_session_database_rebuilds_session_index_from_threads_table() {
 
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0]["id"], "old-thread");
-    assert_eq!(entries[0]["thread_name"], "Updated Old Title");
-    assert_eq!(entries[1]["id"], "fresh-thread");
-    assert_eq!(entries[1]["thread_name"], "Fresh Title");
-    assert!(entries.iter().all(|entry| entry["id"] != "ghost-thread"));
+    assert_eq!(entries[0]["thread_name"], "Stale Title");
+    assert_eq!(entries[1]["id"], "ghost-thread");
+    assert_eq!(entries[1]["thread_name"], "Ghost Title");
+    assert!(entries.iter().all(|entry| entry["id"] != "fresh-thread"));
     assert!(entries.iter().all(|entry| entry["id"] != "archived-thread"));
 }
 
@@ -1471,10 +1630,7 @@ fn fix_session_database_clears_active_workspace_roots_after_workspace_order_repa
         global_state.get("project-order"),
         Some(&json!(["/tmp/sharing-session", "/tmp/alpha", "/tmp/beta"]))
     );
-    assert_eq!(
-        global_state.get("active-workspace-roots"),
-        Some(&json!([]))
-    );
+    assert_eq!(global_state.get("active-workspace-roots"), Some(&json!([])));
 }
 
 #[test]

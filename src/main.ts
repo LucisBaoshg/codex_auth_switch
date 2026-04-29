@@ -14,6 +14,10 @@ type FlashKind = "info" | "success" | "error";
 type ViewMode = "cards" | "editor";
 type EditorMode = "new" | "fromCurrent" | "existing";
 type PlatformMode = "codex" | "antigravity";
+type BusyDialogState = {
+  title: string;
+  message: string;
+} | null;
 
 type CodexUsageWindow = {
   usedPercent: number;
@@ -125,6 +129,8 @@ type SessionRecoveryCounts = {
   unarchived: number;
   hasUserEventTrue: number;
   hasUserEventFalse: number;
+  inferredCurrentModelProvider?: string | null;
+  modelProviderCounts?: Record<string, number>;
 };
 
 type SessionRecoveryCandidates = {
@@ -134,6 +140,7 @@ type SessionRecoveryCandidates = {
   rolloutMtimeMismatchWithSessionIndex: number;
   dbThreadIdsMissingFromSessionIndex: number;
   sessionIndexIdsMissingFromDb: number;
+  appDefaultModelProviderMismatch?: number;
 };
 
 type SavedRootOutsideRecentWindowSample = {
@@ -218,6 +225,7 @@ type NetworkProfile = {
 };
 
 const NETWORK_PROFILES_API = "http://sub2api.ite.tapcash.com/codex/api/profiles";
+const NETWORK_FETCH_OPTIONS: RequestInit = { cache: "no-store" };
 
 const isTauriRuntime = "__TAURI_INTERNALS__" in window;
 const appRoot = document.querySelector<HTMLDivElement>("#app");
@@ -345,6 +353,7 @@ const state: {
   selectedProfileId: string | null;
   editor: EditorState;
   busy: boolean;
+  busyDialog: BusyDialogState;
   pendingActions: Set<string>;
   flash: { kind: FlashKind; text: string } | null;
   activeTab: "local" | "network";
@@ -365,6 +374,7 @@ const state: {
   selectedProfileId: null,
   editor: createEditorState(),
   busy: false,
+  busyDialog: null,
   pendingActions: new Set<string>(),
   flash: null,
   activeTab: "local",
@@ -666,7 +676,12 @@ async function loadAppVersion(): Promise<void> {
 }
 
 async function switchProfile(profileId: string, profileName: string): Promise<void> {
-  setBusy(true);
+  state.busy = true;
+  state.busyDialog = {
+    title: "切换中",
+    message: "会话 provider 同步中，请不要关闭应用。",
+  };
+  render();
   try {
     const snapshot = await desktopInvoke<AppSnapshot>("switch_profile", { profileId });
     state.selectedProfileId = profileId;
@@ -677,6 +692,7 @@ async function switchProfile(profileId: string, profileName: string): Promise<vo
     setFlash("error", error instanceof Error ? error.message : String(error));
   } finally {
     state.busy = false;
+    state.busyDialog = null;
     render();
   }
 }
@@ -873,7 +889,7 @@ async function fetchNetworkProfiles(): Promise<void> {
   state.networkLoading = true;
   render();
   try {
-    const res = await fetch(NETWORK_PROFILES_API);
+    const res = await fetch(NETWORK_PROFILES_API, NETWORK_FETCH_OPTIONS);
     if (!res.ok) throw new Error("加载网络共享配置失败");
     state.networkProfiles = await res.json();
   } catch (error) {
@@ -885,7 +901,7 @@ async function fetchNetworkProfiles(): Promise<void> {
 }
 
 async function fetchNetworkProfileDocument(networkProfileId: string): Promise<ProfileDocument> {
-  const res = await fetch(`${NETWORK_PROFILES_API}/${networkProfileId}`);
+  const res = await fetch(`${NETWORK_PROFILES_API}/${networkProfileId}`, NETWORK_FETCH_OPTIONS);
   if (!res.ok) {
     throw new Error("获取网络配置详情失败");
   }
@@ -896,14 +912,20 @@ async function fetchNetworkProfileDocument(networkProfileId: string): Promise<Pr
   let configToml = "";
 
   if (profileData.files?.includes("auth.json")) {
-    const authRes = await fetch(`${NETWORK_PROFILES_API}/${networkProfileId}/auth.json`);
+    const authRes = await fetch(
+      `${NETWORK_PROFILES_API}/${networkProfileId}/auth.json`,
+      NETWORK_FETCH_OPTIONS,
+    );
     if (authRes.ok) {
       authJson = await authRes.text();
     }
   }
 
   if (profileData.files?.includes("config.toml")) {
-    const configRes = await fetch(`${NETWORK_PROFILES_API}/${networkProfileId}/config.toml`);
+    const configRes = await fetch(
+      `${NETWORK_PROFILES_API}/${networkProfileId}/config.toml`,
+      NETWORK_FETCH_OPTIONS,
+    );
     if (configRes.ok) {
       configToml = await configRes.text();
     }
@@ -1453,14 +1475,20 @@ function totalTimeRepairCandidates(report: SessionRecoveryReport): number {
 function formatSessionRecoveryFlash(report: SessionRecoveryReport): string {
   const safeCandidates = totalSafeRepairCandidates(report);
   const timeCandidates = totalTimeRepairCandidates(report);
+  const providerMismatch =
+    report.repairCandidates.appDefaultModelProviderMismatch ?? 0;
   const outsideRecent =
     report.samples.savedRootsWithChatsOutsideRecentWindow.length;
 
-  if (safeCandidates === 0 && timeCandidates === 0) {
+  if (safeCandidates === 0 && timeCandidates === 0 && providerMismatch === 0) {
     if (outsideRecent > 0) {
       return `诊断完成：未发现真实索引损坏，但有 ${outsideRecent} 个旧项目落在 recent 窗口之外。`;
     }
     return "诊断完成：未发现需要修复的会话索引问题。";
+  }
+
+  if (providerMismatch > 0) {
+    return `诊断发现 ${providerMismatch} 条活跃会话的 model provider 与当前默认 provider 不一致。切换 profile 时会执行受控 provider 修复。`;
   }
 
   return `诊断完成：安全修复候选 ${safeCandidates} 项，时间修复候选 ${timeCandidates} 项。`;
@@ -1596,6 +1624,33 @@ function renderFlash(): string {
   return `
     <aside class="flash flash-${state.flash.kind}">
       <span>${escapeHtml(state.flash.text)}</span>
+    </aside>
+  `;
+}
+
+function renderBusyDialog(): string {
+  if (!state.busyDialog) {
+    return "";
+  }
+
+  return `
+    <aside
+      class="busy-dialog-backdrop"
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+      data-role="profile-switch-busy-dialog"
+    >
+      <div class="busy-dialog">
+        <div class="busy-dialog-spinner" aria-hidden="true"></div>
+        <div class="busy-dialog-copy">
+          <h2>${escapeHtml(state.busyDialog.title)}</h2>
+          <p>${escapeHtml(state.busyDialog.message)}</p>
+          <div class="busy-dialog-progress" aria-hidden="true">
+            <span></span>
+          </div>
+        </div>
+      </div>
     </aside>
   `;
 }
@@ -2128,6 +2183,7 @@ function render(): void {
       ${renderPlatformTabs()}
       ${content}
     </main>
+    ${renderBusyDialog()}
   `;
 
   bindEvents();
