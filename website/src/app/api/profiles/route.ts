@@ -12,8 +12,13 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type",
 };
 
+const noStoreHeaders = {
+  ...corsHeaders,
+  "Cache-Control": "private, no-cache, no-store, max-age=0, must-revalidate",
+};
+
 export async function OPTIONS() {
-  return NextResponse.json({}, { headers: corsHeaders });
+  return NextResponse.json({}, { headers: noStoreHeaders });
 }
 
 // 确保目录和文件存在
@@ -33,7 +38,7 @@ async function ensureDataFiles() {
 export async function GET() {
   await ensureDataFiles();
   const data = await fs.readFile(profilesFile, "utf-8");
-  return NextResponse.json(JSON.parse(data), { headers: corsHeaders });
+  return NextResponse.json(JSON.parse(data), { headers: noStoreHeaders });
 }
 
 export async function POST(req: NextRequest) {
@@ -46,7 +51,7 @@ export async function POST(req: NextRequest) {
     const file2 = formData.get("file2") as File | null;
 
     if (!name || !file1 || !file2) {
-      return NextResponse.json({ error: "Missing required fields or files" }, { status: 400, headers: corsHeaders });
+      return NextResponse.json({ error: "Missing required fields or files" }, { status: 400, headers: noStoreHeaders });
     }
 
     const id = Date.now().toString();
@@ -73,9 +78,9 @@ export async function POST(req: NextRequest) {
     
     await fs.writeFile(profilesFile, JSON.stringify(existingProfiles, null, 2));
 
-    return NextResponse.json(newProfile, { status: 201, headers: corsHeaders });
+    return NextResponse.json(newProfile, { status: 201, headers: noStoreHeaders });
   } catch (error) {
     console.error("Upload Error:", error);
-    return NextResponse.json({ error: "Internal Server Error" }, { status: 500, headers: corsHeaders });
+    return NextResponse.json({ error: "Internal Server Error" }, { status: 500, headers: noStoreHeaders });
   }
 }

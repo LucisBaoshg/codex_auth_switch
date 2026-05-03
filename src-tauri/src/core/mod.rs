@@ -51,6 +51,8 @@ pub struct CodexUsageSnapshot {
     pub secondary: Option<CodexUsageWindow>,
     pub credits: Option<CodexUsageCredits>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,17 +69,53 @@ pub struct ThirdPartyLatencySnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ThirdPartyUsageSnapshot {
+    pub provider: Option<String>,
+    pub remaining: Option<String>,
+    pub unit: Option<String>,
+    #[serde(default)]
+    pub daily: Option<ThirdPartyUsageQuotaSnapshot>,
+    #[serde(default)]
+    pub weekly: Option<ThirdPartyUsageQuotaSnapshot>,
+    pub updated_at: DateTime<Utc>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThirdPartyUsageQuotaSnapshot {
+    pub used: Option<String>,
+    pub total: Option<String>,
+    pub remaining: Option<String>,
+    pub used_percent: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProfileSummary {
     pub id: String,
     pub name: String,
     pub notes: String,
     pub auth_type_label: String,
+    #[serde(default)]
+    pub model_provider_id: Option<String>,
+    #[serde(default)]
+    pub model_provider_api_key_id: Option<String>,
+    #[serde(default)]
+    pub model_provider_key: Option<String>,
+    #[serde(default)]
+    pub model_provider_name: Option<String>,
+    #[serde(default)]
+    pub model_provider_base_url: Option<String>,
+    #[serde(default)]
+    pub model_provider_wire_api: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub auth_hash: String,
     pub config_hash: String,
     pub codex_usage: Option<CodexUsageSnapshot>,
     pub third_party_latency: Option<ThirdPartyLatencySnapshot>,
+    pub third_party_usage: Option<ThirdPartyUsageSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +125,18 @@ pub struct ProfileDocument {
     pub name: String,
     pub notes: String,
     pub auth_type_label: String,
+    #[serde(default)]
+    pub model_provider_id: Option<String>,
+    #[serde(default)]
+    pub model_provider_api_key_id: Option<String>,
+    #[serde(default)]
+    pub model_provider_key: Option<String>,
+    #[serde(default)]
+    pub model_provider_name: Option<String>,
+    #[serde(default)]
+    pub model_provider_base_url: Option<String>,
+    #[serde(default)]
+    pub model_provider_wire_api: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub auth_json: String,
@@ -268,6 +318,45 @@ pub struct RemoteSyncResult {
     pub profiles: Vec<ProfileSummary>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelProviderApiKeyRecord {
+    pub id: String,
+    pub name: String,
+    pub api_key: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelProviderRecord {
+    pub id: String,
+    #[serde(default)]
+    pub model_provider_key: Option<String>,
+    pub name: String,
+    pub base_url: String,
+    pub wire_api: String,
+    #[serde(default)]
+    pub api_keys: Vec<ModelProviderApiKeyRecord>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelProviderSummary {
+    pub id: String,
+    #[serde(default)]
+    pub model_provider_key: Option<String>,
+    pub name: String,
+    pub base_url: String,
+    pub wire_api: String,
+    pub api_key_count: usize,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct MirrorLatestRelease {
     app_id: String,
@@ -336,6 +425,18 @@ struct ProfileMetadata {
     pub remote_profile_id: Option<String>,
     #[serde(default = "unknown_auth_type_label")]
     pub auth_type_label: String,
+    #[serde(default)]
+    pub model_provider_id: Option<String>,
+    #[serde(default)]
+    pub model_provider_api_key_id: Option<String>,
+    #[serde(default)]
+    pub model_provider_key: Option<String>,
+    #[serde(default)]
+    pub model_provider_name: Option<String>,
+    #[serde(default)]
+    pub model_provider_base_url: Option<String>,
+    #[serde(default)]
+    pub model_provider_wire_api: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub auth_hash: String,
@@ -344,6 +445,8 @@ struct ProfileMetadata {
     pub codex_usage: Option<CodexUsageSnapshot>,
     #[serde(default)]
     pub third_party_latency: Option<ThirdPartyLatencySnapshot>,
+    #[serde(default)]
+    pub third_party_usage: Option<ThirdPartyUsageSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -405,10 +508,22 @@ struct SessionProviderRepairCandidate {
 
 #[derive(Debug)]
 struct ThirdPartyProbeTarget {
+    provider_name: String,
     api_key: String,
     base_url: String,
     model: String,
     wire_api: String,
+}
+
+#[derive(Debug, Clone)]
+struct ThirdPartyProviderDescriptor {
+    provider_id: String,
+    api_key_id: String,
+    provider_key: String,
+    provider_name: String,
+    base_url: String,
+    wire_api: String,
+    api_key: String,
 }
 
 #[derive(Debug)]
@@ -514,6 +629,10 @@ impl ProfileManager {
         Ok(profiles)
     }
 
+    pub fn list_model_providers(&self) -> Result<Vec<ModelProviderRecord>, AppError> {
+        self.read_model_provider_store()
+    }
+
     pub fn import_profile(&self, input: ProfileInput) -> Result<ProfileSummary, AppError> {
         let name = input.name.trim();
         if name.is_empty() {
@@ -534,6 +653,11 @@ impl ProfileManager {
 
         fs::write(profile_dir.join("auth.json"), input.auth_json)?;
         fs::write(profile_dir.join("config.toml"), &normalized_config)?;
+        self.register_model_provider_from_profile(
+            &fs::read_to_string(profile_dir.join("auth.json"))?,
+            &fs::read_to_string(profile_dir.join("config.toml"))?,
+            name,
+        )?;
 
         let metadata = self.compose_profile_metadata(
             profile_id,
@@ -544,6 +668,7 @@ impl ProfileManager {
             now,
             &fs::read_to_string(profile_dir.join("auth.json"))?,
             &fs::read_to_string(profile_dir.join("config.toml"))?,
+            None,
             None,
             None,
         )?;
@@ -624,6 +749,12 @@ impl ProfileManager {
             name: metadata.name,
             notes: metadata.notes,
             auth_type_label: metadata.auth_type_label,
+            model_provider_id: metadata.model_provider_id,
+            model_provider_api_key_id: metadata.model_provider_api_key_id,
+            model_provider_key: metadata.model_provider_key,
+            model_provider_name: metadata.model_provider_name,
+            model_provider_base_url: metadata.model_provider_base_url,
+            model_provider_wire_api: metadata.model_provider_wire_api,
             created_at: metadata.created_at,
             updated_at: metadata.updated_at,
             auth_json,
@@ -669,9 +800,17 @@ impl ProfileManager {
         } else {
             None
         };
+        let preserved_third_party_usage = if existing_metadata.auth_hash == next_auth_hash
+            && existing_metadata.config_hash == next_config_hash
+        {
+            existing_metadata.third_party_usage.clone()
+        } else {
+            None
+        };
 
         fs::write(profile_dir.join("auth.json"), &input.auth_json)?;
         fs::write(profile_dir.join("config.toml"), &normalized_config)?;
+        self.register_model_provider_from_profile(&input.auth_json, &normalized_config, name)?;
 
         let metadata = self.compose_profile_metadata(
             existing_metadata.id,
@@ -684,6 +823,7 @@ impl ProfileManager {
             &fs::read_to_string(profile_dir.join("config.toml"))?,
             preserved_codex_usage,
             preserved_third_party_latency,
+            preserved_third_party_usage,
         )?;
 
         self.write_profile_metadata(&profile_dir, &metadata)?;
@@ -1674,6 +1814,21 @@ impl ProfileManager {
         &self,
         profile_id: &str,
     ) -> Result<ProfileSummary, AppError> {
+        match self.refresh_profile_codex_usage_attempt(profile_id) {
+            Ok(summary) => Ok(summary),
+            Err(error) => {
+                if self.state.codex_usage_api_enabled {
+                    let _ = self.record_codex_usage_failure(profile_id, error.to_string());
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn refresh_profile_codex_usage_attempt(
+        &self,
+        profile_id: &str,
+    ) -> Result<ProfileSummary, AppError> {
         let profile_dir = self.profile_dir(profile_id)?;
         let source = self.resolve_codex_usage_auth_source(profile_id)?;
         if !is_official_oauth_auth(&source.auth_json)? {
@@ -1707,6 +1862,22 @@ impl ProfileManager {
         Ok(ProfileSummary::from(metadata))
     }
 
+    fn record_codex_usage_failure(
+        &self,
+        profile_id: &str,
+        error: String,
+    ) -> Result<ProfileSummary, AppError> {
+        let profile_dir = self.profile_dir(profile_id)?;
+        let mut metadata = self.read_profile_metadata(&profile_dir)?;
+        if metadata.auth_type_label != "官方 OAuth" {
+            return Ok(ProfileSummary::from(metadata));
+        }
+
+        metadata.codex_usage = Some(codex_usage_failure_snapshot(error));
+        self.write_profile_metadata(&profile_dir, &metadata)?;
+        Ok(ProfileSummary::from(metadata))
+    }
+
     pub fn refresh_profile_latency_probe(
         &self,
         profile_id: &str,
@@ -1728,13 +1899,45 @@ impl ProfileManager {
         Ok(ProfileSummary::from(metadata))
     }
 
+    pub fn refresh_profile_third_party_usage(
+        &self,
+        profile_id: &str,
+    ) -> Result<ProfileSummary, AppError> {
+        let profile_dir = self.profile_dir(profile_id)?;
+        let auth_json = fs::read_to_string(profile_dir.join("auth.json"))?;
+        let config_toml = fs::read_to_string(profile_dir.join("config.toml"))?;
+        let mut metadata = self.read_profile_metadata(&profile_dir)?;
+
+        if metadata.auth_type_label != "第三方 API" {
+            return Err(AppError::Message(
+                "Third-party usage query is only available for 第三方 API profiles.".into(),
+            ));
+        }
+
+        metadata.third_party_usage =
+            Some(fetch_third_party_usage_snapshot(&auth_json, &config_toml));
+        self.write_profile_metadata(&profile_dir, &metadata)?;
+        Ok(ProfileSummary::from(metadata))
+    }
+
     pub fn refresh_all_codex_usage(&self) -> Result<Vec<ProfileSummary>, AppError> {
+        if !self.state.codex_usage_api_enabled {
+            return Err(AppError::Message(
+                "Codex usage query is disabled. Run the explicit enable action first.".into(),
+            ));
+        }
+
         let mut refreshed = Vec::new();
         for profile in self.list_profiles()? {
             if profile.auth_type_label != "官方 OAuth" {
                 continue;
             }
-            refreshed.push(self.refresh_profile_codex_usage(&profile.id)?);
+            match self.refresh_profile_codex_usage_attempt(&profile.id) {
+                Ok(summary) => refreshed.push(summary),
+                Err(error) => {
+                    refreshed.push(self.record_codex_usage_failure(&profile.id, error.to_string())?)
+                }
+            }
         }
         Ok(refreshed)
     }
@@ -1830,6 +2033,126 @@ impl ProfileManager {
         Ok(())
     }
 
+    fn model_providers_path(&self) -> PathBuf {
+        self.app_data_dir.join("codex_model_providers.json")
+    }
+
+    fn read_model_provider_store(&self) -> Result<Vec<ModelProviderRecord>, AppError> {
+        let path = self.model_providers_path();
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let content = fs::read_to_string(path)?;
+        if content.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut providers = serde_json::from_str::<Vec<ModelProviderRecord>>(&content)?;
+        providers.retain(|provider| {
+            !provider.id.trim().is_empty()
+                && !provider.name.trim().is_empty()
+                && !provider.base_url.trim().is_empty()
+        });
+        providers.sort_by(|left, right| {
+            left.name
+                .to_lowercase()
+                .cmp(&right.name.to_lowercase())
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(providers)
+    }
+
+    fn write_model_provider_store(
+        &self,
+        providers: &[ModelProviderRecord],
+    ) -> Result<(), AppError> {
+        fs::create_dir_all(&self.app_data_dir)?;
+        fs::write(
+            self.model_providers_path(),
+            serde_json::to_string_pretty(providers)?,
+        )?;
+        Ok(())
+    }
+
+    fn register_model_provider_from_profile(
+        &self,
+        auth_json: &str,
+        config_toml: &str,
+        profile_name: &str,
+    ) -> Result<Option<ModelProviderRecord>, AppError> {
+        let Some(descriptor) = resolve_third_party_provider_descriptor(auth_json, config_toml)?
+        else {
+            return Ok(None);
+        };
+
+        let mut providers = self.read_model_provider_store()?;
+        let provider_id = descriptor.provider_id.clone();
+        let now = Utc::now();
+        let key_id = descriptor.api_key_id.clone();
+        let key_name = if profile_name.trim().is_empty() {
+            descriptor.provider_key.clone()
+        } else {
+            profile_name.trim().to_string()
+        };
+
+        let position = providers.iter().position(|provider| {
+            provider.id == provider_id
+                || normalize_base_url_for_compare(&provider.base_url)
+                    == normalize_base_url_for_compare(&descriptor.base_url)
+        });
+
+        let index = match position {
+            Some(index) => {
+                let provider = &mut providers[index];
+                provider.id = provider_id;
+                provider.model_provider_key = Some(descriptor.provider_key.clone());
+                provider.name = descriptor.provider_name.clone();
+                provider.base_url = descriptor.base_url.clone();
+                provider.wire_api = descriptor.wire_api.clone();
+                provider.updated_at = now;
+                index
+            }
+            None => {
+                providers.push(ModelProviderRecord {
+                    id: provider_id,
+                    model_provider_key: Some(descriptor.provider_key.clone()),
+                    name: descriptor.provider_name.clone(),
+                    base_url: descriptor.base_url.clone(),
+                    wire_api: descriptor.wire_api.clone(),
+                    api_keys: Vec::new(),
+                    created_at: now,
+                    updated_at: now,
+                });
+                providers.len() - 1
+            }
+        };
+
+        let provider = &mut providers[index];
+        match provider
+            .api_keys
+            .iter_mut()
+            .find(|api_key| api_key.api_key.trim() == descriptor.api_key)
+        {
+            Some(existing) => {
+                existing.id = key_id;
+                existing.name = key_name;
+                existing.updated_at = now;
+            }
+            None => provider.api_keys.push(ModelProviderApiKeyRecord {
+                id: key_id,
+                name: key_name,
+                api_key: descriptor.api_key,
+                created_at: now,
+                updated_at: now,
+            }),
+        }
+
+        let provider = provider.clone();
+        self.write_model_provider_store(&providers)?;
+        Ok(Some(provider))
+    }
+
     fn compose_profile_metadata(
         &self,
         id: String,
@@ -1842,19 +2165,28 @@ impl ProfileManager {
         config_toml: &str,
         codex_usage: Option<CodexUsageSnapshot>,
         third_party_latency: Option<ThirdPartyLatencySnapshot>,
+        third_party_usage: Option<ThirdPartyUsageSnapshot>,
     ) -> Result<ProfileMetadata, AppError> {
+        let provider = resolve_third_party_provider_descriptor(auth_json, config_toml)?;
         Ok(ProfileMetadata {
             id,
             name,
             notes,
             remote_profile_id,
             auth_type_label: detect_auth_type_label(auth_json, config_toml)?,
+            model_provider_id: provider.as_ref().map(|provider| provider.provider_id.clone()),
+            model_provider_api_key_id: provider.as_ref().map(|provider| provider.api_key_id.clone()),
+            model_provider_key: provider.as_ref().map(|provider| provider.provider_key.clone()),
+            model_provider_name: provider.as_ref().map(|provider| provider.provider_name.clone()),
+            model_provider_base_url: provider.as_ref().map(|provider| provider.base_url.clone()),
+            model_provider_wire_api: provider.as_ref().map(|provider| provider.wire_api.clone()),
             created_at,
             updated_at,
             auth_hash: auth_match_hash(auth_json)?,
             config_hash: managed_config_hash(auth_json, config_toml)?,
             codex_usage,
             third_party_latency,
+            third_party_usage,
         })
     }
 
@@ -1882,9 +2214,21 @@ impl ProfileManager {
         } else {
             None
         };
+        let preserved_third_party_usage = if existing_metadata.auth_hash == next_auth_hash
+            && existing_metadata.config_hash == next_config_hash
+        {
+            existing_metadata.third_party_usage.clone()
+        } else {
+            None
+        };
 
         fs::write(profile_dir.join("auth.json"), auth_json)?;
         fs::write(profile_dir.join("config.toml"), &normalized_config)?;
+        self.register_model_provider_from_profile(
+            auth_json,
+            &normalized_config,
+            &existing_metadata.name,
+        )?;
 
         let metadata = self.compose_profile_metadata(
             existing_metadata.id,
@@ -1897,6 +2241,7 @@ impl ProfileManager {
             &normalized_config,
             preserved_codex_usage,
             preserved_third_party_latency,
+            preserved_third_party_usage,
         )?;
 
         self.write_profile_metadata(&profile_dir, &metadata)
@@ -2112,12 +2457,34 @@ impl From<ProfileMetadata> for ProfileSummary {
             name: value.name,
             notes: value.notes,
             auth_type_label: value.auth_type_label,
+            model_provider_id: value.model_provider_id,
+            model_provider_api_key_id: value.model_provider_api_key_id,
+            model_provider_key: value.model_provider_key,
+            model_provider_name: value.model_provider_name,
+            model_provider_base_url: value.model_provider_base_url,
+            model_provider_wire_api: value.model_provider_wire_api,
             created_at: value.created_at,
             updated_at: value.updated_at,
             auth_hash: value.auth_hash,
             config_hash: value.config_hash,
             codex_usage: value.codex_usage,
             third_party_latency: value.third_party_latency,
+            third_party_usage: value.third_party_usage,
+        }
+    }
+}
+
+impl From<ModelProviderRecord> for ModelProviderSummary {
+    fn from(value: ModelProviderRecord) -> Self {
+        Self {
+            id: value.id,
+            model_provider_key: value.model_provider_key,
+            name: value.name,
+            base_url: value.base_url,
+            wire_api: value.wire_api,
+            api_key_count: value.api_keys.len(),
+            created_at: value.created_at,
+            updated_at: value.updated_at,
         }
     }
 }
@@ -2685,6 +3052,102 @@ fn model_provider_from_config_toml(config_toml: &str) -> Result<String, AppError
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("openai")
         .to_string())
+}
+
+fn resolve_third_party_provider_descriptor(
+    auth_json: &str,
+    config_toml: &str,
+) -> Result<Option<ThirdPartyProviderDescriptor>, AppError> {
+    if is_official_oauth_auth(auth_json)? {
+        return Ok(None);
+    }
+
+    let auth = serde_json::from_str::<serde_json::Value>(auth_json)
+        .map_err(|error| AppError::InvalidAuthJson(error.to_string()))?;
+    let Some(api_key) = auth
+        .get("OPENAI_API_KEY")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    let config = parse_toml_table(config_toml)?;
+    let Some(providers) = config.get("model_providers").and_then(|value| value.as_table()) else {
+        return Ok(None);
+    };
+    let Some(provider_key) = config
+        .get("model_provider")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| providers.keys().next().cloned())
+    else {
+        return Ok(None);
+    };
+    let Some(provider) = providers
+        .get(&provider_key)
+        .and_then(|value| value.as_table())
+    else {
+        return Ok(None);
+    };
+
+    let Some(base_url) = provider
+        .get("base_url")
+        .and_then(|value| value.as_str())
+        .map(normalize_base_url_for_store)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    let provider_name = provider
+        .get("name")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| provider_key.clone());
+    let wire_api = provider
+        .get("wire_api")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "responses".into());
+
+    let provider_id = stable_model_provider_id(&provider_key, &base_url);
+    let api_key_id = stable_model_provider_key_id(&api_key);
+
+    Ok(Some(ThirdPartyProviderDescriptor {
+        provider_id,
+        api_key_id,
+        provider_key,
+        provider_name,
+        base_url,
+        wire_api,
+        api_key,
+    }))
+}
+
+fn normalize_base_url_for_store(value: &str) -> String {
+    value.trim().trim_end_matches('/').to_string()
+}
+
+fn normalize_base_url_for_compare(value: &str) -> String {
+    normalize_base_url_for_store(value).to_ascii_lowercase()
+}
+
+fn stable_model_provider_id(provider_key: &str, base_url: &str) -> String {
+    let seed = format!(
+        "{}\n{}",
+        provider_key.trim().to_ascii_lowercase(),
+        normalize_base_url_for_compare(base_url)
+    );
+    format!("cmp_{}", &sha256_bytes(seed.as_bytes())[..16])
+}
+
+fn stable_model_provider_key_id(api_key: &str) -> String {
+    format!("cmk_{}", &sha256_bytes(api_key.trim().as_bytes())[..16])
 }
 
 fn update_rollout_session_meta_provider(
@@ -3349,12 +3812,14 @@ const ALL_PROFILE_SCALAR_KEYS: &[&str] = &[
 ];
 const ALL_PROFILE_TABLE_KEYS: &[&str] = &["model_providers"];
 const DEFAULT_CODEX_USAGE_ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/usage";
+const DEFAULT_YLSCODE_USAGE_ENDPOINT: &str = "https://code.ylsagi.com/codex/info";
 const REFRESH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR: &str = "CODEX_REFRESH_TOKEN_URL_OVERRIDE";
 const REFRESH_TOKEN_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const DEFAULT_HTTP_CONNECT_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_CODEX_USAGE_TIMEOUT_MS: u64 = 15_000;
 const DEFAULT_LATENCY_PROBE_TIMEOUT_MS: u64 = 12_000;
+const DEFAULT_THIRD_PARTY_USAGE_TIMEOUT_MS: u64 = 15_000;
 
 #[derive(Debug, Deserialize)]
 struct OAuthRefreshResponse {
@@ -3662,6 +4127,14 @@ fn codex_usage_endpoint() -> String {
         .unwrap_or_else(|| DEFAULT_CODEX_USAGE_ENDPOINT.to_string())
 }
 
+fn ylscode_usage_endpoint() -> String {
+    std::env::var("CODEX_AUTH_SWITCH_YLSCODE_USAGE_ENDPOINT")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_YLSCODE_USAGE_ENDPOINT.to_string())
+}
+
 fn refresh_token_endpoint() -> String {
     std::env::var(REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR)
         .ok()
@@ -3697,6 +4170,13 @@ fn latency_probe_timeout() -> Duration {
     duration_from_env_ms(
         "CODEX_AUTH_SWITCH_LATENCY_PROBE_TIMEOUT_MS",
         DEFAULT_LATENCY_PROBE_TIMEOUT_MS,
+    )
+}
+
+fn third_party_usage_timeout() -> Duration {
+    duration_from_env_ms(
+        "CODEX_AUTH_SWITCH_THIRD_PARTY_USAGE_TIMEOUT_MS",
+        DEFAULT_THIRD_PARTY_USAGE_TIMEOUT_MS,
     )
 }
 
@@ -3863,7 +4343,20 @@ fn parse_codex_usage_response(body: &str, auth_json: &str) -> Result<CodexUsageS
         secondary,
         credits: root.get("credits").and_then(parse_codex_usage_credits),
         updated_at: Utc::now(),
+        error: None,
     })
+}
+
+fn codex_usage_failure_snapshot(error: String) -> CodexUsageSnapshot {
+    CodexUsageSnapshot {
+        source: "api".into(),
+        plan_type: None,
+        primary: None,
+        secondary: None,
+        credits: None,
+        updated_at: Utc::now(),
+        error: Some(error),
+    }
 }
 
 fn parse_codex_usage_window(value: &serde_json::Value) -> Option<CodexUsageWindow> {
@@ -3916,6 +4409,157 @@ fn ceil_minutes(seconds: i64) -> Option<i64> {
         return None;
     }
     Some((seconds + 59) / 60)
+}
+
+fn fetch_third_party_usage_snapshot(auth_json: &str, config_toml: &str) -> ThirdPartyUsageSnapshot {
+    match resolve_third_party_probe_target(auth_json, config_toml) {
+        Ok(target) if target.provider_name.eq_ignore_ascii_case("ylscode") => {
+            fetch_ylscode_usage_snapshot(&target)
+        }
+        Ok(target) => third_party_usage_failure(
+            Some(target.provider_name),
+            "第三方 API 用量查询目前仅支持 ylscode provider。".into(),
+        ),
+        Err(error) => third_party_usage_failure(None, error.to_string()),
+    }
+}
+
+fn fetch_ylscode_usage_snapshot(target: &ThirdPartyProbeTarget) -> ThirdPartyUsageSnapshot {
+    let timeout = third_party_usage_timeout();
+    let response = build_http_agent(timeout)
+        .get(&ylscode_usage_endpoint())
+        .set("Authorization", &format!("Bearer {}", target.api_key))
+        .set("User-Agent", "cc-switch/1.0")
+        .call();
+
+    match response {
+        Ok(response) => match response.into_string() {
+            Ok(body) => parse_ylscode_usage_response(&body, &target.provider_name),
+            Err(error) => third_party_usage_failure(
+                Some(target.provider_name.clone()),
+                format!("读取 ylscode 用量响应失败：{error}"),
+            ),
+        },
+        Err(ureq::Error::Status(code, response)) => {
+            let body = response.into_string().unwrap_or_default();
+            third_party_usage_failure(
+                Some(target.provider_name.clone()),
+                format!(
+                    "ylscode 用量接口返回 HTTP {}{}",
+                    code,
+                    if body.trim().is_empty() {
+                        String::new()
+                    } else {
+                        format!("：{}", truncate_probe_error(&body))
+                    }
+                ),
+            )
+        }
+        Err(error) => {
+            let message = if is_ureq_timeout(&error) {
+                format_timeout_error("Failed to fetch ylscode usage", timeout).to_string()
+            } else {
+                format!("请求 ylscode 用量接口失败：{error}")
+            };
+            third_party_usage_failure(Some(target.provider_name.clone()), message)
+        }
+    }
+}
+
+fn parse_ylscode_usage_response(body: &str, provider: &str) -> ThirdPartyUsageSnapshot {
+    match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(root) => {
+            let daily = root
+                .pointer("/state/userPackgeUsage")
+                .and_then(parse_ylscode_usage_quota);
+            let weekly = root
+                .pointer("/state/userPackgeUsage_week")
+                .and_then(parse_ylscode_usage_quota);
+            let remaining = daily
+                .as_ref()
+                .and_then(|quota| quota.remaining.clone())
+                .or_else(|| {
+                    root.pointer("/state/userPackgeUsage/remaining_quota")
+                        .and_then(json_scalar_to_string)
+                });
+            match remaining {
+                Some(remaining) => ThirdPartyUsageSnapshot {
+                    provider: Some(provider.to_string()),
+                    remaining: Some(remaining),
+                    unit: Some("USD".into()),
+                    daily,
+                    weekly,
+                    updated_at: Utc::now(),
+                    error: None,
+                },
+                None => third_party_usage_failure(
+                    Some(provider.to_string()),
+                    "ylscode 用量响应缺少 state.userPackgeUsage.remaining_quota。".into(),
+                ),
+            }
+        }
+        Err(error) => third_party_usage_failure(
+            Some(provider.to_string()),
+            format!("解析 ylscode 用量响应失败：{error}"),
+        ),
+    }
+}
+
+fn parse_ylscode_usage_quota(value: &serde_json::Value) -> Option<ThirdPartyUsageQuotaSnapshot> {
+    if !value.is_object() {
+        return None;
+    }
+
+    let used = value.get("total_cost").and_then(json_scalar_to_string);
+    let total = value.get("total_quota").and_then(json_scalar_to_string);
+    let remaining = value.get("remaining_quota").and_then(json_scalar_to_string);
+    if used.is_none() && total.is_none() && remaining.is_none() {
+        return None;
+    }
+
+    let used_percent = value
+        .get("used_percentage")
+        .and_then(parse_percentage_value)
+        .or_else(|| {
+            let used = value.get("total_cost").and_then(json_scalar_to_f64)?;
+            let total = value.get("total_quota").and_then(json_scalar_to_f64)?;
+            if total <= 0.0 {
+                return None;
+            }
+            Some((used / total) * 100.0)
+        });
+
+    Some(ThirdPartyUsageQuotaSnapshot {
+        used,
+        total,
+        remaining,
+        used_percent,
+    })
+}
+
+fn json_scalar_to_string(value: &serde_json::Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        return Some(text.trim().to_string()).filter(|text| !text.is_empty());
+    }
+    if let Some(number) = value.as_i64() {
+        return Some(number.to_string());
+    }
+    if let Some(number) = value.as_u64() {
+        return Some(number.to_string());
+    }
+    value.as_f64().map(|number| number.to_string())
+}
+
+fn json_scalar_to_f64(value: &serde_json::Value) -> Option<f64> {
+    value.as_f64().or_else(|| {
+        value
+            .as_str()
+            .and_then(|text| text.trim().trim_end_matches('%').parse::<f64>().ok())
+    })
+}
+
+fn parse_percentage_value(value: &serde_json::Value) -> Option<f64> {
+    json_scalar_to_f64(value)
 }
 
 fn fetch_third_party_latency_snapshot(
@@ -4004,6 +4648,7 @@ fn resolve_third_party_probe_target(
         .unwrap_or_else(|| "responses".into());
 
     Ok(ThirdPartyProbeTarget {
+        provider_name,
         api_key,
         base_url,
         model,
@@ -4240,6 +4885,18 @@ fn latency_probe_failure(
         ttft_ms: None,
         total_ms,
         status_code,
+        updated_at: Utc::now(),
+        error: Some(error),
+    }
+}
+
+fn third_party_usage_failure(provider: Option<String>, error: String) -> ThirdPartyUsageSnapshot {
+    ThirdPartyUsageSnapshot {
+        provider,
+        remaining: None,
+        unit: Some("USD".into()),
+        daily: None,
+        weekly: None,
         updated_at: Utc::now(),
         error: Some(error),
     }

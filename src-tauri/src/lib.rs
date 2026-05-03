@@ -8,8 +8,8 @@ use crate::antigravity::models::{
 use crate::core::{
     check_for_update, check_install_location as resolve_install_location,
     install_update as perform_install_update, restart_codex_app, AppSnapshot,
-    InstallLocationStatus, ProfileDocument, ProfileInput, ProfileManager, SessionRecoveryReport,
-    SessionRepairResult, UpdateCheckResult, UpdateInstallRequest,
+    InstallLocationStatus, ModelProviderSummary, ProfileDocument, ProfileInput, ProfileManager,
+    SessionRecoveryReport, SessionRepairResult, UpdateCheckResult, UpdateInstallRequest,
 };
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
@@ -53,6 +53,14 @@ where
 fn load_snapshot(app: AppHandle) -> Result<AppSnapshot, String> {
     let manager = manager_from_app(&app)?;
     manager.snapshot().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_model_providers(app: AppHandle) -> Result<Vec<ModelProviderSummary>, String> {
+    manager_from_app(&app)?
+        .list_model_providers()
+        .map(|providers| providers.into_iter().map(ModelProviderSummary::from).collect())
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -217,6 +225,20 @@ async fn refresh_profile_latency_probe(
 }
 
 #[tauri::command]
+async fn refresh_profile_third_party_usage(
+    app: AppHandle,
+    profile_id: String,
+) -> Result<AppSnapshot, String> {
+    run_blocking_manager_task(app, move |manager| {
+        manager
+            .refresh_profile_third_party_usage(&profile_id)
+            .map_err(|error| error.to_string())?;
+        manager.snapshot().map_err(|error| error.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
 async fn refresh_all_codex_usage(app: AppHandle) -> Result<AppSnapshot, String> {
     run_blocking_manager_task(app, move |manager| {
         manager
@@ -290,6 +312,7 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             load_snapshot,
+            list_model_providers,
             load_antigravity_snapshot,
             import_current_antigravity_profile,
             switch_antigravity_profile,
@@ -306,6 +329,7 @@ pub fn run() {
             set_codex_usage_api_enabled,
             refresh_profile_codex_usage,
             refresh_profile_latency_probe,
+            refresh_profile_third_party_usage,
             refresh_all_codex_usage,
             open_target_dir,
             restart_codex,

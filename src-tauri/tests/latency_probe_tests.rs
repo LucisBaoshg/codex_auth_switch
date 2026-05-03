@@ -1,4 +1,5 @@
 use codex_auth_switch_lib::core::{ProfileInput, ProfileManager};
+use serde_json::json;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -25,6 +26,22 @@ model_reasoning_effort = "medium"
 name = "OpenAI"
 base_url = "{base_url}"
 wire_api = "{wire_api}"
+requires_openai_auth = true
+"#
+    )
+}
+
+fn ylscode_config_toml(model: &str) -> String {
+    format!(
+        r#"model_provider = "ylscode"
+model = "{model}"
+review_model = "{model}"
+model_reasoning_effort = "medium"
+
+[model_providers.ylscode]
+name = "ylscode"
+base_url = "https://code.ylsagi.com/v1"
+wire_api = "responses"
 requires_openai_auth = true
 "#
     )
@@ -131,6 +148,13 @@ impl TestServer {
         );
     }
 
+    fn set_json(&self, path: &str, body: serde_json::Value) {
+        self.responses.lock().expect("lock responses").insert(
+            path.to_string(),
+            ("application/json".into(), body.to_string()),
+        );
+    }
+
     fn requests(&self) -> Vec<String> {
         self.requests.lock().expect("lock requests").clone()
     }
@@ -143,6 +167,78 @@ impl Drop for TestServer {
             let _ = handle.join();
         }
     }
+}
+
+#[test]
+fn refresh_profile_third_party_usage_fetches_ylscode_usage() {
+    let server = TestServer::start();
+    server.set_json(
+        "/codex/info",
+        json!({
+            "state": {
+                "package": {
+                    "weeklyQuota": 500
+                },
+                "userPackgeUsage_week": {
+                    "total_cost": 300.49,
+                    "total_quota": 500,
+                    "remaining_quota": 199.51,
+                    "used_percentage": "60%"
+                },
+                "userPackgeUsage": {
+                    "total_cost": 100.03,
+                    "total_quota": 100,
+                    "remaining_quota": -0.03,
+                    "used_percentage": "100%"
+                }
+            }
+        }),
+    );
+    std::env::set_var(
+        "CODEX_AUTH_SWITCH_YLSCODE_USAGE_ENDPOINT",
+        format!("{}/codex/info", server.base_url),
+    );
+
+    let (_app_dir, _target_dir, manager) = temp_manager();
+    let profile = manager
+        .import_profile(ProfileInput {
+            name: "ylscode profile".into(),
+            notes: "third-party usage".into(),
+            auth_json: api_key_auth_json("sk-ylscode"),
+            config_toml: ylscode_config_toml("gpt-5.4"),
+        })
+        .expect("import profile");
+
+    let refreshed = manager
+        .refresh_profile_third_party_usage(&profile.id)
+        .expect("refresh third-party usage");
+    std::env::remove_var("CODEX_AUTH_SWITCH_YLSCODE_USAGE_ENDPOINT");
+
+    let usage = refreshed
+        .third_party_usage
+        .expect("third-party usage snapshot");
+    assert_eq!(usage.provider.as_deref(), Some("ylscode"));
+    assert_eq!(usage.remaining.as_deref(), Some("-0.03"));
+    assert_eq!(usage.unit.as_deref(), Some("USD"));
+    let daily = usage.daily.expect("daily usage");
+    assert_eq!(daily.used.as_deref(), Some("100.03"));
+    assert_eq!(daily.total.as_deref(), Some("100"));
+    assert_eq!(daily.remaining.as_deref(), Some("-0.03"));
+    assert_eq!(daily.used_percent, Some(100.0));
+    let weekly = usage.weekly.expect("weekly usage");
+    assert_eq!(weekly.used.as_deref(), Some("300.49"));
+    assert_eq!(weekly.total.as_deref(), Some("500"));
+    assert_eq!(weekly.remaining.as_deref(), Some("199.51"));
+    assert_eq!(weekly.used_percent, Some(60.0));
+    assert!(usage.error.is_none());
+
+    let request = server
+        .requests()
+        .into_iter()
+        .find(|item| item.contains("GET /codex/info HTTP/1.1"))
+        .expect("ylscode usage request");
+    assert!(request.contains("Authorization: Bearer sk-ylscode"));
+    assert!(request.contains("User-Agent: cc-switch/1.0"));
 }
 
 #[test]

@@ -7,6 +7,10 @@
 - `auth.json`
 - `config.toml`
 
+## 文档参考
+
+- [OpenAI（OpenAI）Codex（Codex）配置参考记录](/Volumes/Acer/Dev/codex_auth_switch/docs/references/openai-codex-config-reference.md)
+
 ## 功能
 
 - 卡片方式展示所有 profile

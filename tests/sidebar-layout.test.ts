@@ -30,7 +30,14 @@ async function flushUi(): Promise<void> {
   await Promise.resolve();
 }
 
-test("renders a card-only profile gallery without a left sidebar", async () => {
+async function switchToGridLayout(): Promise<void> {
+  document
+    .querySelector<HTMLButtonElement>('[data-action="profile-layout-grid"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+}
+
+test("renders the default profile list without a left sidebar", async () => {
   await import("../src/main");
   await flushUi();
 
@@ -44,9 +51,10 @@ test("renders a card-only profile gallery without a left sidebar", async () => {
   expect(document.querySelector(".page-header")).toBeNull();
   expect(document.querySelector('[data-role="current-config-card"]')).toBeNull();
   expect(document.querySelector('[data-role="current-status-band"]')).toBeNull();
-  const gridChildren = Array.from(document.querySelectorAll(".card-grid > *"));
-  expect(gridChildren[0]?.getAttribute("data-role")).toBe("add-card");
-  expect(gridChildren[1]?.getAttribute("data-role")).toBe("profile-card");
+  expect(document.querySelector('[data-role="profile-list"]')).not.toBeNull();
+  expect(document.querySelector('[data-action="profile-layout-list"]')?.classList.contains("active")).toBe(true);
+  expect(document.querySelector('[data-role="profile-grid"]')).toBeNull();
+  expect(document.querySelector('[data-role="profile-row"][data-state="live"]')).not.toBeNull();
   expect(
     document.querySelector('[data-role="current-config-card"] [data-action="restart-codex"]'),
   ).toBeNull();
@@ -56,9 +64,376 @@ test("renders a card-only profile gallery without a left sidebar", async () => {
   expect(
     document.querySelector('[data-role="current-config-card"] [data-action="save-current-as-profile"]'),
   ).toBeNull();
+  expect(document.querySelectorAll("[data-role='profile-row']").length).toBeGreaterThan(0);
+  expect(document.querySelectorAll('[data-action="delete-profile"]')).toHaveLength(0);
+});
+
+test("keeps the default profile list concise with metric chips and quick probe actions", async () => {
+  await import("../src/main");
+  await flushUi();
+
+  const liveRow = document.querySelector('[data-role="profile-row"][data-state="live"]');
+
+  expect(liveRow).not.toBeNull();
+  expect(liveRow?.querySelectorAll('[data-role="profile-row-metric"]').length).toBeGreaterThanOrEqual(2);
+  expect(liveRow?.querySelector('[data-role="profile-row-summary"]')).toBeNull();
+  expect(liveRow?.querySelector('[data-role="profile-row-updated"]')).toBeNull();
+  expect(liveRow?.textContent).not.toContain("更新");
+  expect(liveRow?.querySelector('[data-action="refresh-third-party-usage"]')?.textContent).toContain("额度");
+  expect(liveRow?.querySelector('[data-action="refresh-third-party-latency"]')?.textContent).toContain("测速");
+  expect(liveRow?.querySelector('[data-action="view-profile-details"]')?.textContent).toContain("详情");
+  expect(liveRow?.querySelector('[data-action="open-profile-drawer"]')).toBeNull();
+  expect(liveRow?.querySelector('[data-action="delete-profile"]')).toBeNull();
+});
+
+test("shows only quota quick action for official profiles in the default list", async () => {
+  await import("../src/main");
+  await flushUi();
+
+  const officialRow = Array.from(document.querySelectorAll('[data-role="profile-row"]')).find((row) =>
+    row.textContent?.includes("官方 OAuth"),
+  );
+
+  expect(officialRow).not.toBeNull();
+  expect(officialRow?.querySelector('[data-action="refresh-codex-usage"]')?.textContent).toContain("额度");
+  expect(officialRow?.querySelector('[data-action="refresh-third-party-latency"]')).toBeNull();
+  expect(officialRow?.querySelector('[data-role="profile-row-updated"]')).toBeNull();
+});
+
+test("shows the third-party provider key as the profile badge", async () => {
+  const snapshot = {
+    targetDir: "/Users/example/.codex",
+    usingDefaultTargetDir: true,
+    targetExists: true,
+    targetAuthExists: true,
+    targetConfigExists: true,
+    targetUpdatedAt: "2026-03-25T00:00:00Z",
+    targetAuthTypeLabel: "第三方 API",
+    activeProfileId: "profile-2",
+    lastSelectedProfileId: "profile-2",
+    lastSwitchProfileId: "profile-2",
+    lastSwitchedAt: "2026-03-25T00:00:00Z",
+    codexUsageApiEnabled: false,
+    profiles: [
+      {
+        id: "profile-2",
+        name: "Unified API",
+        notes: "provider registry",
+        authTypeLabel: "第三方 API",
+        modelProviderKey: "ylscode",
+        createdAt: "2026-03-24T00:00:00Z",
+        updatedAt: "2026-03-24T13:24:00Z",
+        authHash: "auth-2",
+        configHash: "config-2",
+        codexUsage: null,
+        thirdPartyLatency: {
+          wireApi: "responses",
+          model: "gpt-5.4",
+          ttftMs: 1820,
+          totalMs: 4960,
+          statusCode: 200,
+          updatedAt: "2026-03-26T10:12:00+08:00",
+          error: null,
+        },
+        thirdPartyUsage: {
+          provider: "ylscode",
+          remaining: "12.34",
+          unit: "USD",
+          daily: null,
+          weekly: null,
+          updatedAt: "2026-03-26T10:20:00+08:00",
+          error: null,
+        },
+      },
+    ],
+  };
+
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "load_snapshot") {
+      return snapshot;
+    }
+    if (command === "get_profile_document") {
+      return {
+        id: "profile-2",
+        name: "Unified API",
+        notes: "provider registry",
+        authTypeLabel: "第三方 API",
+        modelProviderKey: "ylscode",
+        createdAt: "2026-03-24T00:00:00Z",
+        updatedAt: "2026-03-24T13:24:00Z",
+        authJson: '{"token":"test"}',
+        configToml: 'model_provider = "ylscode"\n',
+        loadedFromTarget: false,
+        hasTargetChanges: false,
+      };
+    }
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+
+  await import("../src/main");
+  await flushUi();
+
+  const row = document.querySelector('[data-role="profile-row"]');
+  expect(row?.textContent).toContain("ylscode");
+  expect(row?.textContent).not.toContain("第三方 API");
+});
+
+test("marks failed official usage refreshes in the list and detail page", async () => {
+  const snapshot = {
+    targetDir: "/Users/example/.codex",
+    usingDefaultTargetDir: true,
+    targetExists: true,
+    targetAuthExists: true,
+    targetConfigExists: true,
+    targetUpdatedAt: "2026-03-25T00:00:00Z",
+    targetAuthTypeLabel: "官方 OAuth",
+    activeProfileId: "profile-1",
+    lastSelectedProfileId: "profile-1",
+    lastSwitchProfileId: "profile-1",
+    lastSwitchedAt: "2026-03-25T00:00:00Z",
+    codexUsageApiEnabled: true,
+    profiles: [
+      {
+        id: "profile-1",
+        name: "Broken OAuth",
+        notes: "missing token",
+        authTypeLabel: "官方 OAuth",
+        createdAt: "2026-03-24T00:00:00Z",
+        updatedAt: "2026-03-24T14:19:00Z",
+        authHash: "auth-1",
+        configHash: "config-1",
+        codexUsage: {
+          source: "api",
+          planType: null,
+          primary: null,
+          secondary: null,
+          credits: null,
+          updatedAt: "2026-03-25T21:56:00+08:00",
+          error: "The selected profile does not contain a ChatGPT access token.",
+        },
+        thirdPartyLatency: null,
+        thirdPartyUsage: null,
+      },
+    ],
+  };
+
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "load_snapshot") {
+      return snapshot;
+    }
+    if (command === "get_profile_document") {
+      return {
+        id: "profile-1",
+        name: "Broken OAuth",
+        notes: "missing token",
+        authTypeLabel: "官方 OAuth",
+        createdAt: "2026-03-24T00:00:00Z",
+        updatedAt: "2026-03-24T14:19:00Z",
+        authJson: '{"auth_mode":"chatgpt"}',
+        configToml: 'model_provider = "openai"\n',
+        loadedFromTarget: false,
+        hasTargetChanges: false,
+      };
+    }
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+
+  await import("../src/main");
+  await flushUi();
+
+  const row = Array.from(document.querySelectorAll('[data-role="profile-row"]')).find((candidate) =>
+    candidate.textContent?.includes("Broken OAuth"),
+  );
+  expect(row?.textContent).toContain("额度");
+  expect(row?.textContent).toContain("失败");
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="view-profile-details"][data-id="profile-1"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  await flushUi();
+
+  expect(document.body.textContent).toContain("额度刷新失败");
+  expect(document.body.textContent).toContain("ChatGPT access token");
+});
+
+test("keeps list rows aligned with fixed metric and action slots", async () => {
+  await import("../src/main");
+  await flushUi();
+
+  const rows = Array.from(document.querySelectorAll('[data-role="profile-row"]'));
+
+  expect(rows.length).toBeGreaterThan(0);
+  for (const row of rows) {
+    expect(row.querySelectorAll('[data-role="profile-row-metric"]')).toHaveLength(3);
+    expect(row.querySelector('[data-role="profile-row-actions"]')).not.toBeNull();
+    expect(row.querySelector('[data-role="profile-row-primary-action"]')).not.toBeNull();
+    expect(row.querySelector('[data-role="profile-row-quota-action"]')).not.toBeNull();
+    expect(row.querySelector('[data-role="profile-row-latency-action"]')).not.toBeNull();
+    expect(row.querySelector('[data-role="profile-row-detail-action"]')).not.toBeNull();
+  }
+});
+
+test("switches between default list layout and grid card layout", async () => {
+  await import("../src/main");
+  await flushUi();
+
+  expect(document.querySelector('[data-role="profile-list"]')).not.toBeNull();
+  expect(document.querySelector('[data-role="profile-grid"]')).toBeNull();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="profile-layout-grid"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+
+  expect(document.querySelector('[data-role="profile-grid"]')).not.toBeNull();
+  expect(document.querySelector('[data-role="profile-list"]')).toBeNull();
   expect(document.querySelector('[data-role="profile-card"][data-state="live"]')).not.toBeNull();
-  expect(document.querySelectorAll("[data-role='profile-card']").length).toBeGreaterThan(0);
-  expect(document.querySelectorAll('[data-action="delete-profile"]').length).toBeGreaterThan(0);
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="profile-layout-list"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+
+  expect(document.querySelector('[data-role="profile-list"]')).not.toBeNull();
+});
+
+test("opens the single profile detail page with usage latency editor and delete action", async () => {
+  const snapshot = {
+    targetDir: "/Users/example/.codex",
+    usingDefaultTargetDir: true,
+    targetExists: true,
+    targetAuthExists: true,
+    targetConfigExists: true,
+    targetUpdatedAt: "2026-03-25T00:00:00Z",
+    targetAuthTypeLabel: "第三方 API",
+    activeProfileId: "profile-2",
+    lastSelectedProfileId: "profile-2",
+    lastSwitchProfileId: "profile-2",
+    lastSwitchedAt: "2026-03-25T00:00:00Z",
+    codexUsageApiEnabled: false,
+    profiles: [
+      {
+        id: "profile-2",
+        name: "ylscode",
+        notes: "额度账号",
+        authTypeLabel: "第三方 API",
+        createdAt: "2026-03-24T00:00:00Z",
+        updatedAt: "2026-03-24T13:24:00Z",
+        authHash: "auth-2",
+        configHash: "config-2",
+        codexUsage: null,
+        thirdPartyLatency: {
+          wireApi: "responses",
+          model: "gpt-5.4",
+          ttftMs: 1820,
+          totalMs: 4960,
+          statusCode: 200,
+          updatedAt: "2026-03-26T10:12:00+08:00",
+          error: null,
+        },
+        thirdPartyUsage: {
+          provider: "ylscode",
+          remaining: "12.34",
+          unit: "USD",
+          daily: {
+            used: "87.66",
+            total: "100",
+            remaining: "12.34",
+            usedPercent: 87.66,
+          },
+          weekly: {
+            used: "300.49",
+            total: "500",
+            remaining: "199.51",
+            usedPercent: 60,
+          },
+          updatedAt: "2026-03-26T10:20:00+08:00",
+          error: null,
+        },
+      },
+    ],
+  };
+
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "load_snapshot") {
+      return snapshot;
+    }
+    if (command === "get_profile_document") {
+      return {
+        id: "profile-2",
+        name: "ylscode",
+        notes: "额度账号",
+        authTypeLabel: "第三方 API",
+        createdAt: "2026-03-24T00:00:00Z",
+        updatedAt: "2026-03-24T13:24:00Z",
+        authJson: '{"token":"test"}',
+        configToml: 'model_provider = "ylscode"\n',
+        loadedFromTarget: false,
+        hasTargetChanges: false,
+      };
+    }
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+
+  await import("../src/main");
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="view-profile-details"][data-id="profile-2"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+
+  const page = document.querySelector('[data-page="editor"]');
+  expect(page).not.toBeNull();
+  expect(document.querySelector('[data-role="profile-detail-drawer"]')).toBeNull();
+  expect(page?.textContent).toContain("ylscode");
+  expect(page?.querySelector('[data-role="third-party-usage-panel"]')).not.toBeNull();
+  expect(page?.querySelector('[data-role="third-party-latency-panel"]')).not.toBeNull();
+  expect(page?.textContent).toContain("$87.66 / $100.00");
+  expect(page?.textContent).toContain("1.82s");
+  expect(page?.querySelector('[data-action="delete-profile"][data-id="profile-2"]')).not.toBeNull();
+});
+
+test("keeps Codex session recovery tools collapsed until explicitly expanded", async () => {
+  await import("../src/main");
+  await flushUi();
+
+  expect(
+    document.querySelector('[data-role="session-recovery-panel"][data-state="collapsed"]'),
+  ).not.toBeNull();
+  expect(document.body.textContent).toContain("高级会话工具");
+  expect(document.querySelector('[data-action="diagnose-codex-sessions"]')).toBeNull();
+  expect(document.querySelector('[data-action="repair-codex-sessions"]')).toBeNull();
+  expect(document.body.textContent).not.toContain("高级时间修复");
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="toggle-session-recovery-panel"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+  await flushUi();
+
+  expect(
+    document.querySelector('[data-role="session-recovery-panel"][data-state="expanded"]'),
+  ).not.toBeNull();
+  expect(document.querySelector('[data-action="diagnose-codex-sessions"]')).not.toBeNull();
+  expect(document.querySelector('[data-action="repair-codex-sessions"]')).not.toBeNull();
+  expect(document.querySelector('[data-action="repair-codex-sessions-advanced"]')).not.toBeNull();
 });
 
 test("shows current version in the update entry for desktop runtime", async () => {
@@ -361,6 +736,7 @@ test("renders codex usage as a plan header with two progress rows", async () => 
 
   await import("../src/main");
   await flushUi();
+  await switchToGridLayout();
 
   const expectedUpdatedAt = new Intl.DateTimeFormat("zh-CN", {
     dateStyle: "medium",
@@ -448,6 +824,20 @@ test("keeps the rest of the UI interactive while codex usage is refreshing", asy
         })),
       });
     }
+    if (command === "get_profile_document") {
+      return Promise.resolve({
+        id: "profile-1",
+        name: "淘宝team",
+        notes: "自动从当前 Codex 配置生成",
+        authTypeLabel: "官方 OAuth",
+        createdAt: "2026-03-24T00:00:00Z",
+        updatedAt: "2026-03-24T14:19:00Z",
+        authJson: '{"token":"test"}',
+        configToml: 'model_provider = "openai"\n',
+        loadedFromTarget: false,
+        hasTargetChanges: false,
+      });
+    }
     if (command === "refresh_profile_codex_usage") {
       return new Promise((resolve) => {
         resolveRefresh = resolve;
@@ -465,6 +855,11 @@ test("keeps the rest of the UI interactive while codex usage is refreshing", asy
   await flushUi();
 
   document
+    .querySelector<HTMLButtonElement>('[data-action="view-profile-details"][data-id="profile-1"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+
+  document
     .querySelector<HTMLButtonElement>('[data-action="refresh-codex-usage"][data-id="profile-1"]')
     ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
@@ -478,7 +873,7 @@ test("keeps the rest of the UI interactive while codex usage is refreshing", asy
   expect(pendingRefreshButton?.textContent).toContain("刷新中");
   expect(pendingRefreshButton?.hasAttribute("disabled")).toBe(true);
   expect(
-    document.querySelector<HTMLButtonElement>('[data-action="new-profile"]')?.hasAttribute("disabled"),
+    document.querySelector<HTMLButtonElement>('[data-action="back-to-cards"]')?.hasAttribute("disabled"),
   ).toBe(false);
 
   resolveRefresh?.(refreshedSnapshot);
@@ -538,22 +933,270 @@ test("renders a third-party latency panel inside the profile card", async () => 
 
   await import("../src/main");
   await flushUi();
+  await switchToGridLayout();
 
-  const expectedUpdatedAt = new Intl.DateTimeFormat("zh-CN", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(new Date(probeUpdatedAt));
-
-  expect(document.body.textContent).toContain("第三方 API 测速");
-  expect(document.body.textContent).toContain(`更新于：${expectedUpdatedAt}`);
+  expect(document.querySelector('[data-role="third-party-runtime-panel"]')).not.toBeNull();
+  expect(document.body.textContent).not.toContain("第三方 API 测速");
   expect(document.body.textContent).toContain("首 Token");
   expect(document.body.textContent).toContain("1.82s");
   expect(document.body.textContent).toContain("总耗时");
   expect(document.body.textContent).toContain("4.96s");
-  expect(document.body.textContent).toContain("responses · gpt-5.4");
+  expect(document.body.textContent).toContain("ylscode");
   expect(
     document.querySelector('[data-action="refresh-third-party-latency"][data-id="profile-2"]'),
   ).not.toBeNull();
+});
+
+test("renders a ylscode third-party usage panel inside the profile card", async () => {
+  const usageUpdatedAt = "2026-03-26T10:20:00+08:00";
+
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "load_snapshot") {
+      return {
+        targetDir: "/Users/example/.codex",
+        usingDefaultTargetDir: true,
+        targetExists: true,
+        targetAuthExists: true,
+        targetConfigExists: true,
+        targetUpdatedAt: "2026-03-25T00:00:00Z",
+        targetAuthTypeLabel: "第三方 API",
+        activeProfileId: "profile-2",
+        lastSelectedProfileId: "profile-2",
+        lastSwitchProfileId: "profile-2",
+        lastSwitchedAt: "2026-03-25T00:00:00Z",
+        codexUsageApiEnabled: false,
+        profiles: [
+          {
+            id: "profile-2",
+            name: "ylscode",
+            notes: "额度账号",
+            authTypeLabel: "第三方 API",
+            createdAt: "2026-03-24T00:00:00Z",
+            updatedAt: "2026-03-24T13:24:00Z",
+            authHash: "auth-2",
+            configHash: "config-2",
+            codexUsage: null,
+            thirdPartyLatency: null,
+            thirdPartyUsage: {
+              provider: "ylscode",
+              remaining: "-0.03",
+              unit: "USD",
+              daily: {
+                used: "100.03",
+                total: "100",
+                remaining: "-0.03",
+                usedPercent: 100,
+              },
+              weekly: {
+                used: "300.49",
+                total: "500",
+                remaining: "199.51",
+                usedPercent: 60,
+              },
+              updatedAt: usageUpdatedAt,
+              error: null,
+            },
+          },
+        ],
+      };
+    }
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+
+  await import("../src/main");
+  await flushUi();
+  await switchToGridLayout();
+
+  expect(document.querySelector('[data-role="third-party-runtime-panel"]')).not.toBeNull();
+  expect(document.body.textContent).not.toContain("第三方 API 用量");
+  expect(document.body.textContent).toContain("今日");
+  expect(document.body.textContent).toContain("$100.03 / $100.00");
+  expect(document.body.textContent).toContain("本周");
+  expect(document.body.textContent).toContain("$300.49 / $500.00");
+  expect(document.body.textContent).toContain("60%");
+  expect(document.body.textContent).toContain("ylscode");
+  expect(
+    document.querySelector('[data-action="refresh-third-party-usage"][data-id="profile-2"]'),
+  ).not.toBeNull();
+});
+
+test("combines third-party usage and latency into one compact card status block", async () => {
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "load_snapshot") {
+      return {
+        targetDir: "/Users/example/.codex",
+        usingDefaultTargetDir: true,
+        targetExists: true,
+        targetAuthExists: true,
+        targetConfigExists: true,
+        targetUpdatedAt: "2026-03-25T00:00:00Z",
+        targetAuthTypeLabel: "第三方 API",
+        activeProfileId: "profile-2",
+        lastSelectedProfileId: "profile-2",
+        lastSwitchProfileId: "profile-2",
+        lastSwitchedAt: "2026-03-25T00:00:00Z",
+        codexUsageApiEnabled: false,
+        profiles: [
+          {
+            id: "profile-2",
+            name: "ylscode",
+            notes: "额度账号",
+            authTypeLabel: "第三方 API",
+            createdAt: "2026-03-24T00:00:00Z",
+            updatedAt: "2026-03-24T13:24:00Z",
+            authHash: "auth-2",
+            configHash: "config-2",
+            codexUsage: null,
+            thirdPartyLatency: {
+              wireApi: "responses",
+              model: "gpt-5.4",
+              ttftMs: 1820,
+              totalMs: 4960,
+              statusCode: 200,
+              updatedAt: "2026-03-26T10:12:00+08:00",
+              error: null,
+            },
+            thirdPartyUsage: {
+              provider: "ylscode",
+              remaining: "12.34",
+              unit: "USD",
+              daily: {
+                used: "87.66",
+                total: "100",
+                remaining: "12.34",
+                usedPercent: 87.66,
+              },
+              weekly: {
+                used: "300.49",
+                total: "500",
+                remaining: "199.51",
+                usedPercent: 60,
+              },
+              updatedAt: "2026-03-26T10:20:00+08:00",
+              error: null,
+            },
+          },
+        ],
+      };
+    }
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+
+  await import("../src/main");
+  await flushUi();
+  await switchToGridLayout();
+
+  const profileCard = document.querySelector('[data-role="profile-card"]');
+  expect(profileCard?.querySelector('[data-role="third-party-runtime-panel"]')).not.toBeNull();
+  expect(profileCard?.querySelector('[data-role="third-party-usage-panel"]')).toBeNull();
+  expect(profileCard?.querySelector('[data-role="third-party-latency-panel"]')).toBeNull();
+  expect(document.body.textContent).toContain("今日");
+  expect(document.body.textContent).toContain("$87.66 / $100.00");
+  expect(document.body.textContent).toContain("本周");
+  expect(document.body.textContent).toContain("$300.49 / $500.00");
+  expect(document.body.textContent).toContain("首 Token");
+  expect(document.body.textContent).toContain("1.82s");
+  expect(document.body.textContent).not.toContain("第三方 API 用量");
+  expect(document.body.textContent).not.toContain("第三方 API 测速");
+});
+
+test("refreshes ylscode third-party usage for the selected profile card", async () => {
+  const refreshedSnapshot = {
+    targetDir: "/Users/example/.codex",
+    usingDefaultTargetDir: true,
+    targetExists: true,
+    targetAuthExists: true,
+    targetConfigExists: true,
+    targetUpdatedAt: "2026-03-25T00:00:00Z",
+    targetAuthTypeLabel: "第三方 API",
+    activeProfileId: "profile-2",
+    lastSelectedProfileId: "profile-2",
+    lastSwitchProfileId: "profile-2",
+    lastSwitchedAt: "2026-03-25T00:00:00Z",
+    codexUsageApiEnabled: false,
+    profiles: [
+      {
+        id: "profile-2",
+        name: "ylscode",
+        notes: "额度账号",
+        authTypeLabel: "第三方 API",
+        createdAt: "2026-03-24T00:00:00Z",
+        updatedAt: "2026-03-24T13:24:00Z",
+        authHash: "auth-2",
+        configHash: "config-2",
+        codexUsage: null,
+        thirdPartyLatency: null,
+        thirdPartyUsage: {
+          provider: "ylscode",
+          remaining: "12.34",
+          unit: "USD",
+          daily: {
+            used: "87.66",
+            total: "100",
+            remaining: "12.34",
+            usedPercent: 87.66,
+          },
+          weekly: {
+            used: "300.49",
+            total: "500",
+            remaining: "199.51",
+            usedPercent: 60.098,
+          },
+          updatedAt: "2026-03-26T10:25:00+08:00",
+          error: null,
+        },
+      },
+    ],
+  };
+
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "load_snapshot") {
+      return {
+        ...refreshedSnapshot,
+        profiles: refreshedSnapshot.profiles.map((profile) => ({
+          ...profile,
+          thirdPartyUsage: null,
+        })),
+      };
+    }
+    if (command === "refresh_profile_third_party_usage") {
+      return refreshedSnapshot;
+    }
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+
+  await import("../src/main");
+  await flushUi();
+  await switchToGridLayout();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="refresh-third-party-usage"][data-id="profile-2"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+  await flushUi();
+  await flushUi();
+
+  expect(invokeMock).toHaveBeenCalledWith("refresh_profile_third_party_usage", {
+    profileId: "profile-2",
+  });
+  expect(document.body.textContent).toContain("$87.66 / $100.00");
+  expect(document.body.textContent).toContain("$300.49 / $500.00");
+  expect(document.body.textContent).toContain("已刷新「ylscode」第三方 API 用量。");
 });
 
 test("refreshes third-party latency for the selected profile card", async () => {
@@ -617,6 +1260,7 @@ test("refreshes third-party latency for the selected profile card", async () => 
 
   await import("../src/main");
   await flushUi();
+  await switchToGridLayout();
 
   document
     .querySelector<HTMLButtonElement>('[data-action="refresh-third-party-latency"][data-id="profile-2"]')
@@ -950,6 +1594,20 @@ test("deletes a saved profile after confirmation", async () => {
     if (command === "load_snapshot") {
       return initialSnapshot;
     }
+    if (command === "get_profile_document") {
+      return {
+        id: "profile-1",
+        name: "Work Team",
+        notes: "工作主账号，常驻使用。",
+        authTypeLabel: "官方 OAuth",
+        createdAt: "2026-03-16T01:00:00Z",
+        updatedAt: "2026-03-18T12:20:00Z",
+        authJson: '{"token":"test"}',
+        configToml: 'model_provider = "openai"\n',
+        loadedFromTarget: false,
+        hasTargetChanges: false,
+      };
+    }
     if (command === "delete_profile") {
       return deletedSnapshot;
     }
@@ -964,7 +1622,12 @@ test("deletes a saved profile after confirmation", async () => {
   await import("../src/main");
   await flushUi();
 
-  // Click the delete button — this opens the custom DOM confirm dialog (nativeConfirm)
+  document
+    .querySelector<HTMLButtonElement>('[data-action="view-profile-details"][data-id="profile-1"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+
+  // Click the delete button in the detail page — this opens the custom DOM confirm dialog (nativeConfirm)
   document
     .querySelector<HTMLButtonElement>('[data-action="delete-profile"][data-id="profile-1"]')
     ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -980,7 +1643,7 @@ test("deletes a saved profile after confirmation", async () => {
   await flushUi();
 
   expect(invokeMock).toHaveBeenCalledWith("delete_profile", { profileId: "profile-1" });
-  expect(document.querySelectorAll("[data-role='profile-card']")).toHaveLength(1);
+  expect(document.querySelectorAll("[data-role='profile-row']")).toHaveLength(1);
 });
 
 test("shows Applications install guidance before checking for update on macOS", async () => {

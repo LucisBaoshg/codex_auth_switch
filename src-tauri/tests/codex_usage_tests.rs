@@ -450,6 +450,102 @@ fn refresh_profile_codex_usage_fetches_private_api_and_persists_snapshot() {
 }
 
 #[test]
+fn refresh_all_codex_usage_continues_and_marks_failed_profiles() {
+    let _guard = env_lock().lock().expect("lock env");
+    let server = TestServer::start();
+    server.set_json(
+        "/backend-api/wham/usage",
+        json!({
+            "plan_type": "team",
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 24,
+                    "limit_window_seconds": 18000,
+                    "reset_at": 1773491460
+                }
+            }
+        }),
+    );
+    std::env::set_var(
+        "CODEX_AUTH_SWITCH_CODEX_USAGE_ENDPOINT",
+        format!("{}/backend-api/wham/usage", server.base_url),
+    );
+
+    let (app_dir, _target_dir, mut manager) = temp_manager();
+    let good_profile = manager
+        .import_profile(ProfileInput {
+            name: "Good OAuth".into(),
+            notes: "valid".into(),
+            auth_json: oauth_auth_json(
+                "good@example.com",
+                "user-good",
+                "account-good",
+                "access-token-good",
+            ),
+            config_toml: official_config_toml("gpt-5.4"),
+        })
+        .expect("import good profile");
+    let broken_profile = manager
+        .import_profile(ProfileInput {
+            name: "Broken OAuth".into(),
+            notes: "missing token".into(),
+            auth_json: oauth_auth_json(
+                "broken@example.com",
+                "user-broken",
+                "account-broken",
+                "access-token-broken",
+            ),
+            config_toml: official_config_toml("gpt-5.4"),
+        })
+        .expect("import broken profile");
+    fs::write(
+        app_dir
+            .path()
+            .join("profiles")
+            .join(&broken_profile.id)
+            .join("auth.json"),
+        r#"{"auth_mode":"chatgpt","tokens":{"id_token":"header.payload.signature"}}"#,
+    )
+    .expect("corrupt saved auth");
+
+    manager
+        .set_codex_usage_api_enabled(true)
+        .expect("enable usage api");
+
+    let refreshed = manager
+        .refresh_all_codex_usage()
+        .expect("bulk refresh should not stop on one broken profile");
+
+    assert_eq!(refreshed.len(), 2);
+    let snapshot = manager.snapshot().expect("snapshot after bulk refresh");
+    let good_usage = snapshot
+        .profiles
+        .iter()
+        .find(|profile| profile.id == good_profile.id)
+        .and_then(|profile| profile.codex_usage.as_ref())
+        .expect("good profile usage");
+    assert_eq!(good_usage.plan_type.as_deref(), Some("team"));
+    assert!(good_usage.error.is_none());
+
+    let broken_usage = snapshot
+        .profiles
+        .iter()
+        .find(|profile| profile.id == broken_profile.id)
+        .and_then(|profile| profile.codex_usage.as_ref())
+        .expect("broken profile failure usage");
+    assert!(broken_usage.primary.is_none());
+    assert!(broken_usage.error.as_deref().is_some_and(|error| {
+        error.contains("access token") || error.contains("Codex usage")
+    }));
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].contains("Authorization: Bearer access-token-good"));
+
+    std::env::remove_var("CODEX_AUTH_SWITCH_CODEX_USAGE_ENDPOINT");
+}
+
+#[test]
 fn refresh_profile_codex_usage_refreshes_token_before_requesting_usage_api() {
     let _guard = env_lock().lock().expect("lock env");
     let server = TestServer::start();

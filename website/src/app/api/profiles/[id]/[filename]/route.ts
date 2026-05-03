@@ -8,8 +8,13 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type",
 };
 
+const noStoreHeaders = {
+  ...corsHeaders,
+  "Cache-Control": "private, no-cache, no-store, max-age=0, must-revalidate",
+};
+
 export async function OPTIONS() {
-  return new NextResponse(null, { headers: corsHeaders });
+  return new NextResponse(null, { headers: noStoreHeaders });
 }
 
 export async function GET(
@@ -35,13 +40,12 @@ export async function GET(
     return new NextResponse(fileBuffer, {
       headers: {
         "Content-Type": contentType,
-        "Cache-Control": "public, max-age=31536000, immutable",
-        ...corsHeaders,
+        ...noStoreHeaders,
       },
     });
   } catch (error) {
     console.error("File download error:", error);
-    return NextResponse.json({ error: "File not found" }, { status: 404, headers: corsHeaders });
+    return NextResponse.json({ error: "File not found" }, { status: 404, headers: noStoreHeaders });
   }
 }
 
@@ -60,14 +64,14 @@ export async function POST(
     const { content } = await request.json();
     
     if (content === undefined) {
-      return NextResponse.json({ error: "Content is required" }, { status: 400, headers: corsHeaders });
+      return NextResponse.json({ error: "Content is required" }, { status: 400, headers: noStoreHeaders });
     }
 
     await fs.writeFile(filePath, content, "utf-8");
 
-    return NextResponse.json({ success: true }, { headers: corsHeaders });
+    return NextResponse.json({ success: true }, { headers: noStoreHeaders });
   } catch (error) {
     console.error("File write error:", error);
-    return NextResponse.json({ error: "Failed to write file" }, { status: 500, headers: corsHeaders });
+    return NextResponse.json({ error: "Failed to write file" }, { status: 500, headers: noStoreHeaders });
   }
 }

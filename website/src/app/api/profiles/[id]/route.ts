@@ -8,8 +8,13 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type",
 };
 
+const noStoreHeaders = {
+  ...corsHeaders,
+  "Cache-Control": "private, no-cache, no-store, max-age=0, must-revalidate",
+};
+
 export async function OPTIONS() {
-  return new NextResponse(null, { headers: corsHeaders });
+  return new NextResponse(null, { headers: noStoreHeaders });
 }
 
 export async function GET(
@@ -27,12 +32,12 @@ export async function GET(
     const profile = profiles.find((p: any) => p.id === id);
 
     if (!profile) {
-      return NextResponse.json({ error: "Profile not found" }, { status: 404, headers: corsHeaders });
+      return NextResponse.json({ error: "Profile not found" }, { status: 404, headers: noStoreHeaders });
     }
 
-    return NextResponse.json(profile, { headers: corsHeaders });
+    return NextResponse.json(profile, { headers: noStoreHeaders });
   } catch (error) {
-    return NextResponse.json({ error: "Internal Server Error" }, { status: 500, headers: corsHeaders });
+    return NextResponse.json({ error: "Internal Server Error" }, { status: 500, headers: noStoreHeaders });
   }
 }
 
@@ -51,7 +56,7 @@ export async function POST(
     const profileIndex = profiles.findIndex((p: any) => p.id === id);
 
     if (profileIndex === -1) {
-      return NextResponse.json({ error: "Profile not found" }, { status: 404 });
+      return NextResponse.json({ error: "Profile not found" }, { status: 404, headers: noStoreHeaders });
     }
 
     const { name, description } = await request.json();
@@ -65,9 +70,9 @@ export async function POST(
 
     await fs.writeFile(profilesFile, JSON.stringify(profiles, null, 2));
 
-    return NextResponse.json(profiles[profileIndex]);
+    return NextResponse.json(profiles[profileIndex], { headers: noStoreHeaders });
   } catch (error) {
     console.error("Error updating profile:", error);
-    return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+    return NextResponse.json({ error: "Internal Server Error" }, { status: 500, headers: noStoreHeaders });
   }
 }

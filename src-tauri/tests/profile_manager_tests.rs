@@ -454,6 +454,35 @@ fn import_profile_persists_valid_profile_files_and_metadata() {
 }
 
 #[test]
+fn import_third_party_profile_registers_model_provider_resource() {
+    let (_app_dir, _target_dir, manager) = temp_manager();
+
+    let profile = manager
+        .import_profile(ProfileInput {
+            name: "YLS".into(),
+            notes: "third-party provider".into(),
+            auth_json: api_key_auth_json("sk-ylscode"),
+            config_toml: third_party_config_toml("gpt-5"),
+        })
+        .expect("import third-party profile");
+
+    assert_eq!(profile.auth_type_label, "第三方 API");
+    assert_eq!(profile.model_provider_key.as_deref(), Some("OpenAI"));
+
+    let providers = manager
+        .list_model_providers()
+        .expect("list model providers");
+    assert_eq!(providers.len(), 1);
+    let provider = &providers[0];
+    assert_eq!(provider.model_provider_key.as_deref(), Some("OpenAI"));
+    assert_eq!(provider.name, "OpenAI");
+    assert_eq!(provider.base_url, "http://sub2api.ite.tapcash.com");
+    assert_eq!(provider.wire_api, "responses");
+    assert_eq!(provider.api_keys.len(), 1);
+    assert_eq!(provider.api_keys[0].api_key, "sk-ylscode");
+}
+
+#[test]
 fn import_profile_rejects_invalid_auth_json() {
     let (_app_dir, _target_dir, manager) = temp_manager();
 

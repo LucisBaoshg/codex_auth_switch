@@ -14,6 +14,7 @@ type FlashKind = "info" | "success" | "error";
 type ViewMode = "cards" | "editor";
 type EditorMode = "new" | "fromCurrent" | "existing";
 type PlatformMode = "codex" | "antigravity";
+type ProfileLayoutMode = "list" | "grid";
 type BusyDialogState = {
   title: string;
   message: string;
@@ -38,6 +39,7 @@ type CodexUsageSnapshot = {
   secondary: CodexUsageWindow | null;
   credits: CodexUsageCredits | null;
   updatedAt: string;
+  error?: string | null;
 };
 
 type ThirdPartyLatencySnapshot = {
@@ -50,17 +52,41 @@ type ThirdPartyLatencySnapshot = {
   error: string | null;
 };
 
+type ThirdPartyUsageSnapshot = {
+  provider: string | null;
+  remaining: string | null;
+  unit: string | null;
+  daily?: ThirdPartyUsageQuotaSnapshot | null;
+  weekly?: ThirdPartyUsageQuotaSnapshot | null;
+  updatedAt: string;
+  error: string | null;
+};
+
+type ThirdPartyUsageQuotaSnapshot = {
+  used: string | null;
+  total: string | null;
+  remaining: string | null;
+  usedPercent: number | null;
+};
+
 type ProfileSummary = {
   id: string;
   name: string;
   notes: string;
   authTypeLabel: string;
+  modelProviderId?: string | null;
+  modelProviderApiKeyId?: string | null;
+  modelProviderKey?: string | null;
+  modelProviderName?: string | null;
+  modelProviderBaseUrl?: string | null;
+  modelProviderWireApi?: string | null;
   createdAt: string;
   updatedAt: string;
   authHash: string;
   configHash: string;
   codexUsage: CodexUsageSnapshot | null;
   thirdPartyLatency: ThirdPartyLatencySnapshot | null;
+  thirdPartyUsage?: ThirdPartyUsageSnapshot | null;
 };
 
 type ProfileInput = {
@@ -75,6 +101,12 @@ type ProfileDocument = {
   name: string;
   notes: string;
   authTypeLabel: string;
+  modelProviderId?: string | null;
+  modelProviderApiKeyId?: string | null;
+  modelProviderKey?: string | null;
+  modelProviderName?: string | null;
+  modelProviderBaseUrl?: string | null;
+  modelProviderWireApi?: string | null;
   createdAt: string;
   updatedAt: string;
   authJson: string;
@@ -300,6 +332,7 @@ const mockSnapshot: AppSnapshot = {
         updatedAt: new Date().toISOString(),
       },
       thirdPartyLatency: null,
+      thirdPartyUsage: null,
     },
     {
       id: "profile-2",
@@ -320,6 +353,7 @@ const mockSnapshot: AppSnapshot = {
         updatedAt: new Date().toISOString(),
         error: null,
       },
+      thirdPartyUsage: null,
     },
   ],
 };
@@ -357,6 +391,7 @@ const state: {
   pendingActions: Set<string>;
   flash: { kind: FlashKind; text: string } | null;
   activeTab: "local" | "network";
+  profileLayout: ProfileLayoutMode;
   networkProfiles: NetworkProfile[];
   networkLoading: boolean;
   appVersion: string | null;
@@ -364,6 +399,7 @@ const state: {
     checking: boolean;
     lastResult: UpdateCheckResult | null;
   };
+  sessionRecoveryExpanded: boolean;
   sessionRecoveryReport: SessionRecoveryReport | null;
   sessionRecoveryLastResult: SessionRepairResult | null;
 } = {
@@ -378,6 +414,7 @@ const state: {
   pendingActions: new Set<string>(),
   flash: null,
   activeTab: "local",
+  profileLayout: "list",
   networkProfiles: [],
   networkLoading: false,
   appVersion: null,
@@ -385,6 +422,7 @@ const state: {
     checking: false,
     lastResult: null,
   },
+  sessionRecoveryExpanded: false,
   sessionRecoveryReport: null,
   sessionRecoveryLastResult: null,
 };
@@ -432,6 +470,10 @@ function usageRefreshActionKey(profileId: string): string {
 
 function latencyProbeActionKey(profileId: string): string {
   return `latency-probe:${profileId}`;
+}
+
+function thirdPartyUsageActionKey(profileId: string): string {
+  return `third-party-usage:${profileId}`;
 }
 
 const refreshAllUsageActionKey = "codex-usage:all";
@@ -505,6 +547,12 @@ function createMockDocument(profile: ProfileSummary): ProfileDocument {
     name: profile.name,
     notes: profile.notes,
     authTypeLabel: profile.authTypeLabel,
+    modelProviderId: profile.modelProviderId ?? null,
+    modelProviderApiKeyId: profile.modelProviderApiKeyId ?? null,
+    modelProviderKey: profile.modelProviderKey ?? null,
+    modelProviderName: profile.modelProviderName ?? null,
+    modelProviderBaseUrl: profile.modelProviderBaseUrl ?? null,
+    modelProviderWireApi: profile.modelProviderWireApi ?? null,
     createdAt: profile.createdAt,
     updatedAt: profile.updatedAt,
     authJson: `{
@@ -1154,7 +1202,15 @@ async function refreshAllCodexUsage(): Promise<void> {
       const snapshot = await desktopInvoke<AppSnapshot>("refresh_all_codex_usage");
       setSnapshot(snapshot);
     }
-    setFlash("success", "已刷新全部官方 OAuth 档案的 Codex 额度。");
+    const failedProfiles =
+      state.snapshot?.profiles.filter(
+        (profile) => profile.authTypeLabel === "官方 OAuth" && profile.codexUsage?.error,
+      ) ?? [];
+    if (failedProfiles.length > 0) {
+      setFlash("error", `额度刷新完成，${failedProfiles.length} 个 profile 报错，其余已更新。`);
+    } else {
+      setFlash("success", "已刷新全部官方 OAuth 档案的 Codex 额度。");
+    }
   } catch (error) {
     setFlash("error", error instanceof Error ? error.message : String(error));
   } finally {
@@ -1185,6 +1241,36 @@ async function refreshProfileLatencyProbe(profileId: string, profileName: string
       }
     }
     setFlash("success", `已完成「${profileName}」第三方 API 测速。`);
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    endPendingAction(actionKey);
+  }
+}
+
+async function refreshProfileThirdPartyUsage(profileId: string, profileName: string): Promise<void> {
+  const actionKey = thirdPartyUsageActionKey(profileId);
+  beginPendingAction(actionKey);
+  try {
+    setFlash("info", `正在刷新「${profileName}」第三方 API 用量…`);
+    if (!isTauriRuntime) {
+      const snapshot = state.snapshot;
+      if (!snapshot) {
+        throw new Error("当前没有可用快照。");
+      }
+      setSnapshot(snapshot);
+    } else {
+      const snapshot = await desktopInvoke<AppSnapshot>("refresh_profile_third_party_usage", {
+        profileId,
+      });
+      setSnapshot(snapshot);
+      const usage = snapshot.profiles.find((profile) => profile.id === profileId)?.thirdPartyUsage;
+      if (usage?.error) {
+        setFlash("error", `「${profileName}」用量刷新失败：${usage.error}`);
+        return;
+      }
+    }
+    setFlash("success", `已刷新「${profileName}」第三方 API 用量。`);
   } catch (error) {
     setFlash("error", error instanceof Error ? error.message : String(error));
   } finally {
@@ -1262,6 +1348,17 @@ function formatDateTime(value: string | null): string {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(new Date(value));
+}
+
+function profileTypeLabel(profile: ProfileSummary | ProfileDocument): string {
+  if (profile.authTypeLabel === "第三方 API") {
+    return (
+      profile.modelProviderKey?.trim() ||
+      profile.modelProviderName?.trim() ||
+      profile.authTypeLabel
+    );
+  }
+  return profile.authTypeLabel;
 }
 
 function selectUsageWindow(
@@ -1346,6 +1443,7 @@ function renderCodexUsagePanel(snapshot: AppSnapshot, profile: ProfileSummary): 
   const usage = profile.codexUsage;
   const primaryWindow = selectUsageWindow(usage, 300, true);
   const weeklyWindow = selectUsageWindow(usage, 10080, false);
+  const usageError = usage?.error ?? null;
   const updated = usage ? formatDateTime(usage.updatedAt) : "还没有";
   const refreshingUsage = isPendingAction(usageRefreshActionKey(profile.id));
   const refreshingAllUsage = isPendingAction(refreshAllUsageActionKey);
@@ -1387,10 +1485,16 @@ function renderCodexUsagePanel(snapshot: AppSnapshot, profile: ProfileSummary): 
             `
         }
       </div>
-      <div class="usage-progress-list">
-        ${renderUsageProgressRow("5H", primaryWindow)}
-        ${renderUsageProgressRow("WEEKLY", weeklyWindow)}
-      </div>
+      ${
+        usageError
+          ? `<p class="latency-panel-error">额度刷新失败：${escapeHtml(usageError)}</p>`
+          : `
+            <div class="usage-progress-list">
+              ${renderUsageProgressRow("5H", primaryWindow)}
+              ${renderUsageProgressRow("WEEKLY", weeklyWindow)}
+            </div>
+          `
+      }
     </section>
   `;
 }
@@ -1456,6 +1560,220 @@ function renderThirdPartyLatencyPanel(profile: ProfileSummary): string {
   `;
 }
 
+function formatThirdPartyUsageAmount(usage: ThirdPartyUsageSnapshot | null | undefined): string {
+  if (!usage?.remaining) {
+    return "--";
+  }
+  return [usage.remaining, usage.unit].filter(Boolean).join(" ");
+}
+
+function parseQuotaNumber(value: string | null | undefined): number | null {
+  if (value == null) {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatQuotaCurrency(value: string | null | undefined): string {
+  const parsed = parseQuotaNumber(value);
+  return parsed == null ? "--" : `$${parsed.toFixed(2)}`;
+}
+
+function clampQuotaPercent(value: number | null | undefined): number | null {
+  if (value == null || !Number.isFinite(value)) {
+    return null;
+  }
+  return Math.max(0, Math.min(100, value));
+}
+
+function quotaPercent(quota: ThirdPartyUsageQuotaSnapshot | null | undefined): number | null {
+  const explicit = clampQuotaPercent(quota?.usedPercent);
+  if (explicit != null) {
+    return explicit;
+  }
+  const used = parseQuotaNumber(quota?.used);
+  const total = parseQuotaNumber(quota?.total);
+  if (used == null || total == null || total <= 0) {
+    return null;
+  }
+  return clampQuotaPercent((used / total) * 100);
+}
+
+function formatQuotaPercent(quota: ThirdPartyUsageQuotaSnapshot | null | undefined): string {
+  const percent = quotaPercent(quota);
+  return percent == null ? "--" : `${Math.round(percent)}%`;
+}
+
+function formatProfileSummary(profile: ProfileSummary): string {
+  if (profile.authTypeLabel === "官方 OAuth") {
+    const usage = profile.codexUsage;
+    if (usage?.error) {
+      return "额度失败";
+    }
+
+    const primaryWindow = selectUsageWindow(usage, 300, true);
+    const weeklyWindow = selectUsageWindow(usage, 10080, false);
+    return `5H ${primaryWindow ? `${remainingPercent(primaryWindow.usedPercent)}%` : "--"} · WEEKLY ${weeklyWindow ? `${remainingPercent(weeklyWindow.usedPercent)}%` : "--"}`;
+  }
+
+  if (profile.authTypeLabel === "第三方 API") {
+    const usage = profile.thirdPartyUsage;
+    const probe = profile.thirdPartyLatency;
+    return [
+      `今日 ${formatQuotaCurrency(usage?.daily?.used)} / ${formatQuotaCurrency(usage?.daily?.total)}`,
+      `本周 ${formatQuotaCurrency(usage?.weekly?.used)} / ${formatQuotaCurrency(usage?.weekly?.total)}`,
+      `TTFT ${formatLatencyDuration(probe?.ttftMs ?? null)}`,
+    ].join(" · ");
+  }
+
+  return "暂无摘要";
+}
+
+function renderThirdPartyQuotaCard(label: string, quota: ThirdPartyUsageQuotaSnapshot | null | undefined): string {
+  const percent = quotaPercent(quota) ?? 0;
+  return `
+    <div class="third-party-quota-card">
+      <div class="third-party-quota-head">
+        <strong>${escapeHtml(label)}</strong>
+        <span>${escapeHtml(formatQuotaPercent(quota))}</span>
+      </div>
+      <div class="third-party-quota-amount">
+        ${escapeHtml(formatQuotaCurrency(quota?.used))} / ${escapeHtml(formatQuotaCurrency(quota?.total))}
+      </div>
+      <div class="usage-progress-track">
+        <div class="usage-progress-fill" style="width:${percent}%"></div>
+      </div>
+    </div>
+  `;
+}
+
+function renderThirdPartyUsagePanel(profile: ProfileSummary): string {
+  if (profile.authTypeLabel !== "第三方 API") {
+    return "";
+  }
+
+  const usage = profile.thirdPartyUsage ?? null;
+  const updated = usage ? formatDateTime(usage.updatedAt) : "还没有";
+  const refreshingUsage = isPendingAction(thirdPartyUsageActionKey(profile.id));
+  const actionLabel = refreshingUsage ? "刷新中..." : usage ? "重新刷新" : "刷新用量";
+  const provider = usage?.provider ?? "ylscode";
+  const usageUpdatedCopy = refreshingUsage ? "正在刷新用量…" : `更新于：${updated}`;
+
+  return `
+    <section class="latency-panel" data-role="third-party-usage-panel">
+      <div class="latency-panel-head">
+        <div class="latency-panel-copy">
+          <strong>第三方 API 用量</strong>
+          <span class="latency-panel-updated">${escapeHtml(usageUpdatedCopy)}</span>
+        </div>
+        <button
+          class="button button-ghost latency-refresh-button"
+          data-action="refresh-third-party-usage"
+          data-id="${profile.id}"
+          data-name="${escapeHtml(profile.name)}"
+          ${state.busy || refreshingUsage ? "disabled" : ""}
+        >
+          ${escapeHtml(actionLabel)}
+        </button>
+      </div>
+      ${
+        usage?.error
+          ? `<p class="latency-panel-error">用量刷新失败：${escapeHtml(usage.error)}</p>`
+          : `
+            <div class="third-party-quota-grid">
+              ${renderThirdPartyQuotaCard("今日配额", usage?.daily ?? null)}
+              ${renderThirdPartyQuotaCard("本周配额", usage?.weekly ?? null)}
+            </div>
+          `
+      }
+      <div class="latency-panel-meta">
+        <span>${escapeHtml(provider)}</span>
+      </div>
+    </section>
+  `;
+}
+
+function renderThirdPartyRuntimePanel(profile: ProfileSummary): string {
+  if (profile.authTypeLabel !== "第三方 API") {
+    return "";
+  }
+
+  const usage = profile.thirdPartyUsage ?? null;
+  const probe = profile.thirdPartyLatency;
+  const refreshingUsage = isPendingAction(thirdPartyUsageActionKey(profile.id));
+  const refreshingLatency = isPendingAction(latencyProbeActionKey(profile.id));
+  const provider = usage?.provider ?? "ylscode";
+
+  return `
+    <section class="runtime-panel" data-role="third-party-runtime-panel">
+      <div class="runtime-panel-head">
+        <div class="runtime-provider">${escapeHtml(provider)}</div>
+        <div class="runtime-actions">
+          <button
+            class="button button-ghost runtime-action-button"
+            data-action="refresh-third-party-usage"
+            data-id="${profile.id}"
+            data-name="${escapeHtml(profile.name)}"
+            ${state.busy || refreshingUsage ? "disabled" : ""}
+          >
+            ${refreshingUsage ? "用量中..." : "刷新用量"}
+          </button>
+          <button
+            class="button button-ghost runtime-action-button"
+            data-action="refresh-third-party-latency"
+            data-id="${profile.id}"
+            data-name="${escapeHtml(profile.name)}"
+            ${state.busy || refreshingLatency ? "disabled" : ""}
+          >
+            ${refreshingLatency ? "测速中..." : "测速"}
+          </button>
+        </div>
+      </div>
+      ${
+        usage?.error || probe?.error
+          ? `
+            <div class="runtime-errors">
+              ${usage?.error ? `<p>用量：${escapeHtml(usage.error)}</p>` : ""}
+              ${probe?.error ? `<p>测速：${escapeHtml(probe.error)}</p>` : ""}
+            </div>
+          `
+          : ""
+      }
+      <div class="runtime-metrics">
+        <div class="runtime-metric runtime-metric-wide">
+          <div class="runtime-metric-head">
+            <span>今日</span>
+            <em>${escapeHtml(formatQuotaPercent(usage?.daily))}</em>
+          </div>
+          <strong>${escapeHtml(formatQuotaCurrency(usage?.daily?.used))} / ${escapeHtml(formatQuotaCurrency(usage?.daily?.total))}</strong>
+          <div class="usage-progress-track">
+            <div class="usage-progress-fill" style="width:${quotaPercent(usage?.daily) ?? 0}%"></div>
+          </div>
+        </div>
+        <div class="runtime-metric runtime-metric-wide">
+          <div class="runtime-metric-head">
+            <span>本周</span>
+            <em>${escapeHtml(formatQuotaPercent(usage?.weekly))}</em>
+          </div>
+          <strong>${escapeHtml(formatQuotaCurrency(usage?.weekly?.used))} / ${escapeHtml(formatQuotaCurrency(usage?.weekly?.total))}</strong>
+          <div class="usage-progress-track">
+            <div class="usage-progress-fill" style="width:${quotaPercent(usage?.weekly) ?? 0}%"></div>
+          </div>
+        </div>
+        <div class="runtime-metric">
+          <span>首 Token</span>
+          <strong>${escapeHtml(formatLatencyDuration(probe?.ttftMs ?? null))}</strong>
+        </div>
+        <div class="runtime-metric">
+          <span>总耗时</span>
+          <strong>${escapeHtml(formatLatencyDuration(probe?.totalMs ?? null))}</strong>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 function totalSafeRepairCandidates(report: SessionRecoveryReport): number {
   return (
     report.repairCandidates.missingRolloutFiles +
@@ -1516,24 +1834,39 @@ function formatSessionRepairFlash(result: SessionRepairResult, advanced: boolean
 function renderSessionRecoveryPanel(): string {
   const report = state.sessionRecoveryReport;
   const lastResult = state.sessionRecoveryLastResult;
+  const expanded = state.sessionRecoveryExpanded || Boolean(report) || Boolean(lastResult);
   const diagnosing = isPendingAction(diagnoseCodexSessionsActionKey);
   const repairing = isPendingAction(repairCodexSessionsActionKey);
   const repairingAdvanced = isPendingAction(repairCodexSessionsAdvancedActionKey);
 
   return `
-    <section class="session-recovery-panel" data-role="session-recovery-panel">
+    <section
+      class="session-recovery-panel"
+      data-role="session-recovery-panel"
+      data-state="${expanded ? "expanded" : "collapsed"}"
+    >
       <div class="session-recovery-head">
         <div class="session-recovery-copy">
-          <strong>Codex 会话诊断</strong>
+          <strong>高级会话工具</strong>
           <span class="session-recovery-updated">
             ${
               report
                 ? `SQLite：${escapeHtml(report.sqliteIntegrity)} · recent window：${escapeHtml(String(report.recentLimit))}`
-                : "按需运行诊断。默认只修真实索引不一致，不改旧会话时间。"
+                : expanded
+                  ? "仅用于排查本地 Codex 会话索引、时间戳或侧边栏显示异常。"
+                  : "默认收起；普通配置切换不需要操作这里。"
             }
           </span>
         </div>
         <div class="session-recovery-actions">
+          <button
+            class="button button-ghost usage-refresh-button"
+            data-action="toggle-session-recovery-panel"
+            ${state.busy || diagnosing || repairing || repairingAdvanced ? "disabled" : ""}
+          >
+            ${expanded ? "收起" : "展开"}
+          </button>
+          ${expanded ? `
           <button
             class="button button-ghost usage-refresh-button"
             data-action="diagnose-codex-sessions"
@@ -1555,10 +1888,11 @@ function renderSessionRecoveryPanel(): string {
           >
             ${repairingAdvanced ? "修复中..." : "高级时间修复"}
           </button>
+          ` : ""}
         </div>
       </div>
       ${
-        report
+        expanded && report
           ? `
             <div class="session-recovery-stats">
               <div class="session-recovery-stat">
@@ -1592,17 +1926,307 @@ function renderSessionRecoveryPanel(): string {
               }
             </div>
           `
-          : `
+          : expanded
+            ? `
             <p class="session-recovery-empty">
               旧项目显示“暂无聊天”不一定是损坏，也可能只是 Codex 侧边栏 recent-window 限制。
             </p>
           `
+            : ""
       }
       ${
-        lastResult
+        expanded && lastResult
           ? `<p class="session-recovery-result">${escapeHtml(lastResult.note)}</p>`
           : ""
       }
+    </section>
+  `;
+}
+
+function renderProfileLayoutToggle(): string {
+  return `
+    <div class="profile-layout-toggle" role="group" aria-label="Profile layout">
+      <button
+        class="profile-layout-button ${state.profileLayout === "list" ? "active" : ""}"
+        data-action="profile-layout-list"
+        ${state.busy ? "disabled" : ""}
+      >
+        列表
+      </button>
+      <button
+        class="profile-layout-button ${state.profileLayout === "grid" ? "active" : ""}"
+        data-action="profile-layout-grid"
+        ${state.busy ? "disabled" : ""}
+      >
+        卡片
+      </button>
+    </div>
+  `;
+}
+
+function formatQuotaCurrencyCompact(value: string | null | undefined): string {
+  const parsed = parseQuotaNumber(value);
+  if (parsed == null) {
+    return "--";
+  }
+  return `$${parsed.toFixed(2).replace(/\.00$/, "")}`;
+}
+
+function renderProfileRowMetrics(profile: ProfileSummary): string {
+  if (profile.authTypeLabel === "官方 OAuth") {
+    const usage = profile.codexUsage;
+    if (usage?.error) {
+      return `
+        <span class="profile-row-metric profile-row-metric-error" data-role="profile-row-metric">
+          <span>额度</span>
+          <strong>失败</strong>
+        </span>
+        <span class="profile-row-metric profile-row-metric-muted" data-role="profile-row-metric">
+          <span>5H</span>
+          <strong>--</strong>
+        </span>
+        <span class="profile-row-metric profile-row-metric-muted" data-role="profile-row-metric">
+          <span>本周</span>
+          <strong>--</strong>
+        </span>
+      `;
+    }
+
+    const primaryWindow = selectUsageWindow(usage, 300, true);
+    const weeklyWindow = selectUsageWindow(usage, 10080, false);
+    return `
+      <span class="profile-row-metric" data-role="profile-row-metric">
+        <span>5H</span>
+        <strong>${primaryWindow ? `${remainingPercent(primaryWindow.usedPercent)}%` : "--"}</strong>
+      </span>
+      <span class="profile-row-metric" data-role="profile-row-metric">
+        <span>本周</span>
+        <strong>${weeklyWindow ? `${remainingPercent(weeklyWindow.usedPercent)}%` : "--"}</strong>
+      </span>
+      <span class="profile-row-metric profile-row-metric-muted" data-role="profile-row-metric">
+        <span>首响</span>
+        <strong>--</strong>
+      </span>
+    `;
+  }
+
+  if (profile.authTypeLabel === "第三方 API") {
+    const usage = profile.thirdPartyUsage;
+    const probe = profile.thirdPartyLatency;
+    return `
+      <span class="profile-row-metric" data-role="profile-row-metric">
+        <span>今日</span>
+        <strong>${escapeHtml(formatQuotaCurrencyCompact(usage?.daily?.used))} / ${escapeHtml(formatQuotaCurrencyCompact(usage?.daily?.total))}</strong>
+      </span>
+      <span class="profile-row-metric" data-role="profile-row-metric">
+        <span>本周</span>
+        <strong>${escapeHtml(formatQuotaCurrencyCompact(usage?.weekly?.used))} / ${escapeHtml(formatQuotaCurrencyCompact(usage?.weekly?.total))}</strong>
+      </span>
+      <span class="profile-row-metric" data-role="profile-row-metric">
+        <span>首响</span>
+        <strong>${escapeHtml(formatLatencyDuration(probe?.ttftMs ?? null))}</strong>
+      </span>
+    `;
+  }
+
+  return `
+    <span class="profile-row-metric" data-role="profile-row-metric">
+      <span>状态</span>
+      <strong>--</strong>
+    </span>
+  `;
+}
+
+function renderProfileList(snapshot: AppSnapshot, profiles: ProfileSummary[]): string {
+  return `
+    <div class="profile-list" data-role="profile-list">
+      <button class="profile-row profile-row-add" data-role="add-card" data-action="new-profile" ${state.busy ? "disabled" : ""}>
+        <span class="profile-row-plus">+</span>
+        <span>加配置</span>
+      </button>
+      ${profiles
+        .map((profile) => {
+          const live = snapshot.activeProfileId === profile.id;
+          const refreshingCodexUsage = isPendingAction(usageRefreshActionKey(profile.id));
+          const refreshingAllCodexUsage = isPendingAction(refreshAllUsageActionKey);
+          const refreshingThirdPartyUsage = isPendingAction(thirdPartyUsageActionKey(profile.id));
+          const refreshingLatency = isPendingAction(latencyProbeActionKey(profile.id));
+          return `
+            <article class="profile-row ${live ? "profile-row-live" : ""}" data-role="profile-row" data-state="${live ? "live" : "idle"}">
+              <div class="profile-row-main">
+                <span class="profile-row-avatar" aria-hidden="true">${escapeHtml(profile.name.trim().charAt(0) || "P")}</span>
+                <span class="profile-row-copy">
+                  <span class="profile-row-title">
+                    <strong>${escapeHtml(profile.name)}</strong>
+                    <span class="pill pill-type">${escapeHtml(profileTypeLabel(profile))}</span>
+                  </span>
+                  <span>${escapeHtml(profile.notes || "暂无备注")}</span>
+                </span>
+              </div>
+              <div class="profile-row-metrics">
+                ${renderProfileRowMetrics(profile)}
+              </div>
+              <div class="profile-row-actions" data-role="profile-row-actions">
+                <span class="profile-row-action-slot" data-role="profile-row-primary-action">
+                ${
+                  live
+                    ? `<span class="profile-row-status profile-row-status-live">生效中</span>`
+                    : `<button class="button button-secondary profile-row-switch" data-action="switch" data-id="${profile.id}" data-name="${escapeHtml(profile.name)}" ${state.busy ? "disabled" : ""}>应用</button>`
+                }
+                </span>
+                <span class="profile-row-action-slot" data-role="profile-row-quota-action">
+                ${
+                  profile.authTypeLabel === "官方 OAuth"
+                    ? snapshot.codexUsageApiEnabled
+                      ? `
+                        <button
+                          class="button button-ghost profile-row-utility"
+                          data-action="refresh-codex-usage"
+                          data-id="${profile.id}"
+                          data-name="${escapeHtml(profile.name)}"
+                          ${state.busy || refreshingCodexUsage || refreshingAllCodexUsage ? "disabled" : ""}
+                        >
+                          ${refreshingCodexUsage ? "刷新中..." : "额度"}
+                        </button>
+                      `
+                      : `
+                        <button
+                          class="button button-ghost profile-row-utility"
+                          data-action="enable-codex-usage"
+                          ${state.busy || refreshingAllCodexUsage ? "disabled" : ""}
+                        >
+                          启用额度
+                        </button>
+                      `
+                    : `
+                      <button
+                        class="button button-ghost profile-row-utility"
+                        data-action="refresh-third-party-usage"
+                        data-id="${profile.id}"
+                        data-name="${escapeHtml(profile.name)}"
+                        ${state.busy || refreshingThirdPartyUsage ? "disabled" : ""}
+                      >
+                        ${refreshingThirdPartyUsage ? "刷新中..." : "额度"}
+                      </button>
+                    `
+                }
+                </span>
+                <span class="profile-row-action-slot" data-role="profile-row-latency-action">
+                ${
+                  profile.authTypeLabel === "第三方 API"
+                    ? `
+                      <button
+                        class="button button-ghost profile-row-utility"
+                        data-action="refresh-third-party-latency"
+                        data-id="${profile.id}"
+                        data-name="${escapeHtml(profile.name)}"
+                        ${state.busy || refreshingLatency ? "disabled" : ""}
+                      >
+                        ${refreshingLatency ? "测速中..." : "测速"}
+                      </button>
+                    `
+                    : `<span class="profile-row-action-placeholder">--</span>`
+                }
+                </span>
+                <span class="profile-row-action-slot" data-role="profile-row-detail-action">
+                <button class="button button-ghost profile-row-detail" title="查看和编辑完整信息" data-action="view-profile-details" data-id="${profile.id}" ${state.busy ? "disabled" : ""}>详情</button>
+                </span>
+              </div>
+            </article>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
+function renderProfileGrid(snapshot: AppSnapshot, profiles: ProfileSummary[]): string {
+  return `
+    <div class="card-grid" data-role="profile-grid">
+      <button class="card add-profile-card" data-role="add-card" data-action="new-profile" ${state.busy ? "disabled" : ""}>
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+        加配置
+      </button>
+
+      ${profiles.length === 0 ? `
+        <div class="empty-state">
+          <h3>暂无存档记录</h3>
+          <p>点击 "加配置" 录入您的第一套 Profile 集合吧！</p>
+        </div>
+      ` : ""}
+      ${profiles
+        .map(
+          (profile) => `
+            <article
+              class="card profile-card ${snapshot.activeProfileId === profile.id ? "profile-card-live" : ""}"
+              data-role="profile-card"
+              data-state="${snapshot.activeProfileId === profile.id ? "live" : "idle"}"
+            >
+              <div class="card-head">
+                <h2>${escapeHtml(profile.name)}</h2>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                  ${snapshot.activeProfileId === profile.id ? `
+                    <div class="status-badge">
+                      <div class="status-dot status-dot-pulse"></div>
+                      <span>Active</span>
+                    </div>
+                  ` : ""}
+                  <span class="pill pill-type">${escapeHtml(profileTypeLabel(profile))}</span>
+                </div>
+              </div>
+              <p class="card-note" style="${!profile.notes ? 'opacity:0.5;font-style:italic;' : ''}">${escapeHtml(profile.notes || "暂无备注")}</p>
+              ${renderCodexUsagePanel(snapshot, profile)}
+              ${renderThirdPartyRuntimePanel(profile)}
+
+              <div class="card-actions-overlay">
+                <div style="display: flex; flex-direction: column; gap: 4px; flex-grow: 1;">
+                  <p class="card-date">更新于：${formatDateTime(profile.updatedAt)}</p>
+                  ${snapshot.activeProfileId === profile.id
+                    ? `<div class="env-active-label"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg> 环境生效中</div>`
+                    : `<button class="button button-secondary" style="width:100%" data-action="switch" data-id="${profile.id}" data-name="${escapeHtml(profile.name)}" ${state.busy ? "disabled" : ""}>应用此配置</button>`}
+                </div>
+
+                <div class="card-secondary-actions" style="align-self: flex-end; padding-bottom: 2px;">
+                  <button class="button button-ghost profile-row-detail" title="查看和编辑完整信息" data-action="view-profile-details" data-id="${profile.id}" ${state.busy ? "disabled" : ""}>详情</button>
+                </div>
+              </div>
+            </article>
+          `,
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function getEditorProfileSummary(snapshot: AppSnapshot | null): ProfileSummary | null {
+  if (!snapshot || !state.editor.profileId) {
+    return null;
+  }
+  return snapshot.profiles.find((profile) => profile.id === state.editor.profileId) ?? null;
+}
+
+function renderEditorRuntimePanel(snapshot: AppSnapshot, profile: ProfileSummary | null): string {
+  if (!profile || state.editor.source !== "local") {
+    return "";
+  }
+
+  const live = snapshot.activeProfileId === profile.id;
+  return `
+    <section class="editor-runtime" data-role="editor-runtime-panel">
+      <div class="editor-runtime-head">
+        <div>
+          <span class="pill pill-type">${escapeHtml(profileTypeLabel(profile))}</span>
+          ${live ? `<span class="profile-row-status profile-row-status-live">生效中</span>` : ""}
+        </div>
+        ${
+          live
+            ? ""
+            : `<button class="button button-secondary" data-action="switch" data-id="${profile.id}" data-name="${escapeHtml(profile.name)}" ${state.busy ? "disabled" : ""}>应用此配置</button>`
+        }
+      </div>
+      ${renderCodexUsagePanel(snapshot, profile)}
+      ${renderThirdPartyUsagePanel(profile)}
+      ${renderThirdPartyLatencyPanel(profile)}
     </section>
   `;
 }
@@ -1790,9 +2414,12 @@ function renderAntigravityPage(): string {
 }
 
 function renderCardsPage(snapshot: AppSnapshot): string {
-  const activeProfile =
-    snapshot.profiles.find((profile) => profile.id === snapshot.activeProfileId) ?? null;
   const anyUsageRefreshPending = isPendingActionPrefix("codex-usage");
+  const orderedProfiles = [...snapshot.profiles].sort((a, b) => {
+    if (a.id === snapshot.activeProfileId) return -1;
+    if (b.id === snapshot.activeProfileId) return 1;
+    return 0;
+  });
   const hasPendingUpdate = state.update.lastResult?.hasUpdate ?? false;
   const currentVersionText = state.update.lastResult?.currentVersion ?? state.appVersion ?? "--";
   const updateLabelText = hasPendingUpdate ? "发现新版本" : "当前版本";
@@ -1854,6 +2481,7 @@ function renderCardsPage(snapshot: AppSnapshot): string {
         <div class="section-header">
           <h3 class="section-title">已保存的配置文件 (${snapshot.profiles.length})</h3>
           <div class="section-actions">
+            ${renderProfileLayoutToggle()}
             ${snapshot.profiles.some((profile) => profile.authTypeLabel === "官方 OAuth") ? `
               ${
                 snapshot.codexUsageApiEnabled
@@ -1878,82 +2506,11 @@ function renderCardsPage(snapshot: AppSnapshot): string {
           </div>
         </div>
         ${renderSessionRecoveryPanel()}
-        <div class="card-grid">
-          <button class="card add-profile-card" data-role="add-card" data-action="new-profile" ${state.busy ? "disabled" : ""}>
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-            加配置
-          </button>
-
-          ${snapshot.profiles.length === 0 ? `
-            <div class="empty-state">
-              <h3>暂无存档记录</h3>
-              <p>点击 "加配置" 录入您的第一套 Profile 集合吧！</p>
-            </div>
-          ` : ""}
-          ${[...snapshot.profiles]
-              .sort((a, b) => {
-                if (a.id === snapshot.activeProfileId) return -1;
-                if (b.id === snapshot.activeProfileId) return 1;
-                return 0;
-              })
-            .map(
-              (profile) => `
-                <article
-                  class="card profile-card ${snapshot.activeProfileId === profile.id ? "profile-card-live" : ""}"
-                  data-role="profile-card"
-                  data-state="${snapshot.activeProfileId === profile.id ? "live" : "idle"}"
-                >
-                  <div class="card-head">
-                    <h2>${escapeHtml(profile.name)}</h2>
-                    <div style="display: flex; gap: 8px; align-items: center;">
-                      ${snapshot.activeProfileId === profile.id ? `
-                        <div class="status-badge">
-                          <div class="status-dot status-dot-pulse"></div>
-                          <span>Active</span>
-                        </div>
-                      ` : ""}
-                      <span class="pill pill-type">${escapeHtml(profile.authTypeLabel)}</span>
-                    </div>
-                  </div>
-                  <p class="card-note" style="${!profile.notes ? 'opacity:0.5;font-style:italic;' : ''}">${escapeHtml(profile.notes || "暂无备注")}</p>
-                  ${renderCodexUsagePanel(snapshot, profile)}
-                  ${renderThirdPartyLatencyPanel(profile)}
-                  
-                  <div class="card-actions-overlay">
-                    <div style="display: flex; flex-direction: column; gap: 4px; flex-grow: 1;">
-                      <p class="card-date">更新于：${formatDateTime(profile.updatedAt)}</p>
-                      ${snapshot.activeProfileId === profile.id 
-                        ? `<div class="env-active-label"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg> 环境生效中</div>` 
-                        : `<button class="button button-secondary" style="width:100%" data-action="switch" data-id="${profile.id}" data-name="${escapeHtml(profile.name)}" ${state.busy ? "disabled" : ""}>应用此配置</button>`}
-                    </div>
-                    
-                    <div class="card-secondary-actions" style="align-self: flex-end; padding-bottom: 2px;">
-                      <button
-                        class="icon-button"
-                        title="查看文件详细内容"
-                        data-action="view-profile-details"
-                        data-id="${profile.id}"
-                        ${state.busy ? "disabled" : ""}
-                      >
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
-                      </button>
-                      <button
-                        class="icon-button text-red"
-                        title="销毁"
-                        data-action="delete-profile"
-                        data-id="${profile.id}"
-                        data-name="${escapeHtml(profile.name)}"
-                        ${state.busy ? "disabled" : ""}
-                      >
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
-                      </button>
-                    </div>
-                  </div>
-                </article>
-              `
-            )
-            .join("")}
-        </div>
+        ${
+          state.profileLayout === "list"
+            ? renderProfileList(snapshot, orderedProfiles)
+            : renderProfileGrid(snapshot, orderedProfiles)
+        }
       </section>
       ` : `
       <section class="grid-container">
@@ -2021,8 +2578,13 @@ function renderCardsPage(snapshot: AppSnapshot): string {
 }
 
 function renderEditorPage(): string {
+  const snapshot = state.snapshot;
+  if (!snapshot) {
+    return "";
+  }
   const existing = state.editor.mode === "existing";
   const readOnly = state.editor.readOnly;
+  const editorProfile = getEditorProfileSummary(snapshot);
   const title =
     readOnly
       ? "查看网络共享配置"
@@ -2078,6 +2640,21 @@ function renderEditorPage(): string {
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:2px;"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
                 ${existing ? "保存并立即启动" : "创建并立即启动"}
               </button>
+              ${
+                existing && state.editor.profileId
+                  ? `
+                    <button
+                      class="button button-danger"
+                      data-action="delete-profile"
+                      data-id="${state.editor.profileId}"
+                      data-name="${escapeHtml(state.editor.name)}"
+                      ${state.busy ? "disabled" : ""}
+                    >
+                      删除
+                    </button>
+                  `
+                  : ""
+              }
             </div>
           `}
       </header>
@@ -2110,6 +2687,8 @@ function renderEditorPage(): string {
           <strong>${formatDateTime(state.editor.updatedAt)}</strong>
         </div>
       </section>
+
+      ${renderEditorRuntimePanel(snapshot, editorProfile)}
 
       <section class="editor-body">
         <label class="field">
@@ -2228,6 +2807,9 @@ function bindEvents(): void {
         await repairCodexSessions(false);
       } else if (action === "repair-codex-sessions-advanced") {
         await repairCodexSessions(true);
+      } else if (action === "toggle-session-recovery-panel") {
+        state.sessionRecoveryExpanded = !state.sessionRecoveryExpanded;
+        render();
       } else if (action === "switch-platform" && button.dataset.platform) {
         await switchPlatform(button.dataset.platform as PlatformMode);
       } else if (action === "tab-local") {
@@ -2252,12 +2834,24 @@ function bindEvents(): void {
         await refreshAllCodexUsage();
       } else if (action === "refresh-codex-usage" && button.dataset.id && button.dataset.name) {
         await refreshProfileCodexUsage(button.dataset.id, button.dataset.name);
+      } else if (action === "profile-layout-list") {
+        state.profileLayout = "list";
+        render();
+      } else if (action === "profile-layout-grid") {
+        state.profileLayout = "grid";
+        render();
       } else if (
         action === "refresh-third-party-latency" &&
         button.dataset.id &&
         button.dataset.name
       ) {
         await refreshProfileLatencyProbe(button.dataset.id, button.dataset.name);
+      } else if (
+        action === "refresh-third-party-usage" &&
+        button.dataset.id &&
+        button.dataset.name
+      ) {
+        await refreshProfileThirdPartyUsage(button.dataset.id, button.dataset.name);
       } else if (action === "new-profile") {
         await openEditorForNewProfile();
       } else if (action === "view-profile-details" && button.dataset.id) {
