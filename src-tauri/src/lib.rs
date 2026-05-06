@@ -9,8 +9,9 @@ use crate::antigravity::models::{
 use crate::core::{
     check_for_update, check_install_location as resolve_install_location,
     install_update as perform_install_update, restart_codex_app, AppSnapshot,
-    InstallLocationStatus, ModelProviderSummary, ProfileDocument, ProfileInput, ProfileManager,
-    SessionRecoveryReport, SessionRepairResult, UpdateCheckResult, UpdateInstallRequest,
+    InstallLocationStatus, LegacyThirdPartyMigrationResult, ModelProviderSummary, ProfileDocument,
+    ProfileInput, ProfileManager, SessionRecoveryReport, SessionRepairResult, UpdateCheckResult,
+    UpdateInstallRequest,
 };
 use crate::menu_bar::{
     install_menu_bar, menu_bar_refresh_target, sync_menu_bar_usage, MenuBarRefreshKind,
@@ -207,6 +208,19 @@ fn set_codex_usage_api_enabled(app: AppHandle, enabled: bool) -> Result<AppSnaps
         .set_codex_usage_api_enabled(enabled)
         .map_err(|error| error.to_string())?;
     snapshot_and_sync(&app, &manager)
+}
+
+#[tauri::command]
+fn migrate_legacy_third_party_profiles(
+    app: AppHandle,
+) -> Result<LegacyThirdPartyMigrationResult, String> {
+    let manager = manager_from_app(&app)?;
+    let result = manager
+        .migrate_legacy_third_party_profiles()
+        .map_err(|error| error.to_string())?;
+    let snapshot = manager.snapshot().map_err(|error| error.to_string())?;
+    sync_menu_bar_usage(&app, &snapshot).map_err(|error| error.to_string())?;
+    Ok(result)
 }
 
 #[tauri::command]
@@ -410,6 +424,7 @@ pub fn run() {
             delete_profile,
             set_target_dir,
             set_codex_usage_api_enabled,
+            migrate_legacy_third_party_profiles,
             refresh_profile_codex_usage,
             refresh_profile_latency_probe,
             refresh_profile_third_party_usage,

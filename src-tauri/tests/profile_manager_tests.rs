@@ -87,22 +87,33 @@ model_reasoning_effort = "medium"
 
 fn third_party_config_toml(model: &str) -> String {
     format!(
-        r#"model_provider = "OpenAI"
+        r#"openai_base_url = "http://sub2api.ite.tapcash.com/v1"
+model_provider = "openai"
 model = "{model}"
 review_model = "{model}"
-model_reasoning_effort = "xhigh"
+model_reasoning_effort = "high"
+plan_mode_reasoning_effort = "xhigh"
 disable_response_storage = true
-network_access = "enabled"
+show_raw_agent_reasoning = true
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+personality = "pragmatic"
+web_search = "live"
 model_context_window = 1000000
-model_auto_compact_token_limit = 900000
+model_auto_compact_token_limit = 400000
 
-[model_providers.OpenAI]
-name = "OpenAI"
-base_url = "http://sub2api.ite.tapcash.com"
-wire_api = "responses"
-requires_openai_auth = true
-{}"#,
-        local_sections()
+[tui]
+terminal_title = []
+status_line = ["model-with-reasoning", "context-usage", "current-dir", "git-branch"]
+
+[features]
+guardian_approval = true
+remote_connections = true
+memories = true
+
+[sandbox_workspace_write]
+network_access = true
+"#
     )
 }
 
@@ -127,8 +138,44 @@ requires_openai_auth = true
     )
 }
 
+fn legacy_third_party_config_toml(model: &str) -> String {
+    format!(
+        r#"model_provider = "ylscode"
+model = "{model}"
+review_model = "{model}"
+model_reasoning_effort = "xhigh"
+disable_response_storage = true
+network_access = "enabled"
+model_context_window = 1000000
+model_auto_compact_token_limit = 900000
+
+[model_providers.ylscode]
+name = "YLS Code"
+base_url = "https://code.ylsagi.com/v1"
+wire_api = "responses"
+requires_openai_auth = true
+{}"#,
+        local_sections()
+    )
+}
+
+fn legacy_ylsagi_config_toml(model: &str) -> String {
+    legacy_third_party_config_toml(model)
+        .replace("model_provider = \"ylscode\"", "model_provider = \"ylsagi\"")
+        .replace("[model_providers.ylscode]", "[model_providers.ylsagi]")
+}
+
 fn config_with_shared_growth(config_toml: &str) -> String {
-    format!("{config_toml}\n{}", runtime_growth_sections())
+    if let Some(table_start) = config_toml.find("\n[") {
+        format!(
+            "{}\n{}{}",
+            &config_toml[..table_start],
+            runtime_growth_sections(),
+            &config_toml[table_start..],
+        )
+    } else {
+        format!("{config_toml}\n{}", runtime_growth_sections())
+    }
 }
 
 fn temp_manager() -> (TempDir, TempDir, ProfileManager) {
@@ -467,19 +514,72 @@ fn import_third_party_profile_registers_model_provider_resource() {
         .expect("import third-party profile");
 
     assert_eq!(profile.auth_type_label, "第三方 API");
-    assert_eq!(profile.model_provider_key.as_deref(), Some("OpenAI"));
+    assert_eq!(profile.model_provider_key.as_deref(), Some("openai"));
 
     let providers = manager
         .list_model_providers()
         .expect("list model providers");
     assert_eq!(providers.len(), 1);
     let provider = &providers[0];
-    assert_eq!(provider.model_provider_key.as_deref(), Some("OpenAI"));
-    assert_eq!(provider.name, "OpenAI");
-    assert_eq!(provider.base_url, "http://sub2api.ite.tapcash.com");
+    assert_eq!(provider.model_provider_key.as_deref(), Some("openai"));
+    assert_eq!(provider.name, "openai");
+    assert_eq!(provider.base_url, "http://sub2api.ite.tapcash.com/v1");
     assert_eq!(provider.wire_api, "responses");
     assert_eq!(provider.api_keys.len(), 1);
     assert_eq!(provider.api_keys[0].api_key, "sk-ylscode");
+}
+
+#[test]
+fn migrate_legacy_third_party_profiles_rewrites_model_providers_to_openai_base_url_template() {
+    let (_app_dir, _target_dir, manager) = temp_manager();
+
+    let legacy = manager
+        .import_profile(ProfileInput {
+            name: "Legacy YLS".into(),
+            notes: "old provider table".into(),
+            auth_json: api_key_auth_json("sk-legacy"),
+            config_toml: legacy_third_party_config_toml("gpt-5.4"),
+        })
+        .expect("import legacy third-party profile");
+    let official = manager
+        .import_profile(ProfileInput {
+            name: "Official".into(),
+            notes: String::new(),
+            auth_json: oauth_auth_json("owner@example.com", "user-1", "acct-1"),
+            config_toml: official_config_toml("gpt-5"),
+        })
+        .expect("import official");
+
+    let result = manager
+        .migrate_legacy_third_party_profiles()
+        .expect("migrate legacy profiles");
+
+    assert_eq!(result.migrated_profile_ids, vec![legacy.id.clone()]);
+    assert_eq!(result.skipped_profile_ids, vec![official.id.clone()]);
+
+    let migrated = manager
+        .get_profile_document(&legacy.id)
+        .expect("load migrated legacy profile");
+    assert!(migrated
+        .config_toml
+        .contains("openai_base_url = \"https://code.ylsagi.com/v1\""));
+    assert!(migrated.config_toml.contains("model_provider = \"openai\""));
+    assert!(migrated.config_toml.contains("model = \"gpt-5.4\""));
+    assert!(migrated.config_toml.contains("review_model = \"gpt-5.4\""));
+    assert!(migrated.config_toml.contains("model_reasoning_effort = \"high\""));
+    assert!(migrated
+        .config_toml
+        .contains("plan_mode_reasoning_effort = \"xhigh\""));
+    assert!(migrated.config_toml.contains("[tui]"));
+    assert!(migrated.config_toml.contains("[sandbox_workspace_write]"));
+    assert!(!migrated.config_toml.contains("[model_providers."));
+    assert!(!migrated.config_toml.contains("\nbase_url ="));
+
+    let unchanged = manager
+        .get_profile_document(&official.id)
+        .expect("load official profile");
+    assert_eq!(unchanged.auth_type_label, "官方 OAuth");
+    assert!(!unchanged.config_toml.contains("openai_base_url ="));
 }
 
 #[test]
@@ -595,7 +695,7 @@ fn get_profile_document_returns_saved_auth_and_config_contents() {
     assert!(document.auth_json.contains("sk-browse"));
     assert!(document
         .config_toml
-        .contains("base_url = \"http://sub2api.ite.tapcash.com\""));
+        .contains("openai_base_url = \"http://sub2api.ite.tapcash.com/v1\""));
     assert_eq!(document.auth_type_label, "第三方 API");
 }
 
@@ -763,7 +863,7 @@ windows_wsl_setup_acknowledged = true
 
     assert!(active_auth.contains("sk-alt"));
     assert!(active_config.contains("gpt-5"));
-    assert!(active_config.contains("base_url = \"http://sub2api.ite.tapcash.com\""));
+    assert!(active_config.contains("openai_base_url = \"http://sub2api.ite.tapcash.com/v1\""));
     assert!(active_config.contains("[projects.\"/tmp/demo\"]"));
     assert!(active_config.contains("approval_policy = \"never\""));
 
@@ -930,6 +1030,7 @@ fn switch_profile_syncs_current_auth_and_managed_config_back_to_previous_profile
     assert!(!synced.config_toml.contains("model_provider ="));
     assert!(!synced.config_toml.contains("[model_providers."));
     assert!(!synced.config_toml.contains("base_url ="));
+    assert!(!synced.config_toml.contains("openai_base_url ="));
 }
 
 #[test]
@@ -981,6 +1082,9 @@ fn switch_profile_merges_shared_runtime_config_without_polluting_official_profil
     assert!(!switched.contains("model_auto_compact_token_limit ="));
     assert!(!switched.contains("[model_providers."));
     assert!(!switched.contains("base_url ="));
+    assert!(!switched.contains("openai_base_url ="));
+    assert!(!switched.contains("[tui]"));
+    assert!(!switched.contains("[sandbox_workspace_write]"));
 }
 
 #[test]
@@ -1031,10 +1135,12 @@ fn switch_profile_updates_selected_profile_document_with_effective_merged_config
     assert!(saved
         .config_toml
         .contains("[projects.\"/tmp/runtime-growth\"]"));
-    assert!(saved.config_toml.contains("[mcp_servers.playwright]"));
     assert!(saved.config_toml.contains("[features]"));
     assert!(!saved.config_toml.contains("model_provider ="));
     assert!(!saved.config_toml.contains("[model_providers."));
+    assert!(!saved.config_toml.contains("openai_base_url ="));
+    assert!(!saved.config_toml.contains("[tui]"));
+    assert!(!saved.config_toml.contains("[sandbox_workspace_write]"));
 }
 
 #[test]
@@ -1366,10 +1472,100 @@ fn switch_profile_repairs_active_session_provider_when_model_provider_changes() 
 
     assert_eq!(
         read_recovery_thread_provider(target_dir.path(), "shared"),
-        "OpenAI"
+        "openai"
     );
     let rollout = fs::read_to_string(&rollout_path).expect("read rollout");
-    assert!(rollout.contains(r#""model_provider":"OpenAI""#));
+    assert!(rollout.contains(r#""model_provider":"openai""#));
+    assert_eq!(file_mtime_millis(&rollout_path), 1_000);
+}
+
+#[test]
+fn switch_legacy_third_party_profile_keeps_session_provider_openai() {
+    let (_app_dir, target_dir, mut manager) = temp_manager();
+
+    let profile = manager
+        .import_profile(ProfileInput {
+            name: "Legacy Third Party".into(),
+            notes: String::new(),
+            auth_json: api_key_auth_json("sk-third"),
+            config_toml: legacy_third_party_config_toml("gpt-5"),
+        })
+        .expect("import profile");
+
+    let rollout_path = target_dir
+        .path()
+        .join("sessions")
+        .join("2026")
+        .join("legacy-third-party.jsonl");
+    write_provider_repair_rollout(&rollout_path, "shared", "openai");
+    set_file_mtime(&rollout_path, file_time_from_millis(1_000)).expect("set rollout mtime");
+    seed_recovery_database(
+        target_dir.path(),
+        &[RecoveryThreadSeed {
+            id: "shared".into(),
+            cwd: "/tmp/shared".into(),
+            title: "Shared".into(),
+            rollout_path: rollout_path.clone(),
+            updated_at_ms: 1_000,
+            has_user_event: true,
+            archived: false,
+            model_provider: "openai".into(),
+        }],
+    );
+
+    manager.switch_profile(&profile.id).expect("switch profile");
+
+    assert_eq!(
+        read_recovery_thread_provider(target_dir.path(), "shared"),
+        "openai"
+    );
+    let rollout = fs::read_to_string(&rollout_path).expect("read rollout");
+    assert!(rollout.contains(r#""model_provider":"openai""#));
+    assert_eq!(file_mtime_millis(&rollout_path), 1_000);
+}
+
+#[test]
+fn switch_legacy_ylsagi_profile_keeps_session_provider_openai() {
+    let (_app_dir, target_dir, mut manager) = temp_manager();
+
+    let profile = manager
+        .import_profile(ProfileInput {
+            name: "Legacy YLSAGI".into(),
+            notes: String::new(),
+            auth_json: api_key_auth_json("sk-third"),
+            config_toml: legacy_ylsagi_config_toml("gpt-5"),
+        })
+        .expect("import profile");
+
+    let rollout_path = target_dir
+        .path()
+        .join("sessions")
+        .join("2026")
+        .join("legacy-ylsagi.jsonl");
+    write_provider_repair_rollout(&rollout_path, "shared", "openai");
+    set_file_mtime(&rollout_path, file_time_from_millis(1_000)).expect("set rollout mtime");
+    seed_recovery_database(
+        target_dir.path(),
+        &[RecoveryThreadSeed {
+            id: "shared".into(),
+            cwd: "/tmp/shared".into(),
+            title: "Shared".into(),
+            rollout_path: rollout_path.clone(),
+            updated_at_ms: 1_000,
+            has_user_event: true,
+            archived: false,
+            model_provider: "openai".into(),
+        }],
+    );
+
+    manager.switch_profile(&profile.id).expect("switch profile");
+
+    assert_eq!(
+        read_recovery_thread_provider(target_dir.path(), "shared"),
+        "openai"
+    );
+    let rollout = fs::read_to_string(&rollout_path).expect("read rollout");
+    assert!(rollout.contains(r#""model_provider":"openai""#));
     assert_eq!(file_mtime_millis(&rollout_path), 1_000);
 }
 

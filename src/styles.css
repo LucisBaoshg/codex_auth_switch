@@ -1353,7 +1353,7 @@ p { margin: 0; }
   font-size: 0.95rem;
 }
 
-.field input, .field textarea {
+.field input, .field textarea, .field select {
   background-color: var(--bg-page);
   border: 1px solid var(--border);
   color: var(--text-main);
@@ -1363,7 +1363,7 @@ p { margin: 0; }
   transition: all 0.2s;
 }
 
-.field input:focus, .field textarea:focus {
+.field input:focus, .field textarea:focus, .field select:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
@@ -1381,6 +1381,38 @@ p { margin: 0; }
   font-size: 0.85rem;
   min-height: 480px;
   line-height: 1.6;
+}
+
+.third-party-delta-card {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  padding: 24px;
+  border: 1px solid rgba(99, 102, 241, 0.22);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at top left, rgba(99, 102, 241, 0.12), transparent 34%),
+    var(--bg-page);
+}
+
+.third-party-delta-card p {
+  color: var(--text-muted);
+  margin-top: 8px;
+}
+
+.third-party-delta-card p.eyebrow {
+  color: var(--accent);
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  margin: 0 0 8px;
+  text-transform: uppercase;
+}
+
+.third-party-delta-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
 }
 
 /* Busy Dialog */
@@ -1570,6 +1602,9 @@ p { margin: 0; }
     align-self: flex-end;
   }
   .editor-panels {
+    grid-template-columns: 1fr;
+  }
+  .third-party-delta-grid {
     grid-template-columns: 1fr;
   }
   .section-header {

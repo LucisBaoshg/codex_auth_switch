@@ -198,6 +198,13 @@ pub struct InstallLocationStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct LegacyThirdPartyMigrationResult {
+    pub migrated_profile_ids: Vec<String>,
+    pub skipped_profile_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionRecoveryCounts {
     pub session_index_entries: usize,
     pub db_threads: usize,
@@ -633,6 +640,77 @@ impl ProfileManager {
         self.read_model_provider_store()
     }
 
+    pub fn migrate_legacy_third_party_profiles(
+        &self,
+    ) -> Result<LegacyThirdPartyMigrationResult, AppError> {
+        let mut migrated_profile_ids = Vec::new();
+        let mut skipped_profile_ids = Vec::new();
+
+        if !self.profiles_dir().exists() {
+            return Ok(LegacyThirdPartyMigrationResult {
+                migrated_profile_ids,
+                skipped_profile_ids,
+            });
+        }
+
+        for entry in fs::read_dir(self.profiles_dir())? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+
+            let profile_dir = entry.path();
+            let meta_path = profile_dir.join("meta.json");
+            let auth_path = profile_dir.join("auth.json");
+            let config_path = profile_dir.join("config.toml");
+            if !meta_path.exists() || !auth_path.exists() || !config_path.exists() {
+                continue;
+            }
+
+            let metadata = self.read_profile_metadata(&profile_dir)?;
+            let auth_json = fs::read_to_string(&auth_path)?;
+            let config_toml = fs::read_to_string(&config_path)?;
+            let Some(migrated_config) =
+                migrate_legacy_third_party_config_toml(&auth_json, &config_toml)?
+            else {
+                skipped_profile_ids.push(metadata.id);
+                continue;
+            };
+
+            let normalized_config =
+                normalize_config_toml_for_auth(&auth_json, &migrated_config)?;
+            fs::write(&config_path, &normalized_config)?;
+            self.register_model_provider_from_profile(
+                &auth_json,
+                &normalized_config,
+                &metadata.name,
+            )?;
+
+            let next_metadata = self.compose_profile_metadata(
+                metadata.id.clone(),
+                metadata.name,
+                metadata.notes,
+                metadata.remote_profile_id.clone(),
+                metadata.created_at,
+                Utc::now(),
+                &auth_json,
+                &normalized_config,
+                None,
+                None,
+                None,
+            )?;
+            self.write_profile_metadata(&profile_dir, &next_metadata)?;
+            migrated_profile_ids.push(metadata.id);
+        }
+
+        migrated_profile_ids.sort();
+        skipped_profile_ids.sort();
+        Ok(LegacyThirdPartyMigrationResult {
+            migrated_profile_ids,
+            skipped_profile_ids,
+        })
+    }
+
     pub fn import_profile(&self, input: ProfileInput) -> Result<ProfileSummary, AppError> {
         let name = input.name.trim();
         if name.is_empty() {
@@ -942,7 +1020,7 @@ impl ProfileManager {
 
     pub fn fix_session_database_and_configs(&self) -> Result<(), AppError> {
         let target_dir = self.target_dir.clone();
-        let active_provider = self.repair_configs_and_resolve_active_provider()?;
+        let active_provider = self.repair_configs_and_resolve_session_provider()?;
         self.repair_workspace_project_order(&target_dir);
         let _ = self.repair_session_model_provider_for_switch(&active_provider)?;
 
@@ -969,10 +1047,10 @@ impl ProfileManager {
             })
     }
 
-    fn repair_configs_and_resolve_active_provider(&self) -> Result<String, AppError> {
+    fn repair_configs_and_resolve_session_provider(&self) -> Result<String, AppError> {
         let target_config = self.target_dir.join("config.toml");
         let target_auth = self.target_dir.join("auth.json");
-        let mut active_provider = "openai".to_string();
+        let mut session_provider = "openai".to_string();
 
         if target_config.exists() {
             if let Ok(content) = fs::read_to_string(&target_config) {
@@ -992,7 +1070,7 @@ impl ProfileManager {
                     let _ = fs::write(&target_config, &repaired);
                 }
 
-                active_provider = model_provider_from_config_toml(&repaired)?;
+                session_provider = session_model_provider_key_from_config_toml(&repaired)?;
             }
         }
 
@@ -1025,7 +1103,7 @@ impl ProfileManager {
             }
         }
 
-        Ok(active_provider)
+        Ok(session_provider)
     }
 
     fn build_session_recovery_report(
@@ -1677,7 +1755,9 @@ impl ProfileManager {
         fs::write(self.target_auth_path(), &next_auth_json)?;
         fs::write(self.target_config_path(), &next_config_toml)?;
         if current_model_provider != next_model_provider {
-            let _ = self.repair_session_model_provider_for_switch(&next_model_provider)?;
+            let _ = self.repair_session_model_provider_for_switch(
+                &session_model_provider_key_from_config_toml(&next_config_toml)?,
+            )?;
         }
         self.sync_runtime_state_to_profile(profile_id, &next_auth_json, &next_config_toml)?;
 
@@ -3054,6 +3134,52 @@ fn model_provider_from_config_toml(config_toml: &str) -> Result<String, AppError
         .to_string())
 }
 
+fn session_model_provider_key_from_config_toml(config_toml: &str) -> Result<String, AppError> {
+    let table = parse_toml_table(config_toml)?;
+    if table
+        .get("openai_base_url")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !normalize_base_url_for_store(value).is_empty())
+    {
+        return Ok("openai".into());
+    }
+
+    let config_model_provider = table
+        .get("model_provider")
+        .and_then(|value| value.as_str())
+        .unwrap_or("openai");
+
+    let legacy_provider_base_url = table
+        .get("model_providers")
+        .and_then(|value| value.as_table())
+        .and_then(|providers| {
+            providers
+                .get(config_model_provider)
+                .or_else(|| providers.values().next())
+        })
+        .and_then(|value| value.as_table())
+        .and_then(|provider| provider.get("base_url"))
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !normalize_base_url_for_store(value).is_empty());
+    if legacy_provider_base_url {
+        return Ok("openai".into());
+    }
+
+    Ok(session_model_provider_key(config_model_provider))
+}
+
+fn session_model_provider_key(config_model_provider: &str) -> String {
+    let provider = config_model_provider.trim();
+    if provider.is_empty()
+        || provider.eq_ignore_ascii_case("openai")
+        || provider.eq_ignore_ascii_case("ylscode")
+    {
+        "openai".into()
+    } else {
+        provider.to_string()
+    }
+}
+
 fn resolve_third_party_provider_descriptor(
     auth_json: &str,
     config_toml: &str,
@@ -3074,43 +3200,43 @@ fn resolve_third_party_provider_descriptor(
     };
 
     let config = parse_toml_table(config_toml)?;
-    let Some(providers) = config.get("model_providers").and_then(|value| value.as_table()) else {
-        return Ok(None);
-    };
-    let Some(provider_key) = config
+    let provider_key = config
         .get("model_provider")
         .and_then(|value| value.as_str())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .or_else(|| providers.keys().next().cloned())
-    else {
-        return Ok(None);
-    };
-    let Some(provider) = providers
-        .get(&provider_key)
+        .unwrap_or_else(|| "openai".into());
+
+    let provider_from_table = config
+        .get("model_providers")
         .and_then(|value| value.as_table())
-    else {
-        return Ok(None);
-    };
+        .and_then(|providers| providers.get(&provider_key).or_else(|| providers.values().next()))
+        .and_then(|value| value.as_table());
 
-    let Some(base_url) = provider
-        .get("base_url")
+    let base_url = config
+        .get("openai_base_url")
         .and_then(|value| value.as_str())
+        .or_else(|| {
+            provider_from_table
+                .and_then(|provider| provider.get("base_url"))
+                .and_then(|value| value.as_str())
+        })
         .map(normalize_base_url_for_store)
-        .filter(|value| !value.is_empty())
-    else {
+        .filter(|value| !value.is_empty());
+
+    let Some(base_url) = base_url else {
         return Ok(None);
     };
 
-    let provider_name = provider
-        .get("name")
-        .and_then(|value| value.as_str())
+    let provider_name = provider_from_table
+        .and_then(|provider| provider.get("name"))
+        .and_then(|name| name.as_str())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| provider_key.clone());
-    let wire_api = provider
-        .get("wire_api")
-        .and_then(|value| value.as_str())
+        .unwrap_or_else(|| infer_third_party_provider_name(&provider_key, &base_url));
+    let wire_api = provider_from_table
+        .and_then(|provider| provider.get("wire_api"))
+        .and_then(|wire_api| wire_api.as_str())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "responses".into());
@@ -3792,25 +3918,47 @@ mod tests {
 
 const COMMON_PROFILE_SCALAR_KEYS: &[&str] = &["model", "model_reasoning_effort"];
 const THIRD_PARTY_PROFILE_SCALAR_KEYS: &[&str] = &[
+    "openai_base_url",
     "model_provider",
     "review_model",
+    "plan_mode_reasoning_effort",
     "model_context_window",
     "model_auto_compact_token_limit",
     "disable_response_storage",
+    "show_raw_agent_reasoning",
+    "approval_policy",
+    "sandbox_mode",
+    "personality",
+    "web_search",
     "network_access",
 ];
-const THIRD_PARTY_PROFILE_TABLE_KEYS: &[&str] = &["model_providers"];
+const THIRD_PARTY_PROFILE_TABLE_KEYS: &[&str] = &[
+    "model_providers",
+    "tui",
+    "sandbox_workspace_write",
+];
 const ALL_PROFILE_SCALAR_KEYS: &[&str] = &[
+    "openai_base_url",
     "model_provider",
     "model",
     "review_model",
     "model_reasoning_effort",
+    "plan_mode_reasoning_effort",
     "model_context_window",
     "model_auto_compact_token_limit",
     "disable_response_storage",
+    "show_raw_agent_reasoning",
+    "approval_policy",
+    "sandbox_mode",
+    "personality",
+    "web_search",
     "network_access",
 ];
-const ALL_PROFILE_TABLE_KEYS: &[&str] = &["model_providers"];
+const ALL_PROFILE_TABLE_KEYS: &[&str] = &[
+    "model_providers",
+    "tui",
+    "sandbox_workspace_write",
+];
 const DEFAULT_CODEX_USAGE_ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/usage";
 const DEFAULT_YLSCODE_USAGE_ENDPOINT: &str = "https://code.ylsagi.com/codex/info";
 const REFRESH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
@@ -3942,6 +4090,110 @@ fn normalize_config_toml_for_auth(auth_json: &str, config_toml: &str) -> Result<
         .map_err(|error| AppError::Message(error.to_string()))
 }
 
+fn migrate_legacy_third_party_config_toml(
+    auth_json: &str,
+    config_toml: &str,
+) -> Result<Option<String>, AppError> {
+    if is_official_oauth_auth(auth_json)? {
+        return Ok(None);
+    }
+
+    let table = parse_toml_table(config_toml)?;
+    if table
+        .get("openai_base_url")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Ok(None);
+    }
+
+    let Some(providers) = table.get("model_providers").and_then(|value| value.as_table()) else {
+        return Ok(None);
+    };
+    let Some(provider_key) = table
+        .get("model_provider")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| providers.keys().next().cloned())
+    else {
+        return Ok(None);
+    };
+    let Some(provider) = providers
+        .get(&provider_key)
+        .or_else(|| providers.values().next())
+        .and_then(|value| value.as_table())
+    else {
+        return Ok(None);
+    };
+    let Some(base_url) = provider
+        .get("base_url")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    let model = table
+        .get("model")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "gpt-5.5".into());
+    let review_model = table
+        .get("review_model")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| model.clone());
+
+    Ok(Some(standard_third_party_config_toml(
+        &base_url,
+        &model,
+        &review_model,
+    )))
+}
+
+fn standard_third_party_config_toml(base_url: &str, model: &str, review_model: &str) -> String {
+    format!(
+        r#"openai_base_url = "{}"
+model_provider = "openai"
+model = "{}"
+review_model = "{}"
+model_reasoning_effort = "high"
+plan_mode_reasoning_effort = "xhigh"
+disable_response_storage = true
+show_raw_agent_reasoning = true
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+personality = "pragmatic"
+web_search = "live"
+model_context_window = 1000000
+model_auto_compact_token_limit = 400000
+
+[tui]
+terminal_title = []
+status_line = ["model-with-reasoning", "context-usage", "current-dir", "git-branch"]
+
+[features]
+guardian_approval = true
+remote_connections = true
+memories = true
+
+[sandbox_workspace_write]
+network_access = true
+"#,
+        escape_toml_basic_string(base_url),
+        escape_toml_basic_string(model),
+        escape_toml_basic_string(review_model),
+    )
+}
+
+fn escape_toml_basic_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 fn merge_profile_managed_config(
     current_config_toml: &str,
     next_auth_json: &str,
@@ -3974,17 +4226,22 @@ fn detect_auth_type_label(auth_json: &str, config_toml: &str) -> Result<String, 
         .is_some_and(|value| !value.trim().is_empty());
 
     if has_openai_api_key {
-        let has_custom_provider = config
-            .get("model_providers")
-            .and_then(|value| value.as_table())
-            .is_some_and(|providers| {
-                providers.values().any(|provider| {
-                    provider
-                        .as_table()
-                        .and_then(|table| table.get("base_url"))
-                        .is_some()
-                })
-            });
+        let has_openai_base_url = config
+            .get("openai_base_url")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| !value.trim().is_empty());
+        let has_custom_provider = has_openai_base_url
+            || config
+                .get("model_providers")
+                .and_then(|value| value.as_table())
+                .is_some_and(|providers| {
+                    providers.values().any(|provider| {
+                        provider
+                            .as_table()
+                            .and_then(|table| table.get("base_url"))
+                            .is_some()
+                    })
+                });
 
         if has_custom_provider {
             return Ok("第三方 API".into());
@@ -4611,37 +4868,34 @@ fn resolve_third_party_probe_target(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| AppError::Message("当前卡片缺少 model，无法执行测速。".into()))?;
 
-    let providers = config
-        .get("model_providers")
-        .and_then(|value| value.as_table())
-        .ok_or_else(|| AppError::Message("当前卡片缺少 model_providers 配置。".into()))?;
-
     let provider_name = config
         .get("model_provider")
         .and_then(|value| value.as_str())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .or_else(|| providers.keys().next().cloned())
-        .ok_or_else(|| AppError::Message("当前卡片缺少 model_provider 配置。".into()))?;
+        .unwrap_or_else(|| "openai".into());
 
-    let provider = providers
-        .get(&provider_name)
+    let provider_from_table = config
+        .get("model_providers")
         .and_then(|value| value.as_table())
-        .ok_or_else(|| {
-            AppError::Message(format!(
-                "在 model_providers 中找不到 `{provider_name}` 的配置。"
-            ))
-        })?;
+        .and_then(|providers| providers.get(&provider_name).or_else(|| providers.values().next()))
+        .and_then(|value| value.as_table());
 
-    let base_url = provider
-        .get("base_url")
+    let base_url = config
+        .get("openai_base_url")
         .and_then(|value| value.as_str())
+        .or_else(|| {
+            provider_from_table
+                .and_then(|provider| provider.get("base_url"))
+                .and_then(|value| value.as_str())
+        })
         .map(|value| value.trim().trim_end_matches('/').to_string())
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| AppError::Message("当前卡片缺少 base_url 配置。".into()))?;
+        .ok_or_else(|| AppError::Message("当前卡片缺少 openai_base_url 配置。".into()))?;
+    let provider_name = infer_third_party_provider_name(&provider_name, &base_url);
 
-    let wire_api = provider
-        .get("wire_api")
+    let wire_api = provider_from_table
+        .and_then(|provider| provider.get("wire_api"))
         .and_then(|value| value.as_str())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
@@ -4654,6 +4908,23 @@ fn resolve_third_party_probe_target(
         model,
         wire_api,
     })
+}
+
+fn infer_third_party_provider_name(provider_name: &str, base_url: &str) -> String {
+    let normalized_provider = provider_name.trim();
+    let normalized_base_url = base_url.trim().to_ascii_lowercase();
+    if normalized_base_url.contains("ylsagi.com")
+        || normalized_base_url.contains("ylscode")
+        || normalized_base_url.contains("code.ylsagi.com")
+    {
+        return "ylscode".into();
+    }
+
+    if normalized_provider.is_empty() {
+        "openai".into()
+    } else {
+        normalized_provider.to_string()
+    }
 }
 
 fn responses_probe_body(target: &ThirdPartyProbeTarget) -> String {

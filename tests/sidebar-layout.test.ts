@@ -672,8 +672,86 @@ test("opens the editor flow when clicking the add-profile card", async () => {
 
   expect(document.querySelector('[data-page="editor"]')).not.toBeNull();
   expect(document.querySelector("#editor-name")).not.toBeNull();
-  expect(document.querySelector("#editor-auth-json")).not.toBeNull();
-  expect(document.querySelector("#editor-config-toml")).not.toBeNull();
+  expect(document.querySelector('[data-role="third-party-delta-form"]')).not.toBeNull();
+  expect(document.querySelector("#third-party-base-url")).not.toBeNull();
+  expect(document.querySelector("#third-party-api-key")).not.toBeNull();
+  expect(document.querySelector("#editor-auth-json")).toBeNull();
+  expect(document.querySelector("#editor-config-toml")).toBeNull();
+});
+
+test("migrates legacy third-party profiles from the local profile toolbar", async () => {
+  const snapshot = {
+    targetDir: "/Users/example/.codex",
+    usingDefaultTargetDir: true,
+    targetExists: true,
+    targetAuthExists: true,
+    targetConfigExists: true,
+    targetUpdatedAt: "2026-03-25T00:00:00Z",
+    targetAuthTypeLabel: "第三方 API",
+    activeProfileId: "profile-legacy",
+    lastSelectedProfileId: "profile-legacy",
+    lastSwitchProfileId: "profile-legacy",
+    lastSwitchedAt: "2026-03-25T00:00:00Z",
+    codexUsageApiEnabled: false,
+    profiles: [
+      {
+        id: "profile-legacy",
+        name: "Legacy API",
+        notes: "old provider table",
+        authTypeLabel: "第三方 API",
+        modelProviderKey: "ylscode",
+        createdAt: "2026-03-24T00:00:00Z",
+        updatedAt: "2026-03-24T13:24:00Z",
+        authHash: "auth-legacy",
+        configHash: "config-legacy",
+        codexUsage: null,
+        thirdPartyLatency: null,
+        thirdPartyUsage: null,
+      },
+    ],
+  };
+  const migratedSnapshot = {
+    ...snapshot,
+    profiles: [
+      {
+        ...snapshot.profiles[0],
+        modelProviderKey: "openai",
+        updatedAt: "2026-03-25T01:00:00Z",
+        configHash: "config-migrated",
+      },
+    ],
+  };
+
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "load_snapshot") {
+      return migratedSnapshot;
+    }
+    if (command === "migrate_legacy_third_party_profiles") {
+      return {
+        migratedProfileIds: ["profile-legacy"],
+        skippedProfileIds: [],
+      };
+    }
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+
+  await import("../src/main");
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="migrate-legacy-third-party"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  await flushUi();
+
+  expect(invokeMock).toHaveBeenCalledWith("migrate_legacy_third_party_profiles", undefined);
+  expect(document.body.textContent).toContain("已迁移 1 个旧第三方 API 配置");
+  expect(document.body.textContent).toContain("openai");
 });
 
 test("renders codex usage as a plan header with two progress rows", async () => {

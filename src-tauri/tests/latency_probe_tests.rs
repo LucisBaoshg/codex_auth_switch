@@ -5,7 +5,7 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
 };
 use std::thread;
 use std::time::Duration;
@@ -47,6 +47,22 @@ requires_openai_auth = true
     )
 }
 
+fn standard_openai_base_url_config_toml_with_provider(
+    model: &str,
+    provider: &str,
+    base_url: &str,
+) -> String {
+    format!(
+        r#"openai_base_url = "{base_url}"
+model_provider = "{provider}"
+model = "{model}"
+review_model = "{model}"
+model_reasoning_effort = "high"
+disable_response_storage = true
+"#
+    )
+}
+
 fn temp_manager() -> (TempDir, TempDir, ProfileManager) {
     let app_dir = TempDir::new().expect("temp app dir");
     let target_dir = TempDir::new().expect("temp target dir");
@@ -57,6 +73,11 @@ fn temp_manager() -> (TempDir, TempDir, ProfileManager) {
     .expect("create manager");
 
     (app_dir, target_dir, manager)
+}
+
+fn ylscode_usage_endpoint_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 struct TestServer {
@@ -171,6 +192,9 @@ impl Drop for TestServer {
 
 #[test]
 fn refresh_profile_third_party_usage_fetches_ylscode_usage() {
+    let _endpoint_guard = ylscode_usage_endpoint_lock()
+        .lock()
+        .expect("lock ylscode usage endpoint env");
     let server = TestServer::start();
     server.set_json(
         "/codex/info",
@@ -239,6 +263,64 @@ fn refresh_profile_third_party_usage_fetches_ylscode_usage() {
         .expect("ylscode usage request");
     assert!(request.contains("Authorization: Bearer sk-ylscode"));
     assert!(request.contains("User-Agent: cc-switch/1.0"));
+}
+
+#[test]
+fn refresh_profile_third_party_usage_supports_openai_base_url_without_model_providers() {
+    let _endpoint_guard = ylscode_usage_endpoint_lock()
+        .lock()
+        .expect("lock ylscode usage endpoint env");
+    let server = TestServer::start();
+    server.set_json(
+        "/codex/info",
+        json!({
+            "state": {
+                "userPackgeUsage": {
+                    "total_cost": 12,
+                    "total_quota": 100,
+                    "remaining_quota": 88,
+                    "used_percentage": "12%"
+                }
+            }
+        }),
+    );
+    std::env::set_var(
+        "CODEX_AUTH_SWITCH_YLSCODE_USAGE_ENDPOINT",
+        format!("{}/codex/info", server.base_url),
+    );
+
+    let (_app_dir, _target_dir, manager) = temp_manager();
+    let profile = manager
+        .import_profile(ProfileInput {
+            name: "standard ylscode profile".into(),
+            notes: "third-party usage".into(),
+            auth_json: api_key_auth_json("sk-standard-ylscode"),
+            config_toml: standard_openai_base_url_config_toml_with_provider(
+                "gpt-5.5",
+                "custom-provider-name",
+                "https://code.ylsagi.com/v1",
+            ),
+        })
+        .expect("import profile");
+
+    let refreshed = manager
+        .refresh_profile_third_party_usage(&profile.id)
+        .expect("refresh third-party usage");
+    std::env::remove_var("CODEX_AUTH_SWITCH_YLSCODE_USAGE_ENDPOINT");
+
+    let usage = refreshed
+        .third_party_usage
+        .expect("third-party usage snapshot");
+    assert_eq!(usage.provider.as_deref(), Some("ylscode"));
+    assert_eq!(usage.remaining.as_deref(), Some("88"));
+    assert!(usage.error.is_none());
+
+    let request = server
+        .requests()
+        .into_iter()
+        .find(|item| item.contains("GET /codex/info HTTP/1.1"))
+        .expect("ylscode usage request");
+    assert!(request.contains("Authorization: Bearer sk-standard-ylscode"));
 }
 
 #[test]

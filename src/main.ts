@@ -96,6 +96,12 @@ type ProfileInput = {
   configToml: string;
 };
 
+type ThirdPartyConfigDraft = {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+};
+
 type ProfileDocument = {
   id: string;
   name: string;
@@ -131,6 +137,11 @@ type AppSnapshot = {
   lastSwitchedAt: string | null;
   codexUsageApiEnabled: boolean;
   profiles: ProfileSummary[];
+};
+
+type LegacyThirdPartyMigrationResult = {
+  migratedProfileIds: string[];
+  skippedProfileIds: string[];
 };
 
 type UpdateCheckResult = {
@@ -240,6 +251,7 @@ type EditorState = {
   notes: string;
   authJson: string;
   configToml: string;
+  thirdParty: ThirdPartyConfigDraft;
   createdAt: string | null;
   updatedAt: string | null;
   loadedFromTarget: boolean;
@@ -283,6 +295,11 @@ function createEditorState(mode: EditorMode = "new"): EditorState {
     configToml: `default_model = "gpt-5"
 theme = "system"
 `,
+    thirdParty: {
+      baseUrl: "",
+      apiKey: "",
+      model: "gpt-5.5",
+    },
     createdAt: null,
     updatedAt: null,
     loadedFromTarget: false,
@@ -477,6 +494,7 @@ function thirdPartyUsageActionKey(profileId: string): string {
 }
 
 const refreshAllUsageActionKey = "codex-usage:all";
+const migrateLegacyThirdPartyActionKey = "third-party:migrate-legacy";
 const diagnoseCodexSessionsActionKey = "session-recovery:diagnose";
 const repairCodexSessionsActionKey = "session-recovery:repair";
 const repairCodexSessionsAdvancedActionKey = "session-recovery:repair-times";
@@ -525,6 +543,7 @@ model_reasoning_effort = "medium"
 }
 
 function createEditorFromInput(mode: EditorMode, input: ProfileInput): EditorState {
+  const template = createEditorState();
   return {
     mode,
     profileId: null,
@@ -532,12 +551,79 @@ function createEditorFromInput(mode: EditorMode, input: ProfileInput): EditorSta
     notes: input.notes,
     authJson: input.authJson,
     configToml: input.configToml,
+    thirdParty: template.thirdParty,
     createdAt: null,
     updatedAt: null,
     loadedFromTarget: false,
     hasTargetChanges: false,
     readOnly: false,
     source: "local",
+  };
+}
+
+function escapeTomlString(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function thirdPartyConfigInputFromDraft(editor: EditorState): ProfileInput {
+  const baseUrl = editor.thirdParty.baseUrl.trim();
+  const apiKey = editor.thirdParty.apiKey.trim();
+  const model = editor.thirdParty.model.trim();
+
+  if (!baseUrl) {
+    throw new Error("请填写第三方 API 的 openai_base_url。");
+  }
+  if (!apiKey) {
+    throw new Error("请填写 auth.json 中 OPENAI_API_KEY 的 value。");
+  }
+  if (!model) {
+    throw new Error("请填写 model。");
+  }
+
+  return {
+    name: editor.name.trim(),
+    notes: editor.notes.trim(),
+    authJson: JSON.stringify({ OPENAI_API_KEY: apiKey }, null, 2),
+    configToml: `openai_base_url = "${escapeTomlString(baseUrl)}"
+model_provider = "openai"
+model = "${escapeTomlString(model)}"
+review_model = "${escapeTomlString(model)}"
+model_reasoning_effort = "high"
+plan_mode_reasoning_effort = "xhigh"
+disable_response_storage = true
+show_raw_agent_reasoning = true
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+personality = "pragmatic"
+web_search = "live"
+model_context_window = 1000000
+model_auto_compact_token_limit = 400000
+
+[tui]
+terminal_title = []
+status_line = ["model-with-reasoning", "context-usage", "current-dir", "git-branch"]
+
+[features]
+guardian_approval = true
+remote_connections = true
+memories = true
+
+[sandbox_workspace_write]
+network_access = true
+`,
+  };
+}
+
+function buildEditorProfileInput(): ProfileInput {
+  if (state.editor.mode === "new") {
+    return thirdPartyConfigInputFromDraft(state.editor);
+  }
+
+  return {
+    name: state.editor.name.trim(),
+    notes: state.editor.notes.trim(),
+    authJson: state.editor.authJson,
+    configToml: state.editor.configToml,
   };
 }
 
@@ -571,6 +657,7 @@ profile = "${profile.id}"
 }
 
 function applyEditorDocument(document: ProfileDocument): void {
+  const template = createEditorState();
   state.editor = {
     mode: "existing",
     profileId: document.id,
@@ -578,6 +665,7 @@ function applyEditorDocument(document: ProfileDocument): void {
     notes: document.notes,
     authJson: document.authJson,
     configToml: document.configToml,
+    thirdParty: template.thirdParty,
     createdAt: document.createdAt,
     updatedAt: document.updatedAt,
     loadedFromTarget: document.loadedFromTarget,
@@ -862,12 +950,13 @@ async function saveEditorProfile(andSwitch: boolean): Promise<void> {
     return;
   }
 
-  const payload: ProfileInput = {
-    name,
-    notes: state.editor.notes.trim(),
-    authJson: state.editor.authJson,
-    configToml: state.editor.configToml,
-  };
+  let payload: ProfileInput;
+  try {
+    payload = buildEditorProfileInput();
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+    return;
+  }
 
   setBusy(true);
   try {
@@ -1271,6 +1360,35 @@ async function refreshProfileThirdPartyUsage(profileId: string, profileName: str
       }
     }
     setFlash("success", `已刷新「${profileName}」第三方 API 用量。`);
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    endPendingAction(actionKey);
+  }
+}
+
+async function migrateLegacyThirdPartyProfiles(): Promise<void> {
+  const actionKey = migrateLegacyThirdPartyActionKey;
+  beginPendingAction(actionKey);
+  try {
+    if (!isTauriRuntime) {
+      setFlash("success", "已迁移 0 个旧第三方 API 配置。");
+      return;
+    }
+
+    const result = await desktopInvoke<LegacyThirdPartyMigrationResult>(
+      "migrate_legacy_third_party_profiles",
+    );
+    const snapshot = await desktopInvoke<AppSnapshot>("load_snapshot");
+    setSnapshot(snapshot);
+    const migratedCount = result.migratedProfileIds.length;
+    const skippedCount = result.skippedProfileIds.length;
+    setFlash(
+      "success",
+      migratedCount > 0
+        ? `已迁移 ${migratedCount} 个旧第三方 API 配置，跳过 ${skippedCount} 个无需迁移的配置。`
+        : `没有发现需要迁移的旧第三方 API 配置，已检查 ${skippedCount} 个配置。`,
+    );
   } catch (error) {
     setFlash("error", error instanceof Error ? error.message : String(error));
   } finally {
@@ -2231,6 +2349,52 @@ function renderEditorRuntimePanel(snapshot: AppSnapshot, profile: ProfileSummary
   `;
 }
 
+function renderThirdPartyConfigFields(readOnly: boolean): string {
+  const disabled = state.busy || readOnly ? "disabled" : "";
+  return `
+    <section class="third-party-delta-card" data-role="third-party-delta-form">
+      <div>
+        <p class="eyebrow">Third-party API</p>
+        <h2>只填写第三方 API 的差异量</h2>
+        <p>保存时会自动生成 auth.json 和 config.toml，不会要求你手写完整配置。</p>
+      </div>
+      <div class="third-party-delta-grid">
+        <label class="field">
+          <span>openai_base_url</span>
+          <input
+            id="third-party-base-url"
+            type="url"
+            value="${escapeHtml(state.editor.thirdParty.baseUrl)}"
+            placeholder="https://example.com/v1"
+            ${disabled}
+          />
+        </label>
+        <label class="field">
+          <span>OPENAI_API_KEY value</span>
+          <input
+            id="third-party-api-key"
+            type="password"
+            value="${escapeHtml(state.editor.thirdParty.apiKey)}"
+            placeholder="sk-..."
+            autocomplete="off"
+            ${disabled}
+          />
+        </label>
+        <label class="field">
+          <span>model</span>
+          <input
+            id="third-party-model"
+            type="text"
+            value="${escapeHtml(state.editor.thirdParty.model)}"
+            placeholder="gpt-5.4"
+            ${disabled}
+          />
+        </label>
+      </div>
+    </section>
+  `;
+}
+
 function escapeHtml(value: string): string {
   return value
     .replaceAll("&", "&amp;")
@@ -2415,6 +2579,7 @@ function renderAntigravityPage(): string {
 
 function renderCardsPage(snapshot: AppSnapshot): string {
   const anyUsageRefreshPending = isPendingActionPrefix("codex-usage");
+  const migratingLegacyThirdParty = isPendingAction(migrateLegacyThirdPartyActionKey);
   const orderedProfiles = [...snapshot.profiles].sort((a, b) => {
     if (a.id === snapshot.activeProfileId) return -1;
     if (b.id === snapshot.activeProfileId) return 1;
@@ -2482,6 +2647,13 @@ function renderCardsPage(snapshot: AppSnapshot): string {
           <h3 class="section-title">已保存的配置文件 (${snapshot.profiles.length})</h3>
           <div class="section-actions">
             ${renderProfileLayoutToggle()}
+            <button
+              class="button button-secondary"
+              data-action="migrate-legacy-third-party"
+              ${state.busy || migratingLegacyThirdParty ? "disabled" : ""}
+            >
+              ${migratingLegacyThirdParty ? "迁移中..." : "迁移旧第三方配置"}
+            </button>
             ${snapshot.profiles.some((profile) => profile.authTypeLabel === "官方 OAuth") ? `
               ${
                 snapshot.codexUsageApiEnabled
@@ -2712,32 +2884,44 @@ function renderEditorPage(): string {
           >${escapeHtml(state.editor.notes)}</textarea>
         </label>
 
-        <div class="editor-panels">
-          <label class="field">
-            <span>auth.json</span>
-            <textarea
-              id="editor-auth-json"
-              class="code-textarea"
-              rows="18"
-              spellcheck="false"
-              ${state.busy || readOnly ? "disabled" : ""}
-            >${escapeHtml(state.editor.authJson)}</textarea>
-          </label>
+        ${
+          state.editor.mode === "new"
+            ? renderThirdPartyConfigFields(readOnly)
+            : `
+              <div class="editor-panels">
+                <label class="field">
+                  <span>auth.json</span>
+                  <textarea
+                    id="editor-auth-json"
+                    class="code-textarea"
+                    rows="18"
+                    spellcheck="false"
+                    ${state.busy || readOnly ? "disabled" : ""}
+                  >${escapeHtml(state.editor.authJson)}</textarea>
+                </label>
 
-          <label class="field">
-            <span>config.toml</span>
-            <textarea
-              id="editor-config-toml"
-              class="code-textarea"
-              rows="18"
-              spellcheck="false"
-              ${state.busy || readOnly ? "disabled" : ""}
-            >${escapeHtml(state.editor.configToml)}</textarea>
-          </label>
-        </div>
+                <label class="field">
+                  <span>config.toml</span>
+                  <textarea
+                    id="editor-config-toml"
+                    class="code-textarea"
+                    rows="18"
+                    spellcheck="false"
+                    ${state.busy || readOnly ? "disabled" : ""}
+                  >${escapeHtml(state.editor.configToml)}</textarea>
+                </label>
+              </div>
+            `
+        }
       </section>
     </section>
   `;
+}
+
+function bindInputValue(selector: string, onInput: (value: string) => void): void {
+  document.querySelector<HTMLInputElement>(selector)?.addEventListener("input", (event) => {
+    onInput((event.currentTarget as HTMLInputElement).value);
+  });
 }
 
 function render(): void {
@@ -2789,6 +2973,16 @@ function bindEvents(): void {
     state.editor.configToml = (event.currentTarget as HTMLTextAreaElement).value;
   });
 
+  bindInputValue("#third-party-base-url", (value) => {
+    state.editor.thirdParty.baseUrl = value;
+  });
+  bindInputValue("#third-party-api-key", (value) => {
+    state.editor.thirdParty.apiKey = value;
+  });
+  bindInputValue("#third-party-model", (value) => {
+    state.editor.thirdParty.model = value;
+  });
+
   document.querySelectorAll<HTMLButtonElement>("[data-action]").forEach((button) => {
     button.addEventListener("click", async () => {
       const action = button.dataset.action;
@@ -2832,6 +3026,8 @@ function bindEvents(): void {
         await setCodexUsageApiEnabled(false);
       } else if (action === "refresh-all-codex-usage") {
         await refreshAllCodexUsage();
+      } else if (action === "migrate-legacy-third-party") {
+        await migrateLegacyThirdPartyProfiles();
       } else if (action === "refresh-codex-usage" && button.dataset.id && button.dataset.name) {
         await refreshProfileCodexUsage(button.dataset.id, button.dataset.name);
       } else if (action === "profile-layout-list") {
