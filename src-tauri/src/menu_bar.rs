@@ -10,8 +10,18 @@ use tauri::{
 
 const TRAY_ID: &str = "codex-auth-switch-usage";
 pub const MENU_REFRESH_ID: &str = "menu-bar-refresh-usage";
+pub const MENU_WAKE_PET_ID: &str = "menu-bar-wake-pet";
 const MENU_SHOW_ID: &str = "menu-bar-show-window";
 const MENU_QUIT_ID: &str = "menu-bar-quit";
+
+pub fn menu_bar_action_labels() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (MENU_REFRESH_ID, "刷新额度"),
+        (MENU_WAKE_PET_ID, "唤起宠物"),
+        (MENU_SHOW_ID, "打开主窗口"),
+        (MENU_QUIT_ID, "退出"),
+    ]
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MenuBarUsageStatus {
@@ -52,9 +62,11 @@ pub fn install_menu_bar(app: &mut App<Wry>, snapshot: &AppSnapshot) -> tauri::Re
         false,
         None::<&str>,
     )?;
-    let refresh_item = MenuItem::with_id(app, MENU_REFRESH_ID, "刷新额度", true, None::<&str>)?;
-    let show_item = MenuItem::with_id(app, MENU_SHOW_ID, "打开主窗口", true, None::<&str>)?;
-    let quit_item = MenuItem::with_id(app, MENU_QUIT_ID, "退出", true, None::<&str>)?;
+    let labels = menu_bar_action_labels();
+    let refresh_item = MenuItem::with_id(app, labels[0].0, labels[0].1, true, None::<&str>)?;
+    let wake_pet_item = MenuItem::with_id(app, labels[1].0, labels[1].1, true, None::<&str>)?;
+    let show_item = MenuItem::with_id(app, labels[2].0, labels[2].1, true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, labels[3].0, labels[3].1, true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let separator_2 = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(
@@ -66,6 +78,7 @@ pub fn install_menu_bar(app: &mut App<Wry>, snapshot: &AppSnapshot) -> tauri::Re
             &credits_item,
             &separator,
             &refresh_item,
+            &wake_pet_item,
             &show_item,
             &separator_2,
             &quit_item,
@@ -83,6 +96,12 @@ pub fn install_menu_bar(app: &mut App<Wry>, snapshot: &AppSnapshot) -> tauri::Re
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
                     let _ = app.emit("menu-bar-refresh-usage-requested", ());
+                });
+            }
+            MENU_WAKE_PET_ID => {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = app.emit("menu-bar-wake-pet-requested", ());
                 });
             }
             MENU_SHOW_ID => show_main_window(app),

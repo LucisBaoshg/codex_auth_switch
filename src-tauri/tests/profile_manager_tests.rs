@@ -1,5 +1,7 @@
 use chrono::{SecondsFormat, TimeZone, Utc};
-use codex_auth_switch_lib::core::{restart_codex_script, ProfileInput, ProfileManager};
+use codex_auth_switch_lib::core::{
+    restart_codex_script, set_codex_pet_overlay_open, ProfileInput, ProfileManager,
+};
 use filetime::{set_file_mtime, FileTime};
 use rusqlite::Connection;
 use serde_json::json;
@@ -1983,4 +1985,55 @@ fn restart_codex_script_targets_codex_app_on_macos() {
     {
         assert!(restart_codex_script().is_none());
     }
+}
+
+#[test]
+fn restart_codex_script_supports_pet_overlay_restore_after_relaunch() {
+    #[cfg(target_os = "macos")]
+    {
+        let script = restart_codex_script().expect("script should exist on macOS");
+        assert!(script.contains("application \"Codex\""));
+        assert!(script.contains("quit"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        assert!(restart_codex_script().is_none());
+    }
+}
+
+#[test]
+fn set_codex_pet_overlay_open_preserves_existing_global_state() {
+    let codex_dir = TempDir::new().expect("temp codex dir");
+    fs::write(
+        codex_dir.path().join(".codex-global-state.json"),
+        serde_json::to_string_pretty(&json!({
+            "existing": "value",
+            "electron-avatar-overlay-open": false
+        }))
+        .expect("serialize global state"),
+    )
+    .expect("write global state");
+
+    set_codex_pet_overlay_open(codex_dir.path()).expect("wake pet state");
+
+    let state = fs::read_to_string(codex_dir.path().join(".codex-global-state.json"))
+        .expect("read global state");
+    let state: serde_json::Value = serde_json::from_str(&state).expect("parse global state");
+
+    assert_eq!(state["existing"], "value");
+    assert_eq!(state["electron-avatar-overlay-open"], true);
+}
+
+#[test]
+fn set_codex_pet_overlay_open_creates_missing_global_state() {
+    let codex_dir = TempDir::new().expect("temp codex dir");
+
+    set_codex_pet_overlay_open(codex_dir.path()).expect("wake pet state");
+
+    let state = fs::read_to_string(codex_dir.path().join(".codex-global-state.json"))
+        .expect("read global state");
+    let state: serde_json::Value = serde_json::from_str(&state).expect("parse global state");
+
+    assert_eq!(state["electron-avatar-overlay-open"], true);
 }

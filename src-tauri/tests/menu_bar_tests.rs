@@ -4,7 +4,7 @@ use codex_auth_switch_lib::core::{
     ThirdPartyUsageQuotaSnapshot, ThirdPartyUsageSnapshot,
 };
 use codex_auth_switch_lib::menu_bar::{
-    menu_bar_refresh_target, menu_bar_usage_status, MenuBarRefreshKind,
+    menu_bar_action_labels, menu_bar_refresh_target, menu_bar_usage_status, MenuBarRefreshKind,
 };
 
 fn usage_window(used_percent: f64, minutes: i64) -> CodexUsageWindow {
@@ -198,4 +198,13 @@ fn menu_bar_refresh_target_supports_active_official_and_third_party_profiles() {
     let third_party = menu_bar_refresh_target(&third_party_active).expect("third-party target");
     assert_eq!(third_party.profile_id, "third-party");
     assert_eq!(third_party.kind, MenuBarRefreshKind::ThirdPartyUsage);
+}
+
+#[test]
+fn menu_bar_actions_include_wake_pet_between_refresh_and_show_window() {
+    let labels = menu_bar_action_labels();
+
+    assert_eq!(labels[0], ("menu-bar-refresh-usage", "刷新额度"));
+    assert_eq!(labels[1], ("menu-bar-wake-pet", "唤起宠物"));
+    assert_eq!(labels[2], ("menu-bar-show-window", "打开主窗口"));
 }

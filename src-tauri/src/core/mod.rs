@@ -3104,6 +3104,57 @@ end if"#,
     }
 }
 
+pub fn set_codex_pet_overlay_open(codex_dir: &Path) -> Result<(), AppError> {
+    fs::create_dir_all(codex_dir)?;
+    let global_state_path = codex_dir.join(".codex-global-state.json");
+    let mut state = if global_state_path.exists() {
+        let contents = fs::read_to_string(&global_state_path)?;
+        serde_json::from_str::<serde_json::Value>(&contents)?
+    } else {
+        serde_json::json!({})
+    };
+
+    let state_object = state
+        .as_object_mut()
+        .ok_or_else(|| AppError::Message("Codex global state is not a JSON object.".into()))?;
+    state_object.insert(
+        "electron-avatar-overlay-open".into(),
+        serde_json::Value::Bool(true),
+    );
+    fs::write(&global_state_path, serde_json::to_string(&state)?)?;
+
+    Ok(())
+}
+
+pub fn wake_codex_pet_overlay() -> Result<(), AppError> {
+    #[cfg(target_os = "macos")]
+    {
+        let script = restart_codex_script()
+            .ok_or_else(|| AppError::Message("Unable to prepare Codex restart script.".into()))?;
+
+        let quit_status = Command::new("osascript").arg("-e").arg(script).status()?;
+        if !quit_status.success() {
+            return Err(AppError::Message("Failed to ask Codex.app to quit.".into()));
+        }
+
+        thread::sleep(Duration::from_millis(700));
+        set_codex_pet_overlay_open(&default_codex_target_dir()?)?;
+
+        let open_status = Command::new("open").arg("-a").arg("Codex").status()?;
+        if !open_status.success() {
+            return Err(AppError::Message("Failed to reopen Codex.app.".into()));
+        }
+
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        set_codex_pet_overlay_open(&default_codex_target_dir()?)?;
+        Ok(())
+    }
+}
+
 pub fn repair_illegal_config_toml(config_toml: &str) -> String {
     if config_toml.contains("[model_providers.openai]") {
         config_toml

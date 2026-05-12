@@ -8,10 +8,10 @@ use crate::antigravity::models::{
 };
 use crate::core::{
     check_for_update, check_install_location as resolve_install_location,
-    install_update as perform_install_update, restart_codex_app, AppSnapshot,
-    InstallLocationStatus, LegacyThirdPartyMigrationResult, ModelProviderSummary, ProfileDocument,
-    ProfileInput, ProfileManager, SessionRecoveryReport, SessionRepairResult, UpdateCheckResult,
-    UpdateInstallRequest,
+    install_update as perform_install_update, restart_codex_app, wake_codex_pet_overlay,
+    AppSnapshot, InstallLocationStatus, LegacyThirdPartyMigrationResult, ModelProviderSummary,
+    ProfileDocument, ProfileInput, ProfileManager, SessionRecoveryReport, SessionRepairResult,
+    UpdateCheckResult, UpdateInstallRequest,
 };
 use crate::menu_bar::{
     install_menu_bar, menu_bar_refresh_target, sync_menu_bar_usage, MenuBarRefreshKind,
@@ -19,7 +19,7 @@ use crate::menu_bar::{
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
-use tauri::{AppHandle, Listener, Manager};
+use tauri::{AppHandle, Emitter, Listener, Manager};
 
 const MENU_BAR_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -320,6 +320,11 @@ fn restart_codex() -> Result<(), String> {
 }
 
 #[tauri::command]
+fn wake_codex_pet() -> Result<(), String> {
+    wake_codex_pet_overlay().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn fix_session_database(app: tauri::AppHandle) -> Result<(), String> {
     let manager = manager_from_app(&app)?;
     manager
@@ -396,6 +401,17 @@ fn spawn_menu_bar_usage_refresher(app: AppHandle) {
     });
 }
 
+fn spawn_menu_bar_pet_waker(app: AppHandle) {
+    let requested_app = app.clone();
+    app.listen("menu-bar-wake-pet-requested", move |_| {
+        let app = requested_app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let _ = wake_codex_pet_overlay();
+            let _ = app.emit("menu-bar-wake-pet-completed", ());
+        });
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -405,6 +421,7 @@ pub fn run() {
             let snapshot = manager.snapshot()?;
             install_menu_bar(app, &snapshot)?;
             spawn_menu_bar_usage_refresher(app.handle().clone());
+            spawn_menu_bar_pet_waker(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -431,6 +448,7 @@ pub fn run() {
             refresh_all_codex_usage,
             open_target_dir,
             restart_codex,
+            wake_codex_pet,
             fix_session_database,
             diagnose_codex_sessions,
             repair_codex_sessions,
