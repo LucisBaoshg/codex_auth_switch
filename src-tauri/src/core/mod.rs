@@ -11,7 +11,6 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-#[cfg(target_os = "macos")]
 use std::thread;
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -3061,6 +3060,67 @@ fn normalize_version_string(version: &str) -> String {
         .to_string()
 }
 
+pub fn windows_codex_launch_candidates(
+    running_process_path: Option<PathBuf>,
+    local_app_data: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = running_process_path {
+        candidates.push(path);
+    }
+    if let Some(local_app_data) = local_app_data {
+        candidates.push(local_app_data.join("Programs").join("Codex").join("Codex.exe"));
+        candidates.push(local_app_data.join("Codex").join("Codex.exe"));
+    }
+    candidates
+}
+
+#[cfg(target_os = "windows")]
+fn running_codex_exe_path() -> Option<PathBuf> {
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "(Get-Process -Name Codex -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Path)",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn reopen_codex_on_windows() -> Result<(), AppError> {
+    let running_path = running_codex_exe_path();
+
+    let _ = Command::new("taskkill")
+        .args(["/IM", "Codex.exe", "/T", "/F"])
+        .status();
+    thread::sleep(Duration::from_millis(700));
+
+    set_codex_pet_overlay_open(&default_codex_target_dir()?)?;
+
+    let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    for candidate in windows_codex_launch_candidates(running_path, local_app_data) {
+        if candidate.exists() {
+            Command::new(candidate).spawn()?;
+            return Ok(());
+        }
+    }
+
+    Err(AppError::Message(
+        "Unable to find Codex.exe to reopen Codex on Windows.".into(),
+    ))
+}
+
 pub fn open_url(url: &str) -> Result<(), AppError> {
     if !(url.starts_with("https://") || url.starts_with("http://")) {
         return Err(AppError::Message("仅允许打开 http/https 链接。".into()));
@@ -3148,7 +3208,12 @@ pub fn wake_codex_pet_overlay() -> Result<(), AppError> {
         Ok(())
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        reopen_codex_on_windows()
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     {
         set_codex_pet_overlay_open(&default_codex_target_dir()?)?;
         Ok(())

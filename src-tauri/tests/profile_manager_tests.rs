@@ -1,6 +1,7 @@
 use chrono::{SecondsFormat, TimeZone, Utc};
 use codex_auth_switch_lib::core::{
-    restart_codex_script, set_codex_pet_overlay_open, ProfileInput, ProfileManager,
+    restart_codex_script, set_codex_pet_overlay_open, windows_codex_launch_candidates,
+    ProfileInput, ProfileManager,
 };
 use filetime::{set_file_mtime, FileTime};
 use rusqlite::Connection;
@@ -2036,4 +2037,21 @@ fn set_codex_pet_overlay_open_creates_missing_global_state() {
     let state: serde_json::Value = serde_json::from_str(&state).expect("parse global state");
 
     assert_eq!(state["electron-avatar-overlay-open"], true);
+}
+
+#[test]
+fn windows_codex_launch_candidates_prefers_running_process_path() {
+    let running_path = PathBuf::from(r"C:\Users\me\AppData\Local\Programs\Codex\Codex.exe");
+    let local_app_data = PathBuf::from(r"C:\Users\me\AppData\Local");
+
+    let candidates =
+        windows_codex_launch_candidates(Some(running_path.clone()), Some(local_app_data.clone()));
+
+    assert_eq!(candidates[0], running_path);
+    assert!(candidates.contains(
+        &local_app_data
+            .join("Programs")
+            .join("Codex")
+            .join("Codex.exe")
+    ));
 }
