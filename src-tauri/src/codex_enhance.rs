@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 use tungstenite::{connect, Message};
@@ -193,24 +193,55 @@ fn stop_codex_if_supported() -> Result<(), AppError> {
         thread::sleep(Duration::from_millis(700));
     }
 
+    #[cfg(target_os = "windows")]
+    {
+        let _ = Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                stop_windows_codex_script(),
+            ])
+            .status();
+        thread::sleep(Duration::from_millis(700));
+    }
+
     Ok(())
 }
 
-fn spawn_codex_with_debug_port(debug_port: u16) -> Result<Child, AppError> {
+fn spawn_codex_with_debug_port(debug_port: u16) -> Result<(), AppError> {
     #[cfg(target_os = "macos")]
     {
         let executable = resolve_macos_codex_executable()?;
         Command::new(executable)
             .args(build_codex_debug_arguments(debug_port))
-            .spawn()
-            .map_err(AppError::from)
+            .spawn()?;
+        return Ok(());
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        let app_dir = resolve_windows_codex_app_dir()?;
+        if let Some(app_user_model_id) = packaged_app_user_model_id(&app_dir) {
+            activate_windows_packaged_app(
+                &app_user_model_id,
+                &build_codex_debug_arguments(debug_port).join(" "),
+            )?;
+            return Ok(());
+        }
+        let command = build_codex_launch_command(&app_dir, debug_port);
+        let Some((program, args)) = command.split_first() else {
+            return Err(AppError::Message("Codex launch command is empty.".into()));
+        };
+        Command::new(program).args(args).spawn()?;
+        return Ok(());
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     {
         let _ = debug_port;
         Err(AppError::Message(
-            "Codex enhanced launch is currently only supported on macOS.".into(),
+            "Codex enhanced launch is currently only supported on macOS and Windows.".into(),
         ))
     }
 }
@@ -252,6 +283,221 @@ fn codex_executable_for_app(app: &Path) -> Option<PathBuf> {
     }
 
     None
+}
+
+pub fn build_codex_executable(app_dir: &Path) -> PathBuf {
+    if app_dir.extension().and_then(|ext| ext.to_str()) == Some("app") {
+        return app_dir.join("Contents").join("MacOS").join("Codex");
+    }
+
+    let candidates = [
+        child_path_preserving_windows_separator(app_dir, "Codex.exe"),
+        child_path_preserving_windows_separator(app_dir, "codex.exe"),
+    ];
+    candidates
+        .iter()
+        .find(|candidate| candidate.exists())
+        .cloned()
+        .unwrap_or_else(|| candidates[0].clone())
+}
+
+pub fn build_codex_launch_command(app_dir: &Path, debug_port: u16) -> Vec<String> {
+    let mut command = vec![build_codex_executable(app_dir)
+        .to_string_lossy()
+        .to_string()];
+    command.extend(build_codex_debug_arguments(debug_port));
+    command
+}
+
+pub fn packaged_app_user_model_id(app_dir: &Path) -> Option<String> {
+    let normalized = app_dir.to_string_lossy().replace('\\', "/");
+    let trimmed = normalized.trim_end_matches('/');
+    let package_dir = trimmed
+        .strip_suffix("/app")
+        .or_else(|| trimmed.strip_suffix("/App"))
+        .unwrap_or(trimmed);
+    let package_name = package_dir.rsplit('/').next()?;
+    if !package_name.starts_with("OpenAI.Codex_") || !package_name.contains("__") {
+        return None;
+    }
+    let identity_name = package_name.split('_').next()?;
+    let publisher_id = package_name.rsplit("__").next()?;
+    if publisher_id.is_empty() {
+        return None;
+    }
+    Some(format!("{identity_name}_{publisher_id}!App"))
+}
+
+fn child_path_preserving_windows_separator(parent: &Path, child: &str) -> PathBuf {
+    let parent_text = parent.to_string_lossy();
+    if parent_text.contains('\\') {
+        let separator = if parent_text.ends_with('\\') {
+            ""
+        } else {
+            "\\"
+        };
+        PathBuf::from(format!("{parent_text}{separator}{child}"))
+    } else {
+        parent.join(child)
+    }
+}
+
+pub fn find_latest_windows_codex_app_dir(root: &Path) -> Option<PathBuf> {
+    let mut matches = std::fs::read_dir(root)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .filter_map(|path| windows_codex_package_version(&path).map(|version| (version, path)))
+        .collect::<Vec<_>>();
+    matches.sort_by(|left, right| left.0.cmp(&right.0));
+    let latest = matches.pop()?.1;
+    let app_dir = latest.join("app");
+    Some(if app_dir.is_dir() { app_dir } else { latest })
+}
+
+pub fn stop_windows_codex_script() -> &'static str {
+    "Get-CimInstance Win32_Process -Filter \"Name='Codex.exe' OR Name='codex.exe'\" | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+}
+
+fn windows_codex_package_version(path: &Path) -> Option<Vec<u32>> {
+    let name = path.file_name()?.to_str()?;
+    let rest = name.strip_prefix("OpenAI.Codex_")?;
+    let version = rest.split('_').next()?;
+    let parts = version
+        .split('.')
+        .map(str::parse::<u32>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_windows_codex_app_dir() -> Result<PathBuf, AppError> {
+    if let Some(path) =
+        windows_running_codex_exe_path().and_then(|path| path.parent().map(Path::to_path_buf))
+    {
+        return Ok(path);
+    }
+
+    let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    if let Some(local_app_data) = local_app_data.as_ref() {
+        for candidate in [
+            local_app_data.join("Programs").join("Codex"),
+            local_app_data.join("Codex"),
+        ] {
+            if build_codex_executable(&candidate).exists() {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    if let Some(app_dir) = query_windows_appx_codex_install_location()? {
+        return Ok(app_dir);
+    }
+
+    if let Some(program_files) = std::env::var_os("ProgramFiles").map(PathBuf::from) {
+        if let Some(app_dir) = find_latest_windows_codex_app_dir(&program_files.join("WindowsApps"))
+        {
+            return Ok(app_dir);
+        }
+    }
+
+    Err(AppError::Message(
+        "Unable to find Codex.exe or OpenAI.Codex AppX install location on Windows.".into(),
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_running_codex_exe_path() -> Option<PathBuf> {
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "(Get-Process -Name Codex -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Path)",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+#[cfg(target_os = "windows")]
+fn query_windows_appx_codex_install_location() -> Result<Option<PathBuf>, AppError> {
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-AppxPackage -Name \"OpenAI.Codex\" | Select-Object -ExpandProperty InstallLocation",
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        return Ok(None);
+    }
+    let root = PathBuf::from(path);
+    let app = root.join("app");
+    Ok(Some(if app.is_dir() { app } else { root }))
+}
+
+#[cfg(target_os = "windows")]
+fn activate_windows_packaged_app(app_user_model_id: &str, arguments: &str) -> Result<(), AppError> {
+    let script = format!(
+        r#"
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class AppxActivator {{
+  [ComImport, Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C")]
+  private class ApplicationActivationManager {{ }}
+  [ComImport, Guid("2e941141-7f97-4756-ba1d-9decde894a3d"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  private interface IApplicationActivationManager {{
+    int ActivateApplication([MarshalAs(UnmanagedType.LPWStr)] string appUserModelId, [MarshalAs(UnmanagedType.LPWStr)] string arguments, UInt32 options, out UInt32 processId);
+    int ActivateForFile();
+    int ActivateForProtocol();
+  }}
+  public static UInt32 Activate(string appUserModelId, string arguments) {{
+    var manager = (IApplicationActivationManager)new ApplicationActivationManager();
+    UInt32 processId;
+    int hr = manager.ActivateApplication(appUserModelId, arguments, 0, out processId);
+    if (hr < 0) Marshal.ThrowExceptionForHR(hr);
+    return processId;
+  }}
+}}
+"@
+[AppxActivator]::Activate({app_user_model_id}, {arguments}) | Out-Null
+"#,
+        app_user_model_id = powershell_single_quoted(app_user_model_id),
+        arguments = powershell_single_quoted(arguments),
+    );
+
+    let status = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(AppError::Message(
+            "Failed to activate the packaged Codex app on Windows.".into(),
+        ))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn powershell_single_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn inject_when_ready(

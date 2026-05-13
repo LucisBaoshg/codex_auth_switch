@@ -107,18 +107,20 @@ config.toml
 
 当前流程：
 
-1. 退出正在运行的 Codex（macOS）
+1. 退出正在运行的 Codex（macOS / Windows）
 2. 写入 Codex 宠物浮层开启状态
 3. 使用随机本地端口启动 Codex，并附带 `--remote-debugging-port`
 4. 通过 CDP 连接 Codex 渲染页
 5. 注入最小脚本，尝试把插件入口解除禁用并标记为 unlocked
+
+Windows 会优先复用正在运行的 `Codex.exe` 路径，也会查找常见本地安装目录与 Microsoft Store/AppX（AppX）安装位置；如果是 AppX 安装，会通过 ApplicationActivationManager（ApplicationActivationManager）带参数激活 Codex。
 
 Important notes:
 
 - 这是运行时增强，不会修改 Codex 安装目录或 `app.asar`
 - CDP 端口绑定在 `127.0.0.1`
 - 插件入口解锁依赖 Codex 当前 UI 与 React（React）内部结构，Codex 更新后可能需要调整选择器
-- 当前增强启动优先支持 macOS
+- 当前增强启动支持 macOS 和 Windows
 
 ## CLI
 
@@ -139,7 +141,7 @@ codex-auth-switch-cli switch <profile-id-or-name>
 安装最新 Linux CLI：
 
 ```bash
-VERSION=1.4.23
+VERSION=1.4.24
 curl -L \
   -o /tmp/codex-auth-switch-cli.tar.gz \
   "https://github.com/LucisBaoshg/codex_auth_switch/releases/download/v${VERSION}/codex-auth-switch-cli_${VERSION}_linux_x64.tar.gz"
@@ -188,8 +190,8 @@ npm run build:mac:release-local
 正式发布通过 Git tag 触发：
 
 ```bash
-git tag v1.4.23
-git push origin v1.4.23
+git tag v1.4.24
+git push origin v1.4.24
 ```
 
 `publish-release.yml` 会：
