@@ -1,6 +1,6 @@
 [package]
 name = "codex-auth-switch"
-version = "1.4.22"
+version = "1.4.23"
 description = "A desktop utility for switching between Codex auth profiles"
 authors = ["Codex"]
 edition = "2021"
@@ -23,6 +23,7 @@ serde_json = "1"
 sha2 = "0.10"
 tauri = { version = "2", features = ["tray-icon"] }
 thiserror = "2"
+tungstenite = "0.24"
 toml = "0.8"
 rusqlite = { version = "0.32", features = ["bundled"] }
 semver = "1"

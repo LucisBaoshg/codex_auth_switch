@@ -1,4 +1,5 @@
 pub mod antigravity;
+pub mod codex_enhance;
 pub mod core;
 pub mod menu_bar;
 
@@ -6,6 +7,7 @@ use crate::antigravity::manager::AntigravityManager;
 use crate::antigravity::models::{
     AntigravityProfileSummary, AntigravitySnapshot, AntigravitySwitchResult,
 };
+use crate::codex_enhance::{launch_codex_with_plugin_unlock, CodexEnhanceLaunchResult};
 use crate::core::{
     check_for_update, check_install_location as resolve_install_location,
     install_update as perform_install_update, restart_codex_app, wake_codex_pet_overlay,
@@ -320,6 +322,11 @@ fn restart_codex() -> Result<(), String> {
 }
 
 #[tauri::command]
+fn launch_codex_enhanced() -> Result<CodexEnhanceLaunchResult, String> {
+    launch_codex_with_plugin_unlock().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn wake_codex_pet() -> Result<(), String> {
     wake_codex_pet_overlay().map_err(|error| error.to_string())
 }
@@ -406,7 +413,7 @@ fn spawn_menu_bar_pet_waker(app: AppHandle) {
     app.listen("menu-bar-wake-pet-requested", move |_| {
         let app = requested_app.clone();
         tauri::async_runtime::spawn_blocking(move || {
-            let _ = wake_codex_pet_overlay();
+            let _ = launch_codex_with_plugin_unlock();
             let _ = app.emit("menu-bar-wake-pet-completed", ());
         });
     });
@@ -448,6 +455,7 @@ pub fn run() {
             refresh_all_codex_usage,
             open_target_dir,
             restart_codex,
+            launch_codex_enhanced,
             wake_codex_pet,
             fix_session_database,
             diagnose_codex_sessions,

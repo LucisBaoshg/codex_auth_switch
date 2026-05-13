@@ -44,6 +44,10 @@ test("renders the default profile list without a left sidebar", async () => {
   expect(document.querySelector('[data-region="sidebar"]')).toBeNull();
   expect(document.querySelector('[data-page="cards"]')).not.toBeNull();
   expect(document.querySelector('[data-role="global-restart"]')).toBeNull();
+  expect(document.querySelector('[data-action="launch-codex-enhanced"]')).not.toBeNull();
+  expect(document.querySelector('[data-action="launch-codex-enhanced"]')?.textContent).toContain(
+    "增强启动 + 唤起宠物",
+  );
   expect(document.querySelector('[data-role="global-refresh"]')).not.toBeNull();
   expect(document.querySelector('[data-role="update-entry"]')).not.toBeNull();
   expect(document.querySelector('[data-role="update-entry"]')?.textContent).toContain("检查更新");
@@ -66,6 +70,52 @@ test("renders the default profile list without a left sidebar", async () => {
   ).toBeNull();
   expect(document.querySelectorAll("[data-role='profile-row']").length).toBeGreaterThan(0);
   expect(document.querySelectorAll('[data-action="delete-profile"]')).toHaveLength(0);
+});
+
+test("launches Codex with plugin unlock from the toolbar", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "load_snapshot") {
+      return {
+        targetDir: "/Users/example/.codex",
+        usingDefaultTargetDir: true,
+        targetExists: true,
+        targetAuthExists: true,
+        targetConfigExists: true,
+        targetUpdatedAt: "2026-03-25T00:00:00Z",
+        targetAuthTypeLabel: "官方 OAuth",
+        activeProfileId: null,
+        lastSelectedProfileId: null,
+        lastSwitchProfileId: null,
+        lastSwitchedAt: null,
+        codexUsageApiEnabled: false,
+        profiles: [],
+      };
+    }
+    if (command === "launch_codex_enhanced") {
+      return {
+        debugPort: 53231,
+        targetId: "codex",
+        websocketUrl: "ws://127.0.0.1:53231/devtools/page/codex",
+      };
+    }
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  await import("../src/main");
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="launch-codex-enhanced"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  await flushUi();
+
+  expect(invokeMock).toHaveBeenCalledWith("launch_codex_enhanced", undefined);
+  expect(document.body.textContent).toContain("已增强启动 Codex 并唤起宠物");
 });
 
 test("keeps the default profile list concise with metric chips and quick probe actions", async () => {

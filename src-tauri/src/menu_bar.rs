@@ -17,7 +17,7 @@ const MENU_QUIT_ID: &str = "menu-bar-quit";
 pub fn menu_bar_action_labels() -> Vec<(&'static str, &'static str)> {
     vec![
         (MENU_REFRESH_ID, "刷新额度"),
-        (MENU_WAKE_PET_ID, "唤起宠物"),
+        (MENU_WAKE_PET_ID, "增强启动"),
         (MENU_SHOW_ID, "打开主窗口"),
         (MENU_QUIT_ID, "退出"),
     ]

@@ -201,10 +201,10 @@ fn menu_bar_refresh_target_supports_active_official_and_third_party_profiles() {
 }
 
 #[test]
-fn menu_bar_actions_include_wake_pet_between_refresh_and_show_window() {
+fn menu_bar_actions_include_enhanced_launch_between_refresh_and_show_window() {
     let labels = menu_bar_action_labels();
 
     assert_eq!(labels[0], ("menu-bar-refresh-usage", "刷新额度"));
-    assert_eq!(labels[1], ("menu-bar-wake-pet", "唤起宠物"));
+    assert_eq!(labels[1], ("menu-bar-wake-pet", "增强启动"));
     assert_eq!(labels[2], ("menu-bar-show-window", "打开主窗口"));
 }

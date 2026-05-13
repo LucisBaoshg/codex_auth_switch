@@ -833,6 +833,26 @@ async function switchProfile(profileId: string, profileName: string): Promise<vo
   }
 }
 
+async function launchCodexEnhanced(): Promise<void> {
+  if (!isTauriRuntime) {
+    setFlash("info", "浏览器预览模式无法增强启动 Codex。");
+    render();
+    return;
+  }
+
+  state.busy = true;
+  render();
+  try {
+    await desktopInvoke("launch_codex_enhanced");
+    setFlash("success", "已增强启动 Codex 并唤起宠物，请在 Codex 侧边栏查看 Plugins。");
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+
 function nativeConfirm(msg: string, okText = "确定", isDanger = false): Promise<boolean> {
   return new Promise((resolve) => {
     const overlay = document.createElement("div");
@@ -2649,6 +2669,13 @@ function renderCardsPage(snapshot: AppSnapshot): string {
             ${renderProfileLayoutToggle()}
             <button
               class="button button-secondary"
+              data-action="launch-codex-enhanced"
+              ${state.busy ? "disabled" : ""}
+            >
+              增强启动 + 唤起宠物
+            </button>
+            <button
+              class="button button-secondary"
               data-action="migrate-legacy-third-party"
               ${state.busy || migratingLegacyThirdParty ? "disabled" : ""}
             >
@@ -3077,6 +3104,8 @@ function bindEvents(): void {
         await saveEditorProfile(true);
       } else if (action === "check-update") {
         await checkForUpdate();
+      } else if (action === "launch-codex-enhanced") {
+        await launchCodexEnhanced();
       } else if (action === "restart-codex") {
         state.busy = true; render();
         try {
