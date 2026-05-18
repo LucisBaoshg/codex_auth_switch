@@ -92,6 +92,19 @@ fn third_party_profile(
     }
 }
 
+fn symbiotic_profile(
+    id: &str,
+    name: &str,
+    usage: Option<ThirdPartyUsageSnapshot>,
+) -> ProfileSummary {
+    ProfileSummary {
+        auth_type_label: "共生配置".into(),
+        model_provider_key: Some("ylscode".into()),
+        third_party_usage: usage,
+        ..profile(id, name, None)
+    }
+}
+
 fn snapshot(active_profile_id: Option<&str>, profiles: Vec<ProfileSummary>) -> AppSnapshot {
     AppSnapshot {
         target_dir: "/tmp/.codex".into(),
@@ -172,6 +185,27 @@ fn menu_bar_usage_status_uses_third_party_daily_quota_for_active_api_profile() {
 }
 
 #[test]
+fn menu_bar_usage_status_uses_third_party_daily_quota_for_active_symbiotic_profile() {
+    let snapshot = snapshot(
+        Some("symbiotic"),
+        vec![symbiotic_profile(
+            "symbiotic",
+            "YLS OAuth",
+            Some(third_party_usage("29.44", "100", "29.44", "500")),
+        )],
+    );
+
+    let status = menu_bar_usage_status(&snapshot);
+
+    assert_eq!(status.title, "29%");
+    assert_eq!(status.progress_percent, Some(29));
+    assert_eq!(status.summary, "YLS OAuth：今日已用 29%，本周已用 6%");
+    assert_eq!(status.detail_lines[0], "当前：YLS OAuth");
+    assert_eq!(status.detail_lines[1], "今日：29.44 / 100");
+    assert_eq!(status.detail_lines[2], "本周：29.44 / 500");
+}
+
+#[test]
 fn menu_bar_refresh_target_supports_active_official_and_third_party_profiles() {
     let snapshot = snapshot(
         Some("active"),
@@ -198,13 +232,28 @@ fn menu_bar_refresh_target_supports_active_official_and_third_party_profiles() {
     let third_party = menu_bar_refresh_target(&third_party_active).expect("third-party target");
     assert_eq!(third_party.profile_id, "third-party");
     assert_eq!(third_party.kind, MenuBarRefreshKind::ThirdPartyUsage);
+
+    let symbiotic_active = AppSnapshot {
+        active_profile_id: Some("symbiotic".into()),
+        profiles: vec![
+            profile("active", "Work Team", None),
+            symbiotic_profile("symbiotic", "YLS OAuth", None),
+        ],
+        ..third_party_active
+    };
+    let symbiotic = menu_bar_refresh_target(&symbiotic_active).expect("symbiotic target");
+    assert_eq!(symbiotic.profile_id, "symbiotic");
+    assert_eq!(symbiotic.kind, MenuBarRefreshKind::ThirdPartyUsage);
 }
 
 #[test]
-fn menu_bar_actions_include_enhanced_launch_between_refresh_and_show_window() {
+fn menu_bar_actions_exclude_enhanced_launch() {
     let labels = menu_bar_action_labels();
 
     assert_eq!(labels[0], ("menu-bar-refresh-usage", "刷新额度"));
-    assert_eq!(labels[1], ("menu-bar-wake-pet", "增强启动"));
-    assert_eq!(labels[2], ("menu-bar-show-window", "打开主窗口"));
+    assert_eq!(labels[1], ("menu-bar-show-window", "打开主窗口"));
+    assert_eq!(labels[2], ("menu-bar-quit", "退出"));
+    assert!(!labels
+        .iter()
+        .any(|(id, label)| { *id == "menu-bar-wake-pet" || label.contains("增强启动") }));
 }

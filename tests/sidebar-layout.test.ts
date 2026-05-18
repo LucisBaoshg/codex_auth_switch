@@ -44,10 +44,9 @@ test("renders the default profile list without a left sidebar", async () => {
   expect(document.querySelector('[data-region="sidebar"]')).toBeNull();
   expect(document.querySelector('[data-page="cards"]')).not.toBeNull();
   expect(document.querySelector('[data-role="global-restart"]')).toBeNull();
-  expect(document.querySelector('[data-action="launch-codex-enhanced"]')).not.toBeNull();
-  expect(document.querySelector('[data-action="launch-codex-enhanced"]')?.textContent).toContain(
-    "增强启动 + 唤起宠物",
-  );
+  expect(document.querySelector('[data-action="launch-codex-enhanced"]')).toBeNull();
+  expect(document.body.textContent).not.toContain("增强启动");
+  expect(document.body.textContent).not.toContain("唤起宠物");
   expect(document.querySelector('[data-role="global-refresh"]')).not.toBeNull();
   expect(document.querySelector('[data-role="update-entry"]')).not.toBeNull();
   expect(document.querySelector('[data-role="update-entry"]')?.textContent).toContain("检查更新");
@@ -72,7 +71,7 @@ test("renders the default profile list without a left sidebar", async () => {
   expect(document.querySelectorAll('[data-action="delete-profile"]')).toHaveLength(0);
 });
 
-test("launches Codex with plugin unlock from the toolbar", async () => {
+test("does not expose enhanced launch from the toolbar", async () => {
   Object.defineProperty(window, "__TAURI_INTERNALS__", {
     configurable: true,
     value: {},
@@ -95,27 +94,14 @@ test("launches Codex with plugin unlock from the toolbar", async () => {
         profiles: [],
       };
     }
-    if (command === "launch_codex_enhanced") {
-      return {
-        debugPort: 53231,
-        targetId: "codex",
-        websocketUrl: "ws://127.0.0.1:53231/devtools/page/codex",
-      };
-    }
     throw new Error(`unexpected command: ${command}`);
   });
 
   await import("../src/main");
   await flushUi();
 
-  document
-    .querySelector<HTMLButtonElement>('[data-action="launch-codex-enhanced"]')
-    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-  await flushUi();
-  await flushUi();
-
-  expect(invokeMock).toHaveBeenCalledWith("launch_codex_enhanced", undefined);
-  expect(document.body.textContent).toContain("已增强启动 Codex 并唤起宠物");
+  expect(document.querySelector('[data-action="launch-codex-enhanced"]')).toBeNull();
+  expect(invokeMock).not.toHaveBeenCalledWith("launch_codex_enhanced", undefined);
 });
 
 test("keeps the default profile list concise with metric chips and quick probe actions", async () => {
@@ -1327,6 +1313,102 @@ test("refreshes ylscode third-party usage for the selected profile card", async 
   expect(document.body.textContent).toContain("已刷新「ylscode」第三方 API 用量。");
 });
 
+test("refreshes third-party usage for symbiotic profiles", async () => {
+  const refreshedSnapshot = {
+    targetDir: "/Users/example/.codex",
+    usingDefaultTargetDir: true,
+    targetExists: true,
+    targetAuthExists: true,
+    targetConfigExists: true,
+    targetUpdatedAt: "2026-03-25T00:00:00Z",
+    targetAuthTypeLabel: "共生配置",
+    activeProfileId: "profile-symbiotic",
+    lastSelectedProfileId: "profile-symbiotic",
+    lastSwitchProfileId: "profile-symbiotic",
+    lastSwitchedAt: "2026-03-25T00:00:00Z",
+    codexUsageApiEnabled: true,
+    profiles: [
+      {
+        id: "profile-symbiotic",
+        name: "YLS OAuth",
+        notes: "第三方额度，共用 OAuth 登录",
+        authTypeLabel: "共生配置",
+        modelProviderKey: "ylscode",
+        createdAt: "2026-03-24T00:00:00Z",
+        updatedAt: "2026-03-24T13:24:00Z",
+        authHash: "auth-symbiotic",
+        configHash: "config-symbiotic",
+        codexUsage: null,
+        thirdPartyLatency: null,
+        thirdPartyUsage: {
+          provider: "ylscode",
+          remaining: "87.66",
+          unit: "USD",
+          daily: {
+            used: "12.34",
+            total: "100",
+            remaining: "87.66",
+            usedPercent: 12.34,
+          },
+          weekly: {
+            used: "45.67",
+            total: "500",
+            remaining: "454.33",
+            usedPercent: 9.134,
+          },
+          updatedAt: "2026-03-26T10:25:00+08:00",
+          error: null,
+        },
+      },
+    ],
+  };
+
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "load_snapshot") {
+      return {
+        ...refreshedSnapshot,
+        profiles: refreshedSnapshot.profiles.map((profile) => ({
+          ...profile,
+          thirdPartyUsage: null,
+        })),
+      };
+    }
+    if (command === "refresh_profile_third_party_usage") {
+      return refreshedSnapshot;
+    }
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+
+  await import("../src/main");
+  await flushUi();
+
+  expect(document.body.textContent).toContain("共生配置");
+  expect(document.body.textContent).toContain("ylscode");
+
+  document
+    .querySelector<HTMLButtonElement>(
+      '[data-action="refresh-third-party-usage"][data-id="profile-symbiotic"]',
+    )
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+  await flushUi();
+  await flushUi();
+
+  expect(invokeMock).toHaveBeenCalledWith("refresh_profile_third_party_usage", {
+    profileId: "profile-symbiotic",
+  });
+  expect(invokeMock).not.toHaveBeenCalledWith("refresh_profile_codex_usage", {
+    profileId: "profile-symbiotic",
+  });
+  expect(document.body.textContent).toContain("$12.34 / $100");
+  expect(document.body.textContent).toContain("已刷新「YLS OAuth」第三方 API 用量。");
+});
+
 test("refreshes third-party latency for the selected profile card", async () => {
   const refreshedSnapshot = {
     targetDir: "/Users/example/.codex",
@@ -1403,7 +1485,7 @@ test("refreshes third-party latency for the selected profile card", async () => 
   expect(document.body.textContent).toContain("已完成「aixj」第三方 API 测速。");
 });
 
-test("shows a manual-restart success message after switching profiles", async () => {
+test("restarts Codex after switching profiles and session repair finishes", async () => {
   const initialSnapshot = {
     targetDir: "/Users/example/.codex",
     usingDefaultTargetDir: true,
@@ -1454,6 +1536,9 @@ test("shows a manual-restart success message after switching profiles", async ()
     if (command === "switch_profile") {
       return switchedSnapshot;
     }
+    if (command === "restart_codex") {
+      return undefined;
+    }
     throw new Error(`unexpected command: ${command}`);
   });
 
@@ -1470,9 +1555,11 @@ test("shows a manual-restart success message after switching profiles", async ()
     ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
   await flushUi();
+  await flushUi();
 
-  expect(document.body.textContent).toContain("profile 切换成功，请重启 Codex 使用");
   expect(invokeMock).toHaveBeenCalledWith("switch_profile", { profileId: "profile-1" });
+  expect(invokeMock).toHaveBeenCalledWith("restart_codex", undefined);
+  expect(document.body.textContent).toContain("profile 切换成功，Codex 已重启。");
 });
 
 test("shows an indeterminate provider sync dialog while switching profiles", async () => {
@@ -1523,6 +1610,10 @@ test("shows an indeterminate provider sync dialog while switching profiles", asy
   const switchPromise = new Promise<typeof switchedSnapshot>((resolve) => {
     resolveSwitch = resolve;
   });
+  let resolveRestart: (() => void) | null = null;
+  const restartPromise = new Promise<void>((resolve) => {
+    resolveRestart = resolve;
+  });
 
   invokeMock.mockImplementation((command: string) => {
     if (command === "load_snapshot") {
@@ -1530,6 +1621,9 @@ test("shows an indeterminate provider sync dialog while switching profiles", asy
     }
     if (command === "switch_profile") {
       return switchPromise;
+    }
+    if (command === "restart_codex") {
+      return restartPromise;
     }
     return Promise.reject(new Error(`unexpected command: ${command}`));
   });
@@ -1552,10 +1646,19 @@ test("shows an indeterminate provider sync dialog while switching profiles", asy
   expect(dialog).not.toBeNull();
   expect(dialog?.getAttribute("aria-busy")).toBe("true");
   expect(dialog?.textContent).toContain("切换中");
-  expect(dialog?.textContent).toContain("会话 provider 同步中");
+  expect(dialog?.textContent).toContain("正在同步会话并修复 Codex 会话");
 
   resolveSwitch?.(switchedSnapshot);
   await flushUi();
+  await flushUi();
+
+  const restartDialog = document.querySelector('[data-role="profile-switch-busy-dialog"]');
+  expect(restartDialog).not.toBeNull();
+  expect(restartDialog?.getAttribute("aria-busy")).toBe("true");
+  expect(restartDialog?.textContent).toContain("重启 Codex");
+  expect(restartDialog?.textContent).toContain("会话修复已完成，正在重启 Codex");
+
+  resolveRestart?.();
   await flushUi();
   await flushUi();
 

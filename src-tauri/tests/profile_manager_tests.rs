@@ -1,8 +1,5 @@
 use chrono::{SecondsFormat, TimeZone, Utc};
-use codex_auth_switch_lib::core::{
-    restart_codex_script, set_codex_pet_overlay_open, windows_codex_launch_candidates,
-    ProfileInput, ProfileManager,
-};
+use codex_auth_switch_lib::core::{restart_codex_script, ProfileInput, ProfileManager};
 use filetime::{set_file_mtime, FileTime};
 use rusqlite::Connection;
 use serde_json::json;
@@ -120,6 +117,31 @@ network_access = true
     )
 }
 
+fn symbiotic_third_party_config_toml(model: &str) -> String {
+    format!(
+        r#"model_provider = "ylscode"
+model = "{model}"
+review_model = "{model}"
+model_reasoning_effort = "high"
+plan_mode_reasoning_effort = "xhigh"
+show_raw_agent_reasoning = true
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+
+[model_providers.ylscode]
+name = "YLS Code"
+base_url = "https://code.ylsagi.com/v1"
+wire_api = "responses"
+experimental_bearer_token = "provider-token"
+requires_openai_auth = true
+
+[features]
+remote_connections = true
+remote_control = true
+"#
+    )
+}
+
 fn stale_official_config_toml(model: &str) -> String {
     format!(
         r#"model_provider = "OpenAI"
@@ -164,7 +186,10 @@ requires_openai_auth = true
 
 fn legacy_ylsagi_config_toml(model: &str) -> String {
     legacy_third_party_config_toml(model)
-        .replace("model_provider = \"ylscode\"", "model_provider = \"ylsagi\"")
+        .replace(
+            "model_provider = \"ylscode\"",
+            "model_provider = \"ylsagi\"",
+        )
         .replace("[model_providers.ylscode]", "[model_providers.ylsagi]")
 }
 
@@ -533,6 +558,49 @@ fn import_third_party_profile_registers_model_provider_resource() {
 }
 
 #[test]
+fn import_symbiotic_profile_keeps_oauth_auth_and_custom_provider_config() {
+    let (_app_dir, target_dir, mut manager) = temp_manager();
+
+    fs::write(
+        target_dir.path().join("config.toml"),
+        official_config_toml("gpt-4.1"),
+    )
+    .expect("seed target config");
+
+    let profile = manager
+        .import_profile(ProfileInput {
+            name: "YLS OAuth".into(),
+            notes: "oauth with third-party api".into(),
+            auth_json: oauth_auth_json("team@example.com", "user-sym", "acct-sym"),
+            config_toml: symbiotic_third_party_config_toml("gpt-5.5"),
+        })
+        .expect("import symbiotic profile");
+
+    assert_eq!(profile.auth_type_label, "共生配置");
+    assert_eq!(profile.model_provider_key.as_deref(), Some("ylscode"));
+
+    manager
+        .switch_profile(&profile.id)
+        .expect("switch symbiotic profile");
+
+    let active_auth =
+        fs::read_to_string(target_dir.path().join("auth.json")).expect("read active auth");
+    let active_config =
+        fs::read_to_string(target_dir.path().join("config.toml")).expect("read active config");
+
+    assert!(active_auth.contains(r#""auth_mode":"chatgpt""#));
+    assert!(active_auth.contains(r#""OPENAI_API_KEY":null"#));
+    assert!(active_config.contains(r#"model_provider = "ylscode""#));
+    assert!(active_config.contains("[model_providers.ylscode]"));
+    assert!(active_config.contains(r#"base_url = "https://code.ylsagi.com/v1""#));
+    assert!(active_config.contains(r#"wire_api = "responses""#));
+    assert!(active_config.contains(r#"experimental_bearer_token = "provider-token""#));
+    assert!(active_config.contains("requires_openai_auth = true"));
+    assert!(active_config.contains("remote_connections = true"));
+    assert!(active_config.contains("remote_control = true"));
+}
+
+#[test]
 fn migrate_legacy_third_party_profiles_rewrites_model_providers_to_openai_base_url_template() {
     let (_app_dir, _target_dir, manager) = temp_manager();
 
@@ -569,10 +637,13 @@ fn migrate_legacy_third_party_profiles_rewrites_model_providers_to_openai_base_u
     assert!(migrated.config_toml.contains("model_provider = \"openai\""));
     assert!(migrated.config_toml.contains("model = \"gpt-5.4\""));
     assert!(migrated.config_toml.contains("review_model = \"gpt-5.4\""));
-    assert!(migrated.config_toml.contains("model_reasoning_effort = \"high\""));
+    assert!(migrated
+        .config_toml
+        .contains("model_reasoning_effort = \"high\""));
     assert!(migrated
         .config_toml
         .contains("plan_mode_reasoning_effort = \"xhigh\""));
+    assert!(!migrated.config_toml.contains("disable_response_storage"));
     assert!(migrated.config_toml.contains("[tui]"));
     assert!(migrated.config_toml.contains("[sandbox_workspace_write]"));
     assert!(!migrated.config_toml.contains("[model_providers."));
@@ -867,6 +938,7 @@ windows_wsl_setup_acknowledged = true
     assert!(active_auth.contains("sk-alt"));
     assert!(active_config.contains("gpt-5"));
     assert!(active_config.contains("openai_base_url = \"http://sub2api.ite.tapcash.com/v1\""));
+    assert!(!active_config.contains("disable_response_storage"));
     assert!(active_config.contains("[projects.\"/tmp/demo\"]"));
     assert!(active_config.contains("approval_policy = \"never\""));
 
@@ -1397,7 +1469,7 @@ fn repair_codex_sessions_can_restore_times_from_session_index_when_requested() {
 }
 
 #[test]
-fn switch_profile_does_not_repair_shared_session_state() {
+fn switch_profile_repairs_shared_session_state_before_restart() {
     let (_app_dir, target_dir, mut manager) = temp_manager();
 
     let profile = manager
@@ -1434,7 +1506,7 @@ fn switch_profile_does_not_repair_shared_session_state() {
     manager.switch_profile(&profile.id).expect("switch profile");
 
     let (_, _, has_user_event) = read_recovery_thread_state(target_dir.path(), "shared");
-    assert!(!has_user_event);
+    assert!(has_user_event);
 }
 
 #[test]
@@ -1483,7 +1555,103 @@ fn switch_profile_repairs_active_session_provider_when_model_provider_changes() 
 }
 
 #[test]
-fn switch_legacy_third_party_profile_keeps_session_provider_openai() {
+fn switch_profile_repairs_stale_session_provider_even_when_config_provider_key_is_unchanged() {
+    let (_app_dir, target_dir, mut manager) = temp_manager();
+
+    fs::write(
+        target_dir.path().join("config.toml"),
+        third_party_config_toml("gpt-5"),
+    )
+    .expect("seed current config");
+
+    let profile = manager
+        .import_profile(ProfileInput {
+            name: "Third Party".into(),
+            notes: String::new(),
+            auth_json: api_key_auth_json("sk-third"),
+            config_toml: third_party_config_toml("gpt-5.5"),
+        })
+        .expect("import profile");
+
+    let rollout_path = target_dir
+        .path()
+        .join("sessions")
+        .join("2026")
+        .join("stale-provider.jsonl");
+    write_provider_repair_rollout(&rollout_path, "stale-provider", "ylscode");
+    set_file_mtime(&rollout_path, file_time_from_millis(1_000)).expect("set rollout mtime");
+    seed_recovery_database(
+        target_dir.path(),
+        &[RecoveryThreadSeed {
+            id: "stale-provider".into(),
+            cwd: "/tmp/stale-provider".into(),
+            title: "Stale Provider".into(),
+            rollout_path: rollout_path.clone(),
+            updated_at_ms: 1_000,
+            has_user_event: true,
+            archived: false,
+            model_provider: "ylscode".into(),
+        }],
+    );
+
+    manager.switch_profile(&profile.id).expect("switch profile");
+
+    assert_eq!(
+        read_recovery_thread_provider(target_dir.path(), "stale-provider"),
+        "openai"
+    );
+    let rollout = fs::read_to_string(&rollout_path).expect("read rollout");
+    assert!(rollout.contains(r#""model_provider":"openai""#));
+    assert_eq!(file_mtime_millis(&rollout_path), 1_000);
+}
+
+#[test]
+fn switch_symbiotic_profile_repairs_session_provider_to_config_provider() {
+    let (_app_dir, target_dir, mut manager) = temp_manager();
+
+    let profile = manager
+        .import_profile(ProfileInput {
+            name: "YLS OAuth".into(),
+            notes: String::new(),
+            auth_json: oauth_auth_json("team@example.com", "user-sym", "acct-sym"),
+            config_toml: symbiotic_third_party_config_toml("gpt-5"),
+        })
+        .expect("import profile");
+
+    let rollout_path = target_dir
+        .path()
+        .join("sessions")
+        .join("2026")
+        .join("symbiotic.jsonl");
+    write_provider_repair_rollout(&rollout_path, "symbiotic", "openai");
+    set_file_mtime(&rollout_path, file_time_from_millis(1_000)).expect("set rollout mtime");
+    seed_recovery_database(
+        target_dir.path(),
+        &[RecoveryThreadSeed {
+            id: "symbiotic".into(),
+            cwd: "/tmp/symbiotic".into(),
+            title: "Symbiotic".into(),
+            rollout_path: rollout_path.clone(),
+            updated_at_ms: 1_000,
+            has_user_event: true,
+            archived: false,
+            model_provider: "openai".into(),
+        }],
+    );
+
+    manager.switch_profile(&profile.id).expect("switch profile");
+
+    assert_eq!(
+        read_recovery_thread_provider(target_dir.path(), "symbiotic"),
+        "ylscode"
+    );
+    let rollout = fs::read_to_string(&rollout_path).expect("read rollout");
+    assert!(rollout.contains(r#""model_provider":"ylscode""#));
+    assert_eq!(file_mtime_millis(&rollout_path), 1_000);
+}
+
+#[test]
+fn switch_legacy_third_party_profile_uses_config_provider_for_sessions() {
     let (_app_dir, target_dir, mut manager) = temp_manager();
 
     let profile = manager
@@ -1520,15 +1688,15 @@ fn switch_legacy_third_party_profile_keeps_session_provider_openai() {
 
     assert_eq!(
         read_recovery_thread_provider(target_dir.path(), "shared"),
-        "openai"
+        "ylscode"
     );
     let rollout = fs::read_to_string(&rollout_path).expect("read rollout");
-    assert!(rollout.contains(r#""model_provider":"openai""#));
+    assert!(rollout.contains(r#""model_provider":"ylscode""#));
     assert_eq!(file_mtime_millis(&rollout_path), 1_000);
 }
 
 #[test]
-fn switch_legacy_ylsagi_profile_keeps_session_provider_openai() {
+fn switch_legacy_ylsagi_profile_uses_config_provider_for_sessions() {
     let (_app_dir, target_dir, mut manager) = temp_manager();
 
     let profile = manager
@@ -1565,10 +1733,10 @@ fn switch_legacy_ylsagi_profile_keeps_session_provider_openai() {
 
     assert_eq!(
         read_recovery_thread_provider(target_dir.path(), "shared"),
-        "openai"
+        "ylsagi"
     );
     let rollout = fs::read_to_string(&rollout_path).expect("read rollout");
-    assert!(rollout.contains(r#""model_provider":"openai""#));
+    assert!(rollout.contains(r#""model_provider":"ylsagi""#));
     assert_eq!(file_mtime_millis(&rollout_path), 1_000);
 }
 
@@ -1989,69 +2157,17 @@ fn restart_codex_script_targets_codex_app_on_macos() {
 }
 
 #[test]
-fn restart_codex_script_supports_pet_overlay_restore_after_relaunch() {
+fn restart_codex_script_remains_plain_restart_without_pet_overlay_state() {
     #[cfg(target_os = "macos")]
     {
         let script = restart_codex_script().expect("script should exist on macOS");
         assert!(script.contains("application \"Codex\""));
         assert!(script.contains("quit"));
+        assert!(!script.contains("electron-avatar-overlay-open"));
     }
 
     #[cfg(not(target_os = "macos"))]
     {
         assert!(restart_codex_script().is_none());
     }
-}
-
-#[test]
-fn set_codex_pet_overlay_open_preserves_existing_global_state() {
-    let codex_dir = TempDir::new().expect("temp codex dir");
-    fs::write(
-        codex_dir.path().join(".codex-global-state.json"),
-        serde_json::to_string_pretty(&json!({
-            "existing": "value",
-            "electron-avatar-overlay-open": false
-        }))
-        .expect("serialize global state"),
-    )
-    .expect("write global state");
-
-    set_codex_pet_overlay_open(codex_dir.path()).expect("wake pet state");
-
-    let state = fs::read_to_string(codex_dir.path().join(".codex-global-state.json"))
-        .expect("read global state");
-    let state: serde_json::Value = serde_json::from_str(&state).expect("parse global state");
-
-    assert_eq!(state["existing"], "value");
-    assert_eq!(state["electron-avatar-overlay-open"], true);
-}
-
-#[test]
-fn set_codex_pet_overlay_open_creates_missing_global_state() {
-    let codex_dir = TempDir::new().expect("temp codex dir");
-
-    set_codex_pet_overlay_open(codex_dir.path()).expect("wake pet state");
-
-    let state = fs::read_to_string(codex_dir.path().join(".codex-global-state.json"))
-        .expect("read global state");
-    let state: serde_json::Value = serde_json::from_str(&state).expect("parse global state");
-
-    assert_eq!(state["electron-avatar-overlay-open"], true);
-}
-
-#[test]
-fn windows_codex_launch_candidates_prefers_running_process_path() {
-    let running_path = PathBuf::from(r"C:\Users\me\AppData\Local\Programs\Codex\Codex.exe");
-    let local_app_data = PathBuf::from(r"C:\Users\me\AppData\Local");
-
-    let candidates =
-        windows_codex_launch_candidates(Some(running_path.clone()), Some(local_app_data.clone()));
-
-    assert_eq!(candidates[0], running_path);
-    assert!(candidates.contains(
-        &local_app_data
-            .join("Programs")
-            .join("Codex")
-            .join("Codex.exe")
-    ));
 }

@@ -114,6 +114,27 @@ model_reasoning_effort = "medium"
     )
 }
 
+fn symbiotic_ylscode_config_toml(model: &str) -> String {
+    format!(
+        r#"model_provider = "ylscode"
+model = "{model}"
+review_model = "{model}"
+model_reasoning_effort = "high"
+
+[model_providers.ylscode]
+name = "YLS Code"
+base_url = "https://code.ylsagi.com/v1"
+wire_api = "responses"
+experimental_bearer_token = "provider-token"
+requires_openai_auth = true
+
+[features]
+remote_connections = true
+remote_control = true
+"#
+    )
+}
+
 fn temp_manager() -> (TempDir, TempDir, ProfileManager) {
     let app_dir = TempDir::new().expect("temp app dir");
     let target_dir = TempDir::new().expect("temp target dir");
@@ -128,7 +149,7 @@ fn temp_manager() -> (TempDir, TempDir, ProfileManager) {
 
 struct TestServer {
     base_url: String,
-    responses: Arc<Mutex<HashMap<String, (String, String, Duration)>>>,
+    responses: Arc<Mutex<HashMap<String, (String, String, String, Duration)>>>,
     requests: Arc<Mutex<Vec<String>>>,
     shutdown: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
@@ -177,11 +198,11 @@ impl TestServer {
                             .cloned();
 
                         let (status, content_type, body, delay) = match response {
-                            Some((content_type, body, delay)) => {
-                                ("200 OK", content_type, body, delay)
+                            Some((status, content_type, body, delay)) => {
+                                (status, content_type, body, delay)
                             }
                             None => (
-                                "404 Not Found",
+                                "404 Not Found".to_string(),
                                 "text/plain".to_string(),
                                 "not found".to_string(),
                                 Duration::from_millis(0),
@@ -219,6 +240,19 @@ impl TestServer {
         self.responses.lock().expect("lock responses").insert(
             path.to_string(),
             (
+                "200 OK".into(),
+                "application/json".into(),
+                body.to_string(),
+                Duration::from_millis(0),
+            ),
+        );
+    }
+
+    fn set_status_json(&self, path: &str, status: &str, body: serde_json::Value) {
+        self.responses.lock().expect("lock responses").insert(
+            path.to_string(),
+            (
+                status.to_string(),
                 "application/json".into(),
                 body.to_string(),
                 Duration::from_millis(0),
@@ -229,7 +263,12 @@ impl TestServer {
     fn set_json_with_delay(&self, path: &str, body: serde_json::Value, delay: Duration) {
         self.responses.lock().expect("lock responses").insert(
             path.to_string(),
-            ("application/json".into(), body.to_string(), delay),
+            (
+                "200 OK".into(),
+                "application/json".into(),
+                body.to_string(),
+                delay,
+            ),
         );
     }
 
@@ -342,6 +381,59 @@ fn switch_profile_refreshes_oauth_tokens_before_writing_target_files() {
         .expect("load synced profile");
     assert!(saved.auth_json.contains("access-token-fresh"));
     assert!(saved.auth_json.contains("refresh-token-fresh"));
+
+    std::env::remove_var("CODEX_REFRESH_TOKEN_URL_OVERRIDE");
+}
+
+#[test]
+fn switch_profile_continues_with_saved_oauth_tokens_when_refresh_is_rejected() {
+    let _guard = env_lock().lock().expect("lock env");
+    let server = TestServer::start();
+    server.set_status_json(
+        "/oauth/token",
+        "401 Unauthorized",
+        json!({
+            "error": "invalid_grant",
+            "error_description": "refresh token rejected"
+        }),
+    );
+    std::env::set_var(
+        "CODEX_REFRESH_TOKEN_URL_OVERRIDE",
+        format!("{}/oauth/token", server.base_url),
+    );
+
+    let (_app_dir, target_dir, mut manager) = temp_manager();
+    let profile = manager
+        .import_profile(ProfileInput {
+            name: "Symbiotic Team".into(),
+            notes: "oauth with third-party api".into(),
+            auth_json: oauth_auth_json_with_refresh(
+                "team@example.com",
+                "user-test",
+                "account-test",
+                "access-token-saved",
+                "refresh-token-rejected",
+            ),
+            config_toml: symbiotic_ylscode_config_toml("gpt-5.4"),
+        })
+        .expect("import profile");
+
+    manager
+        .switch_profile(&profile.id)
+        .expect("switch profile should keep saved auth when refresh is rejected");
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].contains("POST /oauth/token HTTP/1.1"));
+
+    let active_auth =
+        fs::read_to_string(target_dir.path().join("auth.json")).expect("read active auth");
+    assert!(active_auth.contains("access-token-saved"));
+    assert!(active_auth.contains("refresh-token-rejected"));
+    let active_config =
+        fs::read_to_string(target_dir.path().join("config.toml")).expect("read active config");
+    assert!(active_config.contains(r#"model_provider = "ylscode""#));
+    assert!(active_config.contains("requires_openai_auth = true"));
 
     std::env::remove_var("CODEX_REFRESH_TOKEN_URL_OVERRIDE");
 }
@@ -534,9 +626,10 @@ fn refresh_all_codex_usage_continues_and_marks_failed_profiles() {
         .and_then(|profile| profile.codex_usage.as_ref())
         .expect("broken profile failure usage");
     assert!(broken_usage.primary.is_none());
-    assert!(broken_usage.error.as_deref().is_some_and(|error| {
-        error.contains("access token") || error.contains("Codex usage")
-    }));
+    assert!(broken_usage
+        .error
+        .as_deref()
+        .is_some_and(|error| { error.contains("access token") || error.contains("Codex usage") }));
 
     let requests = server.requests();
     assert_eq!(requests.len(), 1);
@@ -849,6 +942,78 @@ fn update_profile_clears_stale_codex_usage_when_auth_changes() {
     assert!(updated.codex_usage.is_none());
 
     std::env::remove_var("CODEX_AUTH_SWITCH_CODEX_USAGE_ENDPOINT");
+}
+
+#[test]
+fn refresh_third_party_usage_supports_symbiotic_oauth_profile() {
+    let _guard = env_lock().lock().expect("lock env");
+    let server = TestServer::start();
+    server.set_json(
+        "/codex/info",
+        json!({
+            "state": {
+                "userPackgeUsage": {
+                    "total_cost": "12.34",
+                    "total_quota": "100",
+                    "remaining_quota": "87.66",
+                    "used_percentage": 12.34
+                },
+                "userPackgeUsage_week": {
+                    "total_cost": "45.67",
+                    "total_quota": "500",
+                    "remaining_quota": "454.33",
+                    "used_percentage": 9.134
+                }
+            }
+        }),
+    );
+
+    std::env::set_var(
+        "CODEX_AUTH_SWITCH_YLSCODE_USAGE_ENDPOINT",
+        format!("{}/codex/info", server.base_url),
+    );
+
+    let (_app_dir, _target_dir, manager) = temp_manager();
+    let profile = manager
+        .import_profile(ProfileInput {
+            name: "YLS OAuth".into(),
+            notes: "symbiotic quota".into(),
+            auth_json: oauth_auth_json(
+                "team@example.com",
+                "user-test",
+                "account-test",
+                "access-token-test",
+            ),
+            config_toml: symbiotic_ylscode_config_toml("gpt-5.5"),
+        })
+        .expect("import symbiotic profile");
+
+    assert_eq!(profile.auth_type_label, "共生配置");
+
+    let refreshed = manager
+        .refresh_profile_third_party_usage(&profile.id)
+        .expect("refresh third-party usage for symbiotic profile");
+
+    let usage = refreshed.third_party_usage.expect("third-party usage");
+    assert_eq!(usage.provider.as_deref(), Some("ylscode"));
+    assert_eq!(
+        usage.daily.as_ref().and_then(|quota| quota.used.as_deref()),
+        Some("12.34")
+    );
+    assert_eq!(
+        usage
+            .weekly
+            .as_ref()
+            .and_then(|quota| quota.total.as_deref()),
+        Some("500")
+    );
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].contains("GET /codex/info HTTP/1.1"));
+    assert!(requests[0].contains("Authorization: Bearer provider-token"));
+
+    std::env::remove_var("CODEX_AUTH_SWITCH_YLSCODE_USAGE_ENDPOINT");
 }
 
 #[test]

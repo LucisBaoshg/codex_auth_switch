@@ -676,8 +676,7 @@ impl ProfileManager {
                 continue;
             };
 
-            let normalized_config =
-                normalize_config_toml_for_auth(&auth_json, &migrated_config)?;
+            let normalized_config = normalize_config_toml_for_auth(&auth_json, &migrated_config)?;
             fs::write(&config_path, &normalized_config)?;
             self.register_model_provider_from_profile(
                 &auth_json,
@@ -1714,11 +1713,6 @@ impl ProfileManager {
         } else {
             None
         };
-        let current_model_provider = current_config_toml
-            .as_deref()
-            .map(model_provider_from_config_toml)
-            .transpose()?
-            .unwrap_or_else(|| "openai".to_string());
         let active_profile = self.detect_active_profile()?;
 
         if let (Some(current_auth_json), Some(current_config_toml), Some(active_profile)) = (
@@ -1735,8 +1729,9 @@ impl ProfileManager {
             }
         }
 
-        let next_auth_json =
-            refresh_oauth_auth_json(&fs::read_to_string(profile_dir.join("auth.json"))?)?;
+        let next_auth_json = refresh_oauth_auth_json_for_switch(&fs::read_to_string(
+            profile_dir.join("auth.json"),
+        )?)?;
         let next_profile_config = fs::read_to_string(profile_dir.join("config.toml"))?;
         let next_config_toml = match current_config_toml {
             Some(current_config_toml) => merge_profile_managed_config(
@@ -1749,15 +1744,13 @@ impl ProfileManager {
                 &repair_illegal_config_toml(&next_profile_config),
             )?,
         };
-        let next_model_provider = model_provider_from_config_toml(&next_config_toml)?;
+        let next_session_model_provider =
+            session_model_provider_key_from_config_toml(&next_config_toml)?;
 
         fs::write(self.target_auth_path(), &next_auth_json)?;
         fs::write(self.target_config_path(), &next_config_toml)?;
-        if current_model_provider != next_model_provider {
-            let _ = self.repair_session_model_provider_for_switch(
-                &session_model_provider_key_from_config_toml(&next_config_toml)?,
-            )?;
-        }
+        let _ = self.repair_codex_sessions_internal(false, false)?;
+        let _ = self.repair_session_model_provider_for_switch(&next_session_model_provider)?;
         self.sync_runtime_state_to_profile(profile_id, &next_auth_json, &next_config_toml)?;
 
         let switched_at = Utc::now();
@@ -1966,9 +1959,10 @@ impl ProfileManager {
         let config_toml = fs::read_to_string(profile_dir.join("config.toml"))?;
         let mut metadata = self.read_profile_metadata(&profile_dir)?;
 
-        if metadata.auth_type_label != "第三方 API" {
+        if !is_third_party_backed_profile(&metadata.auth_type_label) {
             return Err(AppError::Message(
-                "Third-party latency probe is only available for 第三方 API profiles.".into(),
+                "Third-party latency probe is only available for 第三方 API or 共生配置 profiles."
+                    .into(),
             ));
         }
 
@@ -1987,9 +1981,10 @@ impl ProfileManager {
         let config_toml = fs::read_to_string(profile_dir.join("config.toml"))?;
         let mut metadata = self.read_profile_metadata(&profile_dir)?;
 
-        if metadata.auth_type_label != "第三方 API" {
+        if !is_third_party_backed_profile(&metadata.auth_type_label) {
             return Err(AppError::Message(
-                "Third-party usage query is only available for 第三方 API profiles.".into(),
+                "Third-party usage query is only available for 第三方 API or 共生配置 profiles."
+                    .into(),
             ));
         }
 
@@ -2253,10 +2248,18 @@ impl ProfileManager {
             notes,
             remote_profile_id,
             auth_type_label: detect_auth_type_label(auth_json, config_toml)?,
-            model_provider_id: provider.as_ref().map(|provider| provider.provider_id.clone()),
-            model_provider_api_key_id: provider.as_ref().map(|provider| provider.api_key_id.clone()),
-            model_provider_key: provider.as_ref().map(|provider| provider.provider_key.clone()),
-            model_provider_name: provider.as_ref().map(|provider| provider.provider_name.clone()),
+            model_provider_id: provider
+                .as_ref()
+                .map(|provider| provider.provider_id.clone()),
+            model_provider_api_key_id: provider
+                .as_ref()
+                .map(|provider| provider.api_key_id.clone()),
+            model_provider_key: provider
+                .as_ref()
+                .map(|provider| provider.provider_key.clone()),
+            model_provider_name: provider
+                .as_ref()
+                .map(|provider| provider.provider_name.clone()),
             model_provider_base_url: provider.as_ref().map(|provider| provider.base_url.clone()),
             model_provider_wire_api: provider.as_ref().map(|provider| provider.wire_api.clone()),
             created_at,
@@ -3060,67 +3063,6 @@ fn normalize_version_string(version: &str) -> String {
         .to_string()
 }
 
-pub fn windows_codex_launch_candidates(
-    running_process_path: Option<PathBuf>,
-    local_app_data: Option<PathBuf>,
-) -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(path) = running_process_path {
-        candidates.push(path);
-    }
-    if let Some(local_app_data) = local_app_data {
-        candidates.push(local_app_data.join("Programs").join("Codex").join("Codex.exe"));
-        candidates.push(local_app_data.join("Codex").join("Codex.exe"));
-    }
-    candidates
-}
-
-#[cfg(target_os = "windows")]
-fn running_codex_exe_path() -> Option<PathBuf> {
-    let output = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            "(Get-Process -Name Codex -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Path)",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if path.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(path))
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn reopen_codex_on_windows() -> Result<(), AppError> {
-    let running_path = running_codex_exe_path();
-
-    let _ = Command::new("taskkill")
-        .args(["/IM", "Codex.exe", "/T", "/F"])
-        .status();
-    thread::sleep(Duration::from_millis(700));
-
-    set_codex_pet_overlay_open(&default_codex_target_dir()?)?;
-
-    let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
-    for candidate in windows_codex_launch_candidates(running_path, local_app_data) {
-        if candidate.exists() {
-            Command::new(candidate).spawn()?;
-            return Ok(());
-        }
-    }
-
-    Err(AppError::Message(
-        "Unable to find Codex.exe to reopen Codex on Windows.".into(),
-    ))
-}
-
 pub fn open_url(url: &str) -> Result<(), AppError> {
     if !(url.starts_with("https://") || url.starts_with("http://")) {
         return Err(AppError::Message("仅允许打开 http/https 链接。".into()));
@@ -3148,6 +3090,10 @@ fn unknown_auth_type_label() -> String {
     "未识别".to_string()
 }
 
+fn is_third_party_backed_profile(auth_type_label: &str) -> bool {
+    matches!(auth_type_label, "第三方 API" | "共生配置")
+}
+
 pub fn restart_codex_script() -> Option<&'static str> {
     #[cfg(target_os = "macos")]
     {
@@ -3161,62 +3107,6 @@ end if"#,
     #[cfg(not(target_os = "macos"))]
     {
         None
-    }
-}
-
-pub fn set_codex_pet_overlay_open(codex_dir: &Path) -> Result<(), AppError> {
-    fs::create_dir_all(codex_dir)?;
-    let global_state_path = codex_dir.join(".codex-global-state.json");
-    let mut state = if global_state_path.exists() {
-        let contents = fs::read_to_string(&global_state_path)?;
-        serde_json::from_str::<serde_json::Value>(&contents)?
-    } else {
-        serde_json::json!({})
-    };
-
-    let state_object = state
-        .as_object_mut()
-        .ok_or_else(|| AppError::Message("Codex global state is not a JSON object.".into()))?;
-    state_object.insert(
-        "electron-avatar-overlay-open".into(),
-        serde_json::Value::Bool(true),
-    );
-    fs::write(&global_state_path, serde_json::to_string(&state)?)?;
-
-    Ok(())
-}
-
-pub fn wake_codex_pet_overlay() -> Result<(), AppError> {
-    #[cfg(target_os = "macos")]
-    {
-        let script = restart_codex_script()
-            .ok_or_else(|| AppError::Message("Unable to prepare Codex restart script.".into()))?;
-
-        let quit_status = Command::new("osascript").arg("-e").arg(script).status()?;
-        if !quit_status.success() {
-            return Err(AppError::Message("Failed to ask Codex.app to quit.".into()));
-        }
-
-        thread::sleep(Duration::from_millis(700));
-        set_codex_pet_overlay_open(&default_codex_target_dir()?)?;
-
-        let open_status = Command::new("open").arg("-a").arg("Codex").status()?;
-        if !open_status.success() {
-            return Err(AppError::Message("Failed to reopen Codex.app.".into()));
-        }
-
-        Ok(())
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        reopen_codex_on_windows()
-    }
-
-    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    {
-        set_codex_pet_overlay_open(&default_codex_target_dir()?)?;
-        Ok(())
     }
 }
 
@@ -3240,80 +3130,29 @@ pub fn repair_illegal_config_toml(config_toml: &str) -> String {
     }
 }
 
-fn model_provider_from_config_toml(config_toml: &str) -> Result<String, AppError> {
-    let table = parse_toml_table(config_toml)?;
-    Ok(table
-        .get("model_provider")
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("openai")
-        .to_string())
-}
-
 fn session_model_provider_key_from_config_toml(config_toml: &str) -> Result<String, AppError> {
     let table = parse_toml_table(config_toml)?;
-    if table
-        .get("openai_base_url")
-        .and_then(|value| value.as_str())
-        .is_some_and(|value| !normalize_base_url_for_store(value).is_empty())
-    {
-        return Ok("openai".into());
-    }
-
-    let config_model_provider = table
+    let provider = table
         .get("model_provider")
         .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
         .unwrap_or("openai");
 
-    let legacy_provider_base_url = table
-        .get("model_providers")
-        .and_then(|value| value.as_table())
-        .and_then(|providers| {
-            providers
-                .get(config_model_provider)
-                .or_else(|| providers.values().next())
-        })
-        .and_then(|value| value.as_table())
-        .and_then(|provider| provider.get("base_url"))
-        .and_then(|value| value.as_str())
-        .is_some_and(|value| !normalize_base_url_for_store(value).is_empty());
-    if legacy_provider_base_url {
-        return Ok("openai".into());
-    }
-
-    Ok(session_model_provider_key(config_model_provider))
-}
-
-fn session_model_provider_key(config_model_provider: &str) -> String {
-    let provider = config_model_provider.trim();
-    if provider.is_empty()
-        || provider.eq_ignore_ascii_case("openai")
-        || provider.eq_ignore_ascii_case("ylscode")
-    {
-        "openai".into()
-    } else {
-        provider.to_string()
-    }
+    Ok(provider.to_string())
 }
 
 fn resolve_third_party_provider_descriptor(
     auth_json: &str,
     config_toml: &str,
 ) -> Result<Option<ThirdPartyProviderDescriptor>, AppError> {
-    if is_official_oauth_auth(auth_json)? {
-        return Ok(None);
-    }
-
     let auth = serde_json::from_str::<serde_json::Value>(auth_json)
         .map_err(|error| AppError::InvalidAuthJson(error.to_string()))?;
-    let Some(api_key) = auth
+    let auth_api_key = auth
         .get("OPENAI_API_KEY")
         .and_then(|value| value.as_str())
         .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    else {
-        return Ok(None);
-    };
+        .filter(|value| !value.is_empty());
 
     let config = parse_toml_table(config_toml)?;
     let provider_key = config
@@ -3326,8 +3165,21 @@ fn resolve_third_party_provider_descriptor(
     let provider_from_table = config
         .get("model_providers")
         .and_then(|value| value.as_table())
-        .and_then(|providers| providers.get(&provider_key).or_else(|| providers.values().next()))
+        .and_then(|providers| {
+            providers
+                .get(&provider_key)
+                .or_else(|| providers.values().next())
+        })
         .and_then(|value| value.as_table());
+
+    if is_official_oauth_auth(auth_json)?
+        && !provider_from_table
+            .and_then(|provider| provider.get("requires_openai_auth"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+    {
+        return Ok(None);
+    }
 
     let base_url = config
         .get("openai_base_url")
@@ -3356,6 +3208,17 @@ fn resolve_third_party_provider_descriptor(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "responses".into());
+    let api_key = auth_api_key.or_else(|| {
+        provider_from_table
+            .and_then(|provider| provider.get("experimental_bearer_token"))
+            .and_then(|value| value.as_str())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    });
+
+    let Some(api_key) = api_key else {
+        return Ok(None);
+    };
 
     let provider_id = stable_model_provider_id(&provider_key, &base_url);
     let api_key_id = stable_model_provider_key_id(&api_key);
@@ -4040,7 +3903,6 @@ const THIRD_PARTY_PROFILE_SCALAR_KEYS: &[&str] = &[
     "plan_mode_reasoning_effort",
     "model_context_window",
     "model_auto_compact_token_limit",
-    "disable_response_storage",
     "show_raw_agent_reasoning",
     "approval_policy",
     "sandbox_mode",
@@ -4048,10 +3910,13 @@ const THIRD_PARTY_PROFILE_SCALAR_KEYS: &[&str] = &[
     "web_search",
     "network_access",
 ];
-const THIRD_PARTY_PROFILE_TABLE_KEYS: &[&str] = &[
-    "model_providers",
-    "tui",
-    "sandbox_workspace_write",
+const THIRD_PARTY_PROFILE_TABLE_KEYS: &[&str] =
+    &["model_providers", "tui", "sandbox_workspace_write"];
+const THIRD_PARTY_PROFILE_FEATURE_KEYS: &[&str] = &[
+    "guardian_approval",
+    "remote_connections",
+    "remote_control",
+    "memories",
 ];
 const ALL_PROFILE_SCALAR_KEYS: &[&str] = &[
     "openai_base_url",
@@ -4070,11 +3935,7 @@ const ALL_PROFILE_SCALAR_KEYS: &[&str] = &[
     "web_search",
     "network_access",
 ];
-const ALL_PROFILE_TABLE_KEYS: &[&str] = &[
-    "model_providers",
-    "tui",
-    "sandbox_workspace_write",
-];
+const ALL_PROFILE_TABLE_KEYS: &[&str] = &["model_providers", "tui", "sandbox_workspace_write"];
 const DEFAULT_CODEX_USAGE_ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/usage";
 const DEFAULT_YLSCODE_USAGE_ENDPOINT: &str = "https://code.ylsagi.com/codex/info";
 const REFRESH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
@@ -4169,7 +4030,7 @@ fn managed_config_table(
         }
     }
 
-    if !is_official_oauth_auth(auth_json)? {
+    if !is_official_oauth_auth(auth_json)? || config_has_symbiotic_provider(table) {
         for key in THIRD_PARTY_PROFILE_SCALAR_KEYS {
             if let Some(value) = table.get(*key) {
                 managed.insert((*key).to_string(), value.clone());
@@ -4181,9 +4042,43 @@ fn managed_config_table(
                 managed.insert((*key).to_string(), value.clone());
             }
         }
+
+        if let Some(features) = table.get("features").and_then(|value| value.as_table()) {
+            let mut managed_features = toml::map::Map::new();
+            for key in THIRD_PARTY_PROFILE_FEATURE_KEYS {
+                if let Some(value) = features.get(*key) {
+                    managed_features.insert((*key).to_string(), value.clone());
+                }
+            }
+            if !managed_features.is_empty() {
+                managed.insert("features".to_string(), toml::Value::Table(managed_features));
+            }
+        }
     }
 
     Ok(managed)
+}
+
+fn config_has_symbiotic_provider(table: &toml::map::Map<String, toml::Value>) -> bool {
+    table
+        .get("model_providers")
+        .and_then(|value| value.as_table())
+        .is_some_and(|providers| {
+            providers.values().any(|provider| {
+                let Some(provider) = provider.as_table() else {
+                    return false;
+                };
+                let requires_openai_auth = provider
+                    .get("requires_openai_auth")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                let has_bearer_token = provider
+                    .get("experimental_bearer_token")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|value| !value.trim().is_empty());
+                requires_openai_auth && has_bearer_token
+            })
+        })
 }
 
 fn managed_config_hash(auth_json: &str, contents: &str) -> Result<String, AppError> {
@@ -4223,7 +4118,10 @@ fn migrate_legacy_third_party_config_toml(
         return Ok(None);
     }
 
-    let Some(providers) = table.get("model_providers").and_then(|value| value.as_table()) else {
+    let Some(providers) = table
+        .get("model_providers")
+        .and_then(|value| value.as_table())
+    else {
         return Ok(None);
     };
     let Some(provider_key) = table
@@ -4279,7 +4177,6 @@ model = "{}"
 review_model = "{}"
 model_reasoning_effort = "high"
 plan_mode_reasoning_effort = "xhigh"
-disable_response_storage = true
 show_raw_agent_reasoning = true
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
@@ -4320,17 +4217,46 @@ fn merge_profile_managed_config(
     let mut merged = shared_config_table(&current_table);
 
     for (key, value) in managed_config_table(next_auth_json, &profile_table)? {
-        merged.insert(key, value);
+        if key == "features" {
+            merge_features_table(&mut merged, value);
+        } else {
+            merged.insert(key, value);
+        }
     }
 
     toml::to_string_pretty(&toml::Value::Table(merged))
         .map_err(|error| AppError::Message(error.to_string()))
 }
 
+fn merge_features_table(target: &mut toml::map::Map<String, toml::Value>, value: toml::Value) {
+    let toml::Value::Table(next_features) = value else {
+        target.insert("features".to_string(), value);
+        return;
+    };
+
+    let mut merged_features = target
+        .remove("features")
+        .and_then(|value| match value {
+            toml::Value::Table(table) => Some(table),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    for (key, value) in next_features {
+        merged_features.insert(key, value);
+    }
+
+    target.insert("features".to_string(), toml::Value::Table(merged_features));
+}
+
 fn detect_auth_type_label(auth_json: &str, config_toml: &str) -> Result<String, AppError> {
     let auth = serde_json::from_str::<serde_json::Value>(auth_json)
         .map_err(|error| AppError::InvalidAuthJson(error.to_string()))?;
     let config = parse_toml_table(config_toml)?;
+
+    if is_official_oauth_auth(auth_json)? && config_has_symbiotic_provider(&config) {
+        return Ok("共生配置".into());
+    }
 
     if is_official_oauth_auth(auth_json)? {
         return Ok("官方 OAuth".into());
@@ -4659,6 +4585,18 @@ fn refresh_oauth_auth_json(auth_json: &str) -> Result<String, AppError> {
     persist_refreshed_oauth_auth_json(auth_json, refreshed)
 }
 
+fn refresh_oauth_auth_json_for_switch(auth_json: &str) -> Result<String, AppError> {
+    match refresh_oauth_auth_json(auth_json) {
+        Ok(refreshed_auth_json) => Ok(refreshed_auth_json),
+        Err(_)
+            if oauth_access_token(auth_json).is_some() && oauth_id_token(auth_json).is_some() =>
+        {
+            Ok(auth_json.to_string())
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn fetch_codex_usage_snapshot(auth_json: &str) -> Result<CodexUsageSnapshot, AppError> {
     let access_token = oauth_access_token(auth_json).ok_or_else(|| {
         AppError::Message("The selected profile does not contain a ChatGPT access token.".into())
@@ -4967,14 +4905,11 @@ fn resolve_third_party_probe_target(
 ) -> Result<ThirdPartyProbeTarget, AppError> {
     let auth = serde_json::from_str::<serde_json::Value>(auth_json)
         .map_err(|error| AppError::InvalidAuthJson(error.to_string()))?;
-    let api_key = auth
+    let auth_api_key = auth
         .get("OPENAI_API_KEY")
         .and_then(|value| value.as_str())
         .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            AppError::Message("当前卡片缺少 OPENAI_API_KEY，无法执行第三方 API 测速。".into())
-        })?;
+        .filter(|value| !value.is_empty());
 
     let config = parse_toml_table(config_toml)?;
     let model = config
@@ -4994,8 +4929,27 @@ fn resolve_third_party_probe_target(
     let provider_from_table = config
         .get("model_providers")
         .and_then(|value| value.as_table())
-        .and_then(|providers| providers.get(&provider_name).or_else(|| providers.values().next()))
+        .and_then(|providers| {
+            providers
+                .get(&provider_name)
+                .or_else(|| providers.values().next())
+        })
         .and_then(|value| value.as_table());
+
+    let api_key = auth_api_key.or_else(|| {
+        provider_from_table
+            .and_then(|provider| provider.get("experimental_bearer_token"))
+            .and_then(|value| value.as_str())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    });
+
+    let Some(api_key) = api_key else {
+        return Err(AppError::Message(
+            "当前卡片缺少 OPENAI_API_KEY 或 experimental_bearer_token，无法执行第三方 API 请求。"
+                .into(),
+        ));
+    };
 
     let base_url = config
         .get("openai_base_url")

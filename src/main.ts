@@ -15,6 +15,7 @@ type ViewMode = "cards" | "editor";
 type EditorMode = "new" | "fromCurrent" | "existing";
 type PlatformMode = "codex" | "antigravity";
 type ProfileLayoutMode = "list" | "grid";
+type NewProfileTemplate = "standaloneThirdParty" | "symbioticThirdParty";
 type BusyDialogState = {
   title: string;
   message: string;
@@ -97,6 +98,9 @@ type ProfileInput = {
 };
 
 type ThirdPartyConfigDraft = {
+  template: NewProfileTemplate;
+  oauthProfileId: string;
+  provider: string;
   baseUrl: string;
   apiKey: string;
   model: string;
@@ -296,6 +300,9 @@ function createEditorState(mode: EditorMode = "new"): EditorState {
 theme = "system"
 `,
     thirdParty: {
+      template: "standaloneThirdParty",
+      oauthProfileId: "",
+      provider: "",
       baseUrl: "",
       apiKey: "",
       model: "gpt-5.5",
@@ -565,7 +572,40 @@ function escapeTomlString(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
-function thirdPartyConfigInputFromDraft(editor: EditorState): ProfileInput {
+function tomlTableKey(value: string): string {
+  return /^[A-Za-z0-9_-]+$/.test(value) ? value : `"${escapeTomlString(value)}"`;
+}
+
+function getOfficialOauthProfiles(snapshot: AppSnapshot | null): ProfileSummary[] {
+  return snapshot?.profiles.filter((profile) => profile.authTypeLabel === "官方 OAuth") ?? [];
+}
+
+function resolveSymbioticOauthProfileId(): string {
+  const officialProfiles = getOfficialOauthProfiles(state.snapshot);
+  if (officialProfiles.length === 0) {
+    return "";
+  }
+
+  const selected = state.editor.thirdParty.oauthProfileId;
+  if (officialProfiles.some((profile) => profile.id === selected)) {
+    return selected;
+  }
+
+  const activeOfficial = officialProfiles.find(
+    (profile) => profile.id === state.snapshot?.activeProfileId,
+  );
+  return activeOfficial?.id ?? officialProfiles[0].id;
+}
+
+function editorCannotSaveBecauseMissingOauth(): boolean {
+  return (
+    state.editor.mode === "new" &&
+    state.editor.thirdParty.template === "symbioticThirdParty" &&
+    getOfficialOauthProfiles(state.snapshot).length === 0
+  );
+}
+
+function standaloneThirdPartyConfigInputFromDraft(editor: EditorState): ProfileInput {
   const baseUrl = editor.thirdParty.baseUrl.trim();
   const apiKey = editor.thirdParty.apiKey.trim();
   const model = editor.thirdParty.model.trim();
@@ -590,7 +630,6 @@ model = "${escapeTomlString(model)}"
 review_model = "${escapeTomlString(model)}"
 model_reasoning_effort = "high"
 plan_mode_reasoning_effort = "xhigh"
-disable_response_storage = true
 show_raw_agent_reasoning = true
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
@@ -614,9 +653,88 @@ network_access = true
   };
 }
 
-function buildEditorProfileInput(): ProfileInput {
+function symbioticAuthJsonFromOfficial(authJson: string): string {
+  const parsed = JSON.parse(authJson) as Record<string, unknown>;
+  parsed.auth_mode = "chatgpt";
+  parsed.OPENAI_API_KEY = null;
+  return JSON.stringify(parsed, null, 2);
+}
+
+function symbioticThirdPartyConfigTomlFromDraft(editor: EditorState): string {
+  const provider = editor.thirdParty.provider.trim();
+  const baseUrl = editor.thirdParty.baseUrl.trim();
+  const token = editor.thirdParty.apiKey.trim();
+  const model = editor.thirdParty.model.trim();
+
+  if (!provider) {
+    throw new Error("请填写共生配置的 model_provider。");
+  }
+  if (!baseUrl) {
+    throw new Error("请填写第三方 API 的 base_url。");
+  }
+  if (!token) {
+    throw new Error("请填写第三方 API 的 experimental_bearer_token。");
+  }
+  if (!model) {
+    throw new Error("请填写 model。");
+  }
+
+  return `model_provider = "${escapeTomlString(provider)}"
+model = "${escapeTomlString(model)}"
+review_model = "${escapeTomlString(model)}"
+model_reasoning_effort = "high"
+plan_mode_reasoning_effort = "xhigh"
+show_raw_agent_reasoning = true
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+
+[model_providers.${tomlTableKey(provider)}]
+name = "${escapeTomlString(provider)}"
+base_url = "${escapeTomlString(baseUrl)}"
+experimental_bearer_token = "${escapeTomlString(token)}"
+requires_openai_auth = true
+
+[features]
+remote_connections = true
+remote_control = true
+`;
+}
+
+async function symbioticThirdPartyConfigInputFromDraft(editor: EditorState): Promise<ProfileInput> {
+  const oauthProfileId = resolveSymbioticOauthProfileId();
+  if (!oauthProfileId) {
+    throw new Error("请先登录并保存一个官方 OAuth 账号，再创建共生配置。");
+  }
+
+  let document: ProfileDocument;
+  if (!isTauriRuntime) {
+    const profile = getOfficialOauthProfiles(state.snapshot).find(
+      (candidate) => candidate.id === oauthProfileId,
+    );
+    if (!profile) {
+      throw new Error("请先登录并保存一个官方 OAuth 账号，再创建共生配置。");
+    }
+    document = createMockDocument(profile);
+  } else {
+    document = await desktopInvoke<ProfileDocument>("get_profile_document", {
+      profileId: oauthProfileId,
+    });
+  }
+
+  return {
+    name: editor.name.trim(),
+    notes: editor.notes.trim(),
+    authJson: symbioticAuthJsonFromOfficial(document.authJson),
+    configToml: symbioticThirdPartyConfigTomlFromDraft(editor),
+  };
+}
+
+async function buildEditorProfileInput(): Promise<ProfileInput> {
   if (state.editor.mode === "new") {
-    return thirdPartyConfigInputFromDraft(state.editor);
+    if (state.editor.thirdParty.template === "symbioticThirdParty") {
+      return symbioticThirdPartyConfigInputFromDraft(state.editor);
+    }
+    return standaloneThirdPartyConfigInputFromDraft(state.editor);
   }
 
   return {
@@ -815,7 +933,7 @@ async function switchProfile(profileId: string, profileName: string): Promise<vo
   state.busy = true;
   state.busyDialog = {
     title: "切换中",
-    message: "会话 provider 同步中，请不要关闭应用。",
+    message: "正在同步会话并修复 Codex 会话，请不要关闭应用。",
   };
   render();
   try {
@@ -823,32 +941,18 @@ async function switchProfile(profileId: string, profileName: string): Promise<vo
     state.selectedProfileId = profileId;
     state.view = "cards";
     setSnapshot(snapshot);
-    setFlash("success", `${profileName} profile 切换成功，请重启 Codex 使用。`);
+    state.busyDialog = {
+      title: "重启 Codex",
+      message: "会话修复已完成，正在重启 Codex。",
+    };
+    render();
+    await desktopInvoke("restart_codex");
+    setFlash("success", `${profileName} profile 切换成功，Codex 已重启。`);
   } catch (error) {
     setFlash("error", error instanceof Error ? error.message : String(error));
   } finally {
     state.busy = false;
     state.busyDialog = null;
-    render();
-  }
-}
-
-async function launchCodexEnhanced(): Promise<void> {
-  if (!isTauriRuntime) {
-    setFlash("info", "浏览器预览模式无法增强启动 Codex。");
-    render();
-    return;
-  }
-
-  state.busy = true;
-  render();
-  try {
-    await desktopInvoke("launch_codex_enhanced");
-    setFlash("success", "已增强启动 Codex 并唤起宠物，请在 Codex 侧边栏查看 Plugins。");
-  } catch (error) {
-    setFlash("error", error instanceof Error ? error.message : String(error));
-  } finally {
-    state.busy = false;
     render();
   }
 }
@@ -972,7 +1076,7 @@ async function saveEditorProfile(andSwitch: boolean): Promise<void> {
 
   let payload: ProfileInput;
   try {
-    payload = buildEditorProfileInput();
+    payload = await buildEditorProfileInput();
   } catch (error) {
     setFlash("error", error instanceof Error ? error.message : String(error));
     return;
@@ -1313,7 +1417,7 @@ async function refreshAllCodexUsage(): Promise<void> {
     }
     const failedProfiles =
       state.snapshot?.profiles.filter(
-        (profile) => profile.authTypeLabel === "官方 OAuth" && profile.codexUsage?.error,
+        (profile) => isOfficialOauthProfile(profile) && profile.codexUsage?.error,
       ) ?? [];
     if (failedProfiles.length > 0) {
       setFlash("error", `额度刷新完成，${failedProfiles.length} 个 profile 报错，其余已更新。`);
@@ -1489,14 +1593,22 @@ function formatDateTime(value: string | null): string {
 }
 
 function profileTypeLabel(profile: ProfileSummary | ProfileDocument): string {
-  if (profile.authTypeLabel === "第三方 API") {
-    return (
-      profile.modelProviderKey?.trim() ||
-      profile.modelProviderName?.trim() ||
-      profile.authTypeLabel
-    );
+  const provider = profile.modelProviderKey?.trim() || profile.modelProviderName?.trim();
+  if (profile.authTypeLabel === "共生配置" && provider) {
+    return `共生配置 · ${provider}`;
+  }
+  if (profile.authTypeLabel === "第三方 API" && provider) {
+    return provider;
   }
   return profile.authTypeLabel;
+}
+
+function isOfficialOauthProfile(profile: ProfileSummary | ProfileDocument): boolean {
+  return profile.authTypeLabel === "官方 OAuth";
+}
+
+function isThirdPartyBackedProfile(profile: ProfileSummary | ProfileDocument): boolean {
+  return profile.authTypeLabel === "第三方 API" || profile.authTypeLabel === "共生配置";
 }
 
 function selectUsageWindow(
@@ -1574,7 +1686,7 @@ function renderUsageProgressRow(label: string, window: CodexUsageWindow | null):
 }
 
 function renderCodexUsagePanel(snapshot: AppSnapshot, profile: ProfileSummary): string {
-  if (profile.authTypeLabel !== "官方 OAuth") {
+  if (!isOfficialOauthProfile(profile)) {
     return "";
   }
 
@@ -1638,7 +1750,7 @@ function renderCodexUsagePanel(snapshot: AppSnapshot, profile: ProfileSummary): 
 }
 
 function renderThirdPartyLatencyPanel(profile: ProfileSummary): string {
-  if (profile.authTypeLabel !== "第三方 API") {
+  if (!isThirdPartyBackedProfile(profile)) {
     return "";
   }
 
@@ -1744,7 +1856,7 @@ function formatQuotaPercent(quota: ThirdPartyUsageQuotaSnapshot | null | undefin
 }
 
 function formatProfileSummary(profile: ProfileSummary): string {
-  if (profile.authTypeLabel === "官方 OAuth") {
+  if (isOfficialOauthProfile(profile)) {
     const usage = profile.codexUsage;
     if (usage?.error) {
       return "额度失败";
@@ -1755,7 +1867,7 @@ function formatProfileSummary(profile: ProfileSummary): string {
     return `5H ${primaryWindow ? `${remainingPercent(primaryWindow.usedPercent)}%` : "--"} · WEEKLY ${weeklyWindow ? `${remainingPercent(weeklyWindow.usedPercent)}%` : "--"}`;
   }
 
-  if (profile.authTypeLabel === "第三方 API") {
+  if (isThirdPartyBackedProfile(profile)) {
     const usage = profile.thirdPartyUsage;
     const probe = profile.thirdPartyLatency;
     return [
@@ -1787,7 +1899,7 @@ function renderThirdPartyQuotaCard(label: string, quota: ThirdPartyUsageQuotaSna
 }
 
 function renderThirdPartyUsagePanel(profile: ProfileSummary): string {
-  if (profile.authTypeLabel !== "第三方 API") {
+  if (!isThirdPartyBackedProfile(profile)) {
     return "";
   }
 
@@ -1833,7 +1945,7 @@ function renderThirdPartyUsagePanel(profile: ProfileSummary): string {
 }
 
 function renderThirdPartyRuntimePanel(profile: ProfileSummary): string {
-  if (profile.authTypeLabel !== "第三方 API") {
+  if (!isThirdPartyBackedProfile(profile)) {
     return "";
   }
 
@@ -1944,7 +2056,7 @@ function formatSessionRecoveryFlash(report: SessionRecoveryReport): string {
   }
 
   if (providerMismatch > 0) {
-    return `诊断发现 ${providerMismatch} 条活跃会话的 model provider 与当前默认 provider 不一致。切换 profile 时会执行受控 provider 修复。`;
+    return `诊断发现 ${providerMismatch} 条活跃会话的 model provider 与当前默认 provider 不一致。切换 profile 时会执行安全会话修复并同步 provider。`;
   }
 
   return `诊断完成：安全修复候选 ${safeCandidates} 项，时间修复候选 ${timeCandidates} 项。`;
@@ -2111,7 +2223,7 @@ function formatQuotaCurrencyCompact(value: string | null | undefined): string {
 }
 
 function renderProfileRowMetrics(profile: ProfileSummary): string {
-  if (profile.authTypeLabel === "官方 OAuth") {
+  if (isOfficialOauthProfile(profile)) {
     const usage = profile.codexUsage;
     if (usage?.error) {
       return `
@@ -2148,7 +2260,7 @@ function renderProfileRowMetrics(profile: ProfileSummary): string {
     `;
   }
 
-  if (profile.authTypeLabel === "第三方 API") {
+  if (isThirdPartyBackedProfile(profile)) {
     const usage = profile.thirdPartyUsage;
     const probe = profile.thirdPartyLatency;
     return `
@@ -2214,7 +2326,7 @@ function renderProfileList(snapshot: AppSnapshot, profiles: ProfileSummary[]): s
                 </span>
                 <span class="profile-row-action-slot" data-role="profile-row-quota-action">
                 ${
-                  profile.authTypeLabel === "官方 OAuth"
+                  isOfficialOauthProfile(profile)
                     ? snapshot.codexUsageApiEnabled
                       ? `
                         <button
@@ -2251,7 +2363,7 @@ function renderProfileList(snapshot: AppSnapshot, profiles: ProfileSummary[]): s
                 </span>
                 <span class="profile-row-action-slot" data-role="profile-row-latency-action">
                 ${
-                  profile.authTypeLabel === "第三方 API"
+                  isThirdPartyBackedProfile(profile)
                     ? `
                       <button
                         class="button button-ghost profile-row-utility"
@@ -2371,16 +2483,90 @@ function renderEditorRuntimePanel(snapshot: AppSnapshot, profile: ProfileSummary
 
 function renderThirdPartyConfigFields(readOnly: boolean): string {
   const disabled = state.busy || readOnly ? "disabled" : "";
+  const officialProfiles = getOfficialOauthProfiles(state.snapshot);
+  const selectedOauthProfileId = resolveSymbioticOauthProfileId();
+  const isSymbiotic = state.editor.thirdParty.template === "symbioticThirdParty";
+  const missingOauth = isSymbiotic && officialProfiles.length === 0;
+  const tokenLabel = isSymbiotic ? "experimental_bearer_token" : "OPENAI_API_KEY value";
+  const tokenPlaceholder = isSymbiotic ? "第三方 API token" : "sk-...";
   return `
     <section class="third-party-delta-card" data-role="third-party-delta-form">
       <div>
         <p class="eyebrow">Third-party API</p>
-        <h2>只填写第三方 API 的差异量</h2>
-        <p>保存时会自动生成 auth.json 和 config.toml，不会要求你手写完整配置。</p>
+        <h2>${isSymbiotic ? "共生配置" : "只填写第三方 API 的差异量"}</h2>
+        <p>${isSymbiotic
+          ? "复用已经登录的官方 OAuth 账号，同时把模型请求转到第三方 API。"
+          : "保存时会自动生成 auth.json 和 config.toml，不会要求你手写完整配置。"}</p>
       </div>
+      <div class="profile-template-options" data-role="profile-template-options">
+        <label>
+          <input
+            id="profile-template-standalone"
+            name="profile-template"
+            type="radio"
+            value="standaloneThirdParty"
+            ${state.editor.thirdParty.template === "standaloneThirdParty" ? "checked" : ""}
+            ${disabled}
+          />
+          <span>独立第三方 API</span>
+        </label>
+        <label>
+          <input
+            id="profile-template-symbiotic"
+            name="profile-template"
+            type="radio"
+            value="symbioticThirdParty"
+            ${isSymbiotic ? "checked" : ""}
+            ${disabled}
+          />
+          <span>共生配置</span>
+        </label>
+      </div>
+      ${isSymbiotic
+        ? `
+          <aside class="flash flash-info" data-role="symbiotic-enhanced-launch-hint">
+            <span>共生配置已经替代增强启动；插件入口会通过官方 OAuth 登录状态保持可用，不再需要单独执行增强启动。</span>
+          </aside>
+          <label class="field">
+            <span>复用官方 OAuth 账号</span>
+            <select id="symbiotic-oauth-profile" ${disabled || missingOauth ? "disabled" : ""}>
+              ${officialProfiles
+                .map(
+                  (profile) => `
+                    <option value="${escapeHtml(profile.id)}" ${profile.id === selectedOauthProfileId ? "selected" : ""}>
+                      ${escapeHtml(profile.name)}
+                    </option>
+                  `,
+                )
+                .join("")}
+            </select>
+          </label>
+          ${missingOauth
+            ? `
+              <aside class="flash flash-info" data-role="symbiotic-oauth-missing">
+                <span>请先登录并保存一个官方 OAuth 账号，再创建共生配置。</span>
+              </aside>
+            `
+            : ""}
+        `
+        : ""}
       <div class="third-party-delta-grid">
+        ${isSymbiotic
+          ? `
+            <label class="field">
+              <span>model_provider</span>
+              <input
+                id="third-party-provider"
+                type="text"
+                value="${escapeHtml(state.editor.thirdParty.provider)}"
+                placeholder="ylscode"
+                ${disabled}
+              />
+            </label>
+          `
+          : ""}
         <label class="field">
-          <span>openai_base_url</span>
+          <span>${isSymbiotic ? "base_url" : "openai_base_url"}</span>
           <input
             id="third-party-base-url"
             type="url"
@@ -2390,12 +2576,12 @@ function renderThirdPartyConfigFields(readOnly: boolean): string {
           />
         </label>
         <label class="field">
-          <span>OPENAI_API_KEY value</span>
+          <span>${tokenLabel}</span>
           <input
             id="third-party-api-key"
             type="password"
             value="${escapeHtml(state.editor.thirdParty.apiKey)}"
-            placeholder="sk-..."
+            placeholder="${escapeHtml(tokenPlaceholder)}"
             autocomplete="off"
             ${disabled}
           />
@@ -2669,19 +2855,12 @@ function renderCardsPage(snapshot: AppSnapshot): string {
             ${renderProfileLayoutToggle()}
             <button
               class="button button-secondary"
-              data-action="launch-codex-enhanced"
-              ${state.busy ? "disabled" : ""}
-            >
-              增强启动 + 唤起宠物
-            </button>
-            <button
-              class="button button-secondary"
               data-action="migrate-legacy-third-party"
               ${state.busy || migratingLegacyThirdParty ? "disabled" : ""}
             >
               ${migratingLegacyThirdParty ? "迁移中..." : "迁移旧第三方配置"}
             </button>
-            ${snapshot.profiles.some((profile) => profile.authTypeLabel === "官方 OAuth") ? `
+            ${snapshot.profiles.some((profile) => isOfficialOauthProfile(profile)) ? `
               ${
                 snapshot.codexUsageApiEnabled
                   ? `
@@ -2783,6 +2962,7 @@ function renderEditorPage(): string {
   }
   const existing = state.editor.mode === "existing";
   const readOnly = state.editor.readOnly;
+  const saveDisabled = state.busy || editorCannotSaveBecauseMissingOauth();
   const editorProfile = getEditorProfileSummary(snapshot);
   const title =
     readOnly
@@ -2823,19 +3003,19 @@ function renderEditorPage(): string {
               ${
                 existing
                   ? `
-                    <button class="button button-secondary" data-action="save-editor" ${state.busy ? "disabled" : ""}>
+                    <button class="button button-secondary" data-action="save-editor" ${saveDisabled ? "disabled" : ""}>
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:2px;"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
                       保存修改
                     </button>
                   `
                   : `
-                    <button class="button button-secondary" data-action="save-editor" ${state.busy ? "disabled" : ""}>
+                    <button class="button button-secondary" data-action="save-editor" ${saveDisabled ? "disabled" : ""}>
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:2px;"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
                       创建配置
                     </button>
                   `
               }
-              <button class="button button-primary" data-action="save-and-switch" ${state.busy ? "disabled" : ""}>
+              <button class="button button-primary" data-action="save-and-switch" ${saveDisabled ? "disabled" : ""}>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:2px;"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
                 ${existing ? "保存并立即启动" : "创建并立即启动"}
               </button>
@@ -3003,12 +3183,32 @@ function bindEvents(): void {
   bindInputValue("#third-party-base-url", (value) => {
     state.editor.thirdParty.baseUrl = value;
   });
+  bindInputValue("#third-party-provider", (value) => {
+    state.editor.thirdParty.provider = value;
+  });
   bindInputValue("#third-party-api-key", (value) => {
     state.editor.thirdParty.apiKey = value;
   });
   bindInputValue("#third-party-model", (value) => {
     state.editor.thirdParty.model = value;
   });
+
+  document.querySelectorAll<HTMLInputElement>('input[name="profile-template"]').forEach((input) => {
+    input.addEventListener("change", (event) => {
+      const value = (event.currentTarget as HTMLInputElement).value as NewProfileTemplate;
+      state.editor.thirdParty.template = value;
+      if (value === "symbioticThirdParty") {
+        state.editor.thirdParty.oauthProfileId = resolveSymbioticOauthProfileId();
+      }
+      render();
+    });
+  });
+
+  document
+    .querySelector<HTMLSelectElement>("#symbiotic-oauth-profile")
+    ?.addEventListener("change", (event) => {
+      state.editor.thirdParty.oauthProfileId = (event.currentTarget as HTMLSelectElement).value;
+    });
 
   document.querySelectorAll<HTMLButtonElement>("[data-action]").forEach((button) => {
     button.addEventListener("click", async () => {
@@ -3104,8 +3304,6 @@ function bindEvents(): void {
         await saveEditorProfile(true);
       } else if (action === "check-update") {
         await checkForUpdate();
-      } else if (action === "launch-codex-enhanced") {
-        await launchCodexEnhanced();
       } else if (action === "restart-codex") {
         state.busy = true; render();
         try {
