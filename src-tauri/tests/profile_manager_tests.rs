@@ -1,5 +1,8 @@
 use chrono::{SecondsFormat, TimeZone, Utc};
-use codex_auth_switch_lib::core::{restart_codex_script, ProfileInput, ProfileManager};
+use codex_auth_switch_lib::core::{
+    codex_restart_plan_for_platform, restart_codex_script, CodexRestartPlatform, ProfileInput,
+    ProfileManager,
+};
 use filetime::{set_file_mtime, FileTime};
 use rusqlite::Connection;
 use serde_json::json;
@@ -204,6 +207,16 @@ fn config_with_shared_growth(config_toml: &str) -> String {
     } else {
         format!("{config_toml}\n{}", runtime_growth_sections())
     }
+}
+
+fn config_without_websockets_default(config_toml: &str) -> String {
+    let mut lines = config_toml
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("supports_websockets"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    lines.push('\n');
+    lines
 }
 
 fn temp_manager() -> (TempDir, TempDir, ProfileManager) {
@@ -555,6 +568,17 @@ fn import_third_party_profile_registers_model_provider_resource() {
     assert_eq!(provider.wire_api, "responses");
     assert_eq!(provider.api_keys.len(), 1);
     assert_eq!(provider.api_keys[0].api_key, "sk-ylscode");
+
+    let document = manager
+        .get_profile_document(&profile.id)
+        .expect("load third-party profile");
+    let config = toml::from_str::<toml::Value>(&document.config_toml).expect("parse config");
+    assert_eq!(
+        config
+            .get("supports_websockets")
+            .and_then(|value| value.as_bool()),
+        Some(false)
+    );
 }
 
 #[test]
@@ -598,6 +622,20 @@ fn import_symbiotic_profile_keeps_oauth_auth_and_custom_provider_config() {
     assert!(active_config.contains("requires_openai_auth = true"));
     assert!(active_config.contains("remote_connections = true"));
     assert!(active_config.contains("remote_control = true"));
+
+    let config = toml::from_str::<toml::Value>(&active_config).expect("parse active config");
+    let provider = config
+        .get("model_providers")
+        .and_then(|value| value.as_table())
+        .and_then(|providers| providers.get("ylscode"))
+        .and_then(|value| value.as_table())
+        .expect("ylscode provider table");
+    assert_eq!(
+        provider
+            .get("supports_websockets")
+            .and_then(|value| value.as_bool()),
+        Some(false)
+    );
 }
 
 #[test]
@@ -648,12 +686,109 @@ fn migrate_legacy_third_party_profiles_rewrites_model_providers_to_openai_base_u
     assert!(migrated.config_toml.contains("[sandbox_workspace_write]"));
     assert!(!migrated.config_toml.contains("[model_providers."));
     assert!(!migrated.config_toml.contains("\nbase_url ="));
+    assert!(migrated.config_toml.contains("supports_websockets = false"));
 
     let unchanged = manager
         .get_profile_document(&official.id)
         .expect("load official profile");
     assert_eq!(unchanged.auth_type_label, "官方 OAuth");
     assert!(!unchanged.config_toml.contains("openai_base_url ="));
+}
+
+#[test]
+fn write_third_party_websockets_defaults_updates_existing_third_party_configs() {
+    let (app_dir, _target_dir, manager) = temp_manager();
+
+    let standalone = manager
+        .import_profile(ProfileInput {
+            name: "Standalone API".into(),
+            notes: String::new(),
+            auth_json: api_key_auth_json("sk-standalone"),
+            config_toml: third_party_config_toml("gpt-5"),
+        })
+        .expect("import standalone third-party");
+    let symbiotic = manager
+        .import_profile(ProfileInput {
+            name: "Symbiotic API".into(),
+            notes: String::new(),
+            auth_json: oauth_auth_json("symbiotic@example.com", "user-sym", "acct-sym"),
+            config_toml: symbiotic_third_party_config_toml("gpt-5"),
+        })
+        .expect("import symbiotic third-party");
+    let official = manager
+        .import_profile(ProfileInput {
+            name: "Official".into(),
+            notes: String::new(),
+            auth_json: oauth_auth_json("official@example.com", "user-official", "acct-official"),
+            config_toml: official_config_toml("gpt-5"),
+        })
+        .expect("import official");
+
+    let standalone_config_path = app_dir
+        .path()
+        .join("profiles")
+        .join(&standalone.id)
+        .join("config.toml");
+    let symbiotic_config_path = app_dir
+        .path()
+        .join("profiles")
+        .join(&symbiotic.id)
+        .join("config.toml");
+
+    let standalone_without_default =
+        config_without_websockets_default(&fs::read_to_string(&standalone_config_path).unwrap());
+    let symbiotic_without_default =
+        config_without_websockets_default(&fs::read_to_string(&symbiotic_config_path).unwrap());
+    fs::write(&standalone_config_path, standalone_without_default)
+        .expect("remove standalone websocket default");
+    fs::write(&symbiotic_config_path, symbiotic_without_default)
+        .expect("remove symbiotic websocket default");
+
+    let result = manager
+        .write_third_party_websockets_defaults()
+        .expect("write websocket defaults");
+
+    let mut expected_updated = vec![standalone.id.clone(), symbiotic.id.clone()];
+    expected_updated.sort();
+    assert_eq!(result.updated_profile_ids, expected_updated);
+    assert_eq!(result.skipped_profile_ids, vec![official.id.clone()]);
+
+    let standalone_document = manager
+        .get_profile_document(&standalone.id)
+        .expect("load standalone document");
+    let standalone_config =
+        toml::from_str::<toml::Value>(&standalone_document.config_toml).expect("parse config");
+    assert_eq!(
+        standalone_config
+            .get("supports_websockets")
+            .and_then(|value| value.as_bool()),
+        Some(false)
+    );
+
+    let symbiotic_document = manager
+        .get_profile_document(&symbiotic.id)
+        .expect("load symbiotic document");
+    let symbiotic_config =
+        toml::from_str::<toml::Value>(&symbiotic_document.config_toml).expect("parse config");
+    let provider = symbiotic_config
+        .get("model_providers")
+        .and_then(|value| value.as_table())
+        .and_then(|providers| providers.get("ylscode"))
+        .and_then(|value| value.as_table())
+        .expect("ylscode provider table");
+    assert_eq!(
+        provider
+            .get("supports_websockets")
+            .and_then(|value| value.as_bool()),
+        Some(false)
+    );
+
+    let official_document = manager
+        .get_profile_document(&official.id)
+        .expect("load official document");
+    assert!(!official_document
+        .config_toml
+        .contains("supports_websockets"));
 }
 
 #[test]
@@ -2170,4 +2305,19 @@ fn restart_codex_script_remains_plain_restart_without_pet_overlay_state() {
     {
         assert!(restart_codex_script().is_none());
     }
+}
+
+#[test]
+fn restart_codex_has_cross_platform_process_plan() {
+    let macos = codex_restart_plan_for_platform(CodexRestartPlatform::Macos);
+    assert_eq!(macos.quit_command.program, "osascript");
+    assert_eq!(macos.open_command.program, "open");
+
+    let windows = codex_restart_plan_for_platform(CodexRestartPlatform::Windows);
+    assert_eq!(windows.quit_command.program, "powershell.exe");
+    assert_eq!(windows.open_command.program, "powershell.exe");
+
+    let linux = codex_restart_plan_for_platform(CodexRestartPlatform::Linux);
+    assert_eq!(linux.quit_command.program, "sh");
+    assert_eq!(linux.open_command.program, "sh");
 }

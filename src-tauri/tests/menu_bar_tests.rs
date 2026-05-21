@@ -53,6 +53,8 @@ fn third_party_usage(
             remaining: Some("419.38".into()),
             used_percent: None,
         }),
+        subscription: None,
+        credit: None,
         updated_at: Utc.with_ymd_and_hms(2026, 5, 6, 10, 30, 0).unwrap(),
         error: None,
     }
@@ -182,6 +184,51 @@ fn menu_bar_usage_status_uses_third_party_daily_quota_for_active_api_profile() {
     assert_eq!(status.detail_lines[1], "今日：80.62 / 100");
     assert_eq!(status.detail_lines[2], "本周：80.62 / 500");
     assert_eq!(status.detail_lines[3], "余额：19.38 USD");
+}
+
+#[test]
+fn menu_bar_usage_status_shows_ylscode_subscription_and_credit() {
+    let mut usage = third_party_usage("14.105", "100", "314.3587", "700");
+    usage.subscription = Some(
+        codex_auth_switch_lib::core::ThirdPartySubscriptionSnapshot {
+            daily_quota: Some("100".into()),
+            weekly_quota: Some("700".into()),
+            monthly_quota: Some("3100".into()),
+            expires_at: Some(Utc.with_ymd_and_hms(2026, 6, 13, 9, 15, 42).unwrap()),
+            amount: Some("288".into()),
+            package_type: Some("Pro".into()),
+        },
+    );
+    usage.credit = Some(codex_auth_switch_lib::core::ThirdPartyCreditSnapshot {
+        free_balance: Some("100000".into()),
+        paid_balance: Some("0".into()),
+        total_balance: Some("100000".into()),
+    });
+    let snapshot = snapshot(
+        Some("third-party"),
+        vec![third_party_profile(
+            "third-party",
+            "support@tkdler.com",
+            Some(usage),
+        )],
+    );
+
+    let status = menu_bar_usage_status(&snapshot);
+
+    assert_eq!(status.title, "14%");
+    assert_eq!(status.progress_percent, Some(14));
+    assert_eq!(
+        status.summary,
+        "support@tkdler.com：今日已用 14%，本周已用 45%"
+    );
+    assert_eq!(
+        status.detail_lines[1],
+        "订阅：今日 14.105 / 100｜本周 314.3587 / 700｜本月 3100｜到期 2026-06-13"
+    );
+    assert_eq!(
+        status.detail_lines[2],
+        "信用额度：免费余额 100000｜信用余额 0"
+    );
 }
 
 #[test]

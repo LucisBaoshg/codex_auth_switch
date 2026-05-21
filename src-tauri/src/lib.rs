@@ -10,8 +10,8 @@ use crate::core::{
     check_for_update, check_install_location as resolve_install_location,
     install_update as perform_install_update, restart_codex_app, AppSnapshot,
     InstallLocationStatus, LegacyThirdPartyMigrationResult, ModelProviderSummary, ProfileDocument,
-    ProfileInput, ProfileManager, SessionRecoveryReport, SessionRepairResult, UpdateCheckResult,
-    UpdateInstallRequest,
+    ProfileInput, ProfileManager, SessionRecoveryReport, SessionRepairResult,
+    ThirdPartyWebsocketsDefaultResult, UpdateCheckResult, UpdateInstallRequest,
 };
 use crate::menu_bar::{
     install_menu_bar, menu_bar_refresh_target, sync_menu_bar_usage, MenuBarRefreshKind,
@@ -224,6 +224,19 @@ fn migrate_legacy_third_party_profiles(
 }
 
 #[tauri::command]
+fn write_third_party_websockets_defaults(
+    app: AppHandle,
+) -> Result<ThirdPartyWebsocketsDefaultResult, String> {
+    let manager = manager_from_app(&app)?;
+    let result = manager
+        .write_third_party_websockets_defaults()
+        .map_err(|error| error.to_string())?;
+    let snapshot = manager.snapshot().map_err(|error| error.to_string())?;
+    sync_menu_bar_usage(&app, &snapshot).map_err(|error| error.to_string())?;
+    Ok(result)
+}
+
+#[tauri::command]
 async fn refresh_profile_codex_usage(
     app: AppHandle,
     profile_id: String,
@@ -425,6 +438,7 @@ pub fn run() {
             set_target_dir,
             set_codex_usage_api_enabled,
             migrate_legacy_third_party_profiles,
+            write_third_party_websockets_defaults,
             refresh_profile_codex_usage,
             refresh_profile_latency_probe,
             refresh_profile_third_party_usage,

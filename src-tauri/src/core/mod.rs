@@ -76,6 +76,10 @@ pub struct ThirdPartyUsageSnapshot {
     pub daily: Option<ThirdPartyUsageQuotaSnapshot>,
     #[serde(default)]
     pub weekly: Option<ThirdPartyUsageQuotaSnapshot>,
+    #[serde(default)]
+    pub subscription: Option<ThirdPartySubscriptionSnapshot>,
+    #[serde(default)]
+    pub credit: Option<ThirdPartyCreditSnapshot>,
     pub updated_at: DateTime<Utc>,
     pub error: Option<String>,
 }
@@ -87,6 +91,25 @@ pub struct ThirdPartyUsageQuotaSnapshot {
     pub total: Option<String>,
     pub remaining: Option<String>,
     pub used_percent: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThirdPartySubscriptionSnapshot {
+    pub daily_quota: Option<String>,
+    pub weekly_quota: Option<String>,
+    pub monthly_quota: Option<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub amount: Option<String>,
+    pub package_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThirdPartyCreditSnapshot {
+    pub free_balance: Option<String>,
+    pub paid_balance: Option<String>,
+    pub total_balance: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -199,6 +222,13 @@ pub struct InstallLocationStatus {
 #[serde(rename_all = "camelCase")]
 pub struct LegacyThirdPartyMigrationResult {
     pub migrated_profile_ids: Vec<String>,
+    pub skipped_profile_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThirdPartyWebsocketsDefaultResult {
+    pub updated_profile_ids: Vec<String>,
     pub skipped_profile_ids: Vec<String>,
 }
 
@@ -705,6 +735,83 @@ impl ProfileManager {
         skipped_profile_ids.sort();
         Ok(LegacyThirdPartyMigrationResult {
             migrated_profile_ids,
+            skipped_profile_ids,
+        })
+    }
+
+    pub fn write_third_party_websockets_defaults(
+        &self,
+    ) -> Result<ThirdPartyWebsocketsDefaultResult, AppError> {
+        let mut updated_profile_ids = Vec::new();
+        let mut skipped_profile_ids = Vec::new();
+
+        if !self.profiles_dir().exists() {
+            return Ok(ThirdPartyWebsocketsDefaultResult {
+                updated_profile_ids,
+                skipped_profile_ids,
+            });
+        }
+
+        for entry in fs::read_dir(self.profiles_dir())? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+
+            let profile_dir = entry.path();
+            let meta_path = profile_dir.join("meta.json");
+            let auth_path = profile_dir.join("auth.json");
+            let config_path = profile_dir.join("config.toml");
+            if !meta_path.exists() || !auth_path.exists() || !config_path.exists() {
+                continue;
+            }
+
+            let metadata = self.read_profile_metadata(&profile_dir)?;
+            let auth_json = fs::read_to_string(&auth_path)?;
+            let config_toml = fs::read_to_string(&config_path)?;
+            let config_table = parse_toml_table(&repair_illegal_config_toml(&config_toml))?;
+            if !third_party_websockets_default_target(&auth_json, &config_table)? {
+                skipped_profile_ids.push(metadata.id);
+                continue;
+            }
+
+            let normalized_config = normalize_config_toml_for_auth(
+                &auth_json,
+                &repair_illegal_config_toml(&config_toml),
+            )?;
+            if normalized_config == config_toml {
+                skipped_profile_ids.push(metadata.id);
+                continue;
+            }
+
+            fs::write(&config_path, &normalized_config)?;
+            self.register_model_provider_from_profile(
+                &auth_json,
+                &normalized_config,
+                &metadata.name,
+            )?;
+
+            let next_metadata = self.compose_profile_metadata(
+                metadata.id.clone(),
+                metadata.name.clone(),
+                metadata.notes.clone(),
+                metadata.remote_profile_id.clone(),
+                metadata.created_at,
+                Utc::now(),
+                &auth_json,
+                &normalized_config,
+                metadata.codex_usage.clone(),
+                None,
+                None,
+            )?;
+            self.write_profile_metadata(&profile_dir, &next_metadata)?;
+            updated_profile_ids.push(metadata.id);
+        }
+
+        updated_profile_ids.sort();
+        skipped_profile_ids.sort();
+        Ok(ThirdPartyWebsocketsDefaultResult {
+            updated_profile_ids,
             skipped_profile_ids,
         })
     }
@@ -1914,12 +2021,41 @@ impl ProfileManager {
             ));
         }
 
-        let refreshed_auth_json = refresh_oauth_auth_json(&source.auth_json)?;
+        // Try querying the usage directly with the current access token first
+        let (refreshed_auth_json, usage) = match fetch_codex_usage_snapshot(&source.auth_json) {
+            Ok(usage) => (source.auth_json.clone(), usage),
+            Err(fetch_error) => {
+                // If it fails, check if we have a refresh token to try refreshing
+                if oauth_refresh_token(&source.auth_json).is_some() {
+                    match refresh_oauth_auth_json(&source.auth_json) {
+                        Ok(refreshed) => {
+                            // If refresh succeeds, try querying again with the new token
+                            match fetch_codex_usage_snapshot(&refreshed) {
+                                Ok(usage) => (refreshed, usage),
+                                Err(err) => return Err(err),
+                            }
+                        }
+                        Err(refresh_error) => {
+                            // If refreshing fails with 401 or 400, format a user-friendly message
+                            let err_msg = refresh_error.to_string();
+                            if err_msg.contains("401") || err_msg.contains("400") {
+                                return Err(AppError::Message(
+                                    "官方 OAuth 登录已过期或已被撤销，请重新导入/登录您的 ChatGPT 账号。".into()
+                                ));
+                            }
+                            return Err(refresh_error);
+                        }
+                    }
+                } else {
+                    return Err(fetch_error);
+                }
+            }
+        };
+
         if source.using_runtime_auth && refreshed_auth_json != source.auth_json {
             fs::write(self.target_auth_path(), &refreshed_auth_json)?;
         }
 
-        let usage = fetch_codex_usage_snapshot(&refreshed_auth_json)?;
         if source.should_sync_runtime_state || refreshed_auth_json != source.auth_json {
             self.sync_runtime_state_to_profile(
                 profile_id,
@@ -3110,6 +3246,165 @@ end if"#,
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexRestartPlatform {
+    Macos,
+    Windows,
+    Linux,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexRestartCommand {
+    pub program: &'static str,
+    pub args: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexRestartPlan {
+    pub quit_command: CodexRestartCommand,
+    pub open_command: CodexRestartCommand,
+}
+
+pub fn codex_restart_plan_for_platform(platform: CodexRestartPlatform) -> CodexRestartPlan {
+    match platform {
+        CodexRestartPlatform::Macos => CodexRestartPlan {
+            quit_command: CodexRestartCommand {
+                program: "osascript",
+                args: vec![
+                    "-e",
+                    restart_codex_script().unwrap_or(
+                        r#"if application "Codex" is running then
+  tell application "Codex" to quit
+end if"#,
+                    ),
+                ],
+            },
+            open_command: CodexRestartCommand {
+                program: "open",
+                args: vec!["-a", "Codex"],
+            },
+        },
+        CodexRestartPlatform::Windows => CodexRestartPlan {
+            quit_command: CodexRestartCommand {
+                program: "powershell.exe",
+                args: vec![
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    r#"$processes = @(Get-Process -Name Codex -ErrorAction SilentlyContinue)
+if ($processes.Count -eq 0) { exit 0 }
+foreach ($process in $processes) {
+  if ($process.MainWindowHandle -ne 0) {
+    [void]$process.CloseMainWindow()
+  }
+}
+$deadline = (Get-Date).AddSeconds(4)
+do {
+  Start-Sleep -Milliseconds 200
+  $remaining = @(Get-Process -Name Codex -ErrorAction SilentlyContinue)
+} while ($remaining.Count -gt 0 -and (Get-Date) -lt $deadline)
+foreach ($process in $remaining) {
+  Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+}
+exit 0"#,
+                ],
+            },
+            open_command: CodexRestartCommand {
+                program: "powershell.exe",
+                args: vec![
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    r#"$ErrorActionPreference = 'Stop'
+$candidates = @(
+  "$env:LOCALAPPDATA\Programs\Codex\Codex.exe",
+  "$env:LOCALAPPDATA\Codex\Codex.exe",
+  "$env:PROGRAMFILES\Codex\Codex.exe",
+  "${env:ProgramFiles(x86)}\Codex\Codex.exe"
+) | Where-Object { $_ -and (Test-Path $_) }
+if ($candidates.Count -gt 0) {
+  Start-Process -FilePath $candidates[0]
+  exit 0
+}
+$startMenus = @(
+  "$env:APPDATA\Microsoft\Windows\Start Menu\Programs",
+  "$env:ProgramData\Microsoft\Windows\Start Menu\Programs"
+)
+$shortcut = Get-ChildItem -Path $startMenus -Filter '*Codex*.lnk' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($shortcut) {
+  $shell = New-Object -ComObject WScript.Shell
+  $target = $shell.CreateShortcut($shortcut.FullName).TargetPath
+  if ($target -and (Test-Path $target)) {
+    Start-Process -FilePath $target
+  } else {
+    Invoke-Item $shortcut.FullName
+  }
+  exit 0
+}
+Start-Process -FilePath 'Codex'"#,
+                ],
+            },
+        },
+        CodexRestartPlatform::Linux => CodexRestartPlan {
+            quit_command: CodexRestartCommand {
+                program: "sh",
+                args: vec![
+                    "-c",
+                    "pkill -TERM -x Codex 2>/dev/null || pkill -TERM -x codex 2>/dev/null || true; sleep 1; pkill -KILL -x Codex 2>/dev/null || pkill -KILL -x codex 2>/dev/null || true",
+                ],
+            },
+            open_command: CodexRestartCommand {
+                program: "sh",
+                args: vec![
+                    "-c",
+                    "if command -v codex >/dev/null 2>&1; then nohup codex >/dev/null 2>&1 & elif command -v Codex >/dev/null 2>&1; then nohup Codex >/dev/null 2>&1 & else exit 1; fi",
+                ],
+            },
+        },
+    }
+}
+
+fn current_codex_restart_platform() -> CodexRestartPlatform {
+    #[cfg(target_os = "macos")]
+    {
+        CodexRestartPlatform::Macos
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        CodexRestartPlatform::Windows
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        CodexRestartPlatform::Linux
+    }
+}
+
+fn force_terminate_codex_on_macos_after_grace() -> Result<(), AppError> {
+    #[cfg(target_os = "macos")]
+    {
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while Instant::now() < deadline {
+            let status = Command::new("pgrep").arg("-x").arg("Codex").status()?;
+            if !status.success() {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(200));
+        }
+
+        let _ = Command::new("pkill")
+            .arg("-KILL")
+            .arg("-x")
+            .arg("Codex")
+            .status();
+    }
+
+    Ok(())
+}
+
 pub fn repair_illegal_config_toml(config_toml: &str) -> String {
     if config_toml.contains("[model_providers.openai]") {
         config_toml
@@ -3837,32 +4132,32 @@ fn thread_table_columns(conn: &Connection) -> Result<Vec<String>, rusqlite::Erro
 }
 
 pub fn restart_codex_app() -> Result<(), AppError> {
-    #[cfg(target_os = "macos")]
-    {
-        let script = restart_codex_script()
-            .ok_or_else(|| AppError::Message("Unable to prepare Codex restart script.".into()))?;
+    let platform = current_codex_restart_platform();
+    let plan = codex_restart_plan_for_platform(platform);
 
-        let quit_status = Command::new("osascript").arg("-e").arg(script).status()?;
-        if !quit_status.success() {
-            return Err(AppError::Message("Failed to ask Codex.app to quit.".into()));
-        }
-
-        thread::sleep(Duration::from_millis(700));
-
-        let open_status = Command::new("open").arg("-a").arg("Codex").status()?;
-        if !open_status.success() {
-            return Err(AppError::Message("Failed to reopen Codex.app.".into()));
-        }
-
-        Ok(())
+    let quit_status = Command::new(plan.quit_command.program)
+        .args(&plan.quit_command.args)
+        .status()?;
+    if !quit_status.success() {
+        return Err(AppError::Message(
+            "Failed to ask Codex to quit before restart.".into(),
+        ));
     }
 
-    #[cfg(not(target_os = "macos"))]
-    {
-        Err(AppError::Message(
-            "Restart Codex is currently only supported on macOS.".into(),
-        ))
+    if platform == CodexRestartPlatform::Macos {
+        force_terminate_codex_on_macos_after_grace()?;
     }
+
+    thread::sleep(Duration::from_millis(700));
+
+    let open_status = Command::new(plan.open_command.program)
+        .args(&plan.open_command.args)
+        .status()?;
+    if !open_status.success() {
+        return Err(AppError::Message("Failed to reopen Codex.".into()));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -3898,6 +4193,7 @@ mod tests {
 const COMMON_PROFILE_SCALAR_KEYS: &[&str] = &["model", "model_reasoning_effort"];
 const THIRD_PARTY_PROFILE_SCALAR_KEYS: &[&str] = &[
     "openai_base_url",
+    "supports_websockets",
     "model_provider",
     "review_model",
     "plan_mode_reasoning_effort",
@@ -3920,6 +4216,7 @@ const THIRD_PARTY_PROFILE_FEATURE_KEYS: &[&str] = &[
 ];
 const ALL_PROFILE_SCALAR_KEYS: &[&str] = &[
     "openai_base_url",
+    "supports_websockets",
     "model_provider",
     "model",
     "review_model",
@@ -4081,6 +4378,76 @@ fn config_has_symbiotic_provider(table: &toml::map::Map<String, toml::Value>) ->
         })
 }
 
+fn has_non_empty_string(table: &toml::map::Map<String, toml::Value>, key: &str) -> bool {
+    table
+        .get(key)
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+fn table_has_third_party_base_url(table: &toml::map::Map<String, toml::Value>) -> bool {
+    if has_non_empty_string(table, "openai_base_url") {
+        return true;
+    }
+
+    table
+        .get("model_providers")
+        .and_then(|value| value.as_table())
+        .is_some_and(|providers| {
+            providers.values().any(|provider| {
+                provider
+                    .as_table()
+                    .is_some_and(|provider| has_non_empty_string(provider, "base_url"))
+            })
+        })
+}
+
+fn third_party_websockets_default_target(
+    auth_json: &str,
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<bool, AppError> {
+    if is_official_oauth_auth(auth_json)? {
+        return Ok(config_has_symbiotic_provider(table));
+    }
+
+    Ok(table_has_third_party_base_url(table))
+}
+
+fn apply_third_party_websockets_default(
+    auth_json: &str,
+    table: &mut toml::map::Map<String, toml::Value>,
+) -> Result<(), AppError> {
+    if !third_party_websockets_default_target(auth_json, table)? {
+        return Ok(());
+    }
+
+    let mut wrote_provider_default = false;
+    if let Some(providers) = table
+        .get_mut("model_providers")
+        .and_then(|value| value.as_table_mut())
+    {
+        let provider_keys = providers.keys().cloned().collect::<Vec<_>>();
+        for provider_key in provider_keys {
+            let Some(provider) = providers
+                .get_mut(&provider_key)
+                .and_then(|value| value.as_table_mut())
+            else {
+                continue;
+            };
+            if has_non_empty_string(provider, "base_url") {
+                provider.insert("supports_websockets".into(), toml::Value::Boolean(false));
+                wrote_provider_default = true;
+            }
+        }
+    }
+
+    if !wrote_provider_default && has_non_empty_string(table, "openai_base_url") {
+        table.insert("supports_websockets".into(), toml::Value::Boolean(false));
+    }
+
+    Ok(())
+}
+
 fn managed_config_hash(auth_json: &str, contents: &str) -> Result<String, AppError> {
     let table = parse_toml_table(contents)?;
     let serialized = toml::to_string(&toml::Value::Table(managed_config_table(
@@ -4093,7 +4460,9 @@ fn managed_config_hash(auth_json: &str, contents: &str) -> Result<String, AppErr
 fn normalize_config_toml_for_auth(auth_json: &str, config_toml: &str) -> Result<String, AppError> {
     let table = parse_toml_table(config_toml)?;
     let mut normalized = shared_config_table(&table);
-    for (key, value) in managed_config_table(auth_json, &table)? {
+    let mut managed = managed_config_table(auth_json, &table)?;
+    apply_third_party_websockets_default(auth_json, &mut managed)?;
+    for (key, value) in managed {
         normalized.insert(key, value);
     }
 
@@ -4172,6 +4541,7 @@ fn migrate_legacy_third_party_config_toml(
 fn standard_third_party_config_toml(base_url: &str, model: &str, review_model: &str) -> String {
     format!(
         r#"openai_base_url = "{}"
+supports_websockets = false
 model_provider = "openai"
 model = "{}"
 review_model = "{}"
@@ -4570,7 +4940,15 @@ fn refresh_oauth_auth_json(auth_json: &str) -> Result<String, AppError> {
             if is_ureq_timeout(&error) {
                 format_timeout_error("Failed to refresh ChatGPT access token", timeout)
             } else {
-                AppError::Message(format!("Failed to refresh ChatGPT access token: {error}"))
+                match &error {
+                    ureq::Error::Status(401, _) => {
+                        AppError::Message("Failed to refresh ChatGPT access token: 官方 OAuth 登录已过期或已被撤销，请重新导入/登录您的 ChatGPT 账号。 (status code 401)".into())
+                    }
+                    ureq::Error::Status(400, _) => {
+                        AppError::Message("Failed to refresh ChatGPT access token: 刷新请求无效，可能是 Token 已失效或已被撤销。 (status code 400)".into())
+                    }
+                    _ => AppError::Message(format!("Failed to refresh ChatGPT access token: {error}")),
+                }
             }
         })?;
 
@@ -4786,6 +5164,12 @@ fn parse_ylscode_usage_response(body: &str, provider: &str) -> ThirdPartyUsageSn
             let weekly = root
                 .pointer("/state/userPackgeUsage_week")
                 .and_then(parse_ylscode_usage_quota);
+            let subscription = root
+                .pointer("/state/package")
+                .and_then(parse_ylscode_subscription);
+            let credit = root
+                .pointer("/state/userAccountInfo")
+                .and_then(parse_ylscode_credit);
             let remaining = daily
                 .as_ref()
                 .and_then(|quota| quota.remaining.clone())
@@ -4800,6 +5184,8 @@ fn parse_ylscode_usage_response(body: &str, provider: &str) -> ThirdPartyUsageSn
                     unit: Some("USD".into()),
                     daily,
                     weekly,
+                    subscription,
+                    credit,
                     updated_at: Utc::now(),
                     error: None,
                 },
@@ -4848,6 +5234,75 @@ fn parse_ylscode_usage_quota(value: &serde_json::Value) -> Option<ThirdPartyUsag
     })
 }
 
+fn parse_ylscode_subscription(value: &serde_json::Value) -> Option<ThirdPartySubscriptionSnapshot> {
+    if !value.is_object() {
+        return None;
+    }
+
+    let first_package = value
+        .get("packages")
+        .and_then(|packages| packages.as_array())
+        .and_then(|packages| packages.first());
+    let daily_quota = value
+        .get("total_quota")
+        .and_then(json_scalar_to_string)
+        .or_else(|| {
+            first_package
+                .and_then(|package| package.get("package_quota").and_then(json_scalar_to_string))
+        });
+    let weekly_quota = value.get("weeklyQuota").and_then(json_scalar_to_string);
+    let monthly_quota = daily_quota
+        .as_ref()
+        .and_then(|daily| parse_quota_decimal(daily))
+        .map(|daily| format_compact_number(daily * 31.0));
+    let expires_at = first_package
+        .and_then(|package| package.get("expires_at"))
+        .and_then(|value| value.as_str())
+        .and_then(parse_utc_datetime);
+    let amount =
+        first_package.and_then(|package| package.get("amount").and_then(json_scalar_to_string));
+    let package_type = first_package
+        .and_then(|package| package.get("package_type").and_then(json_scalar_to_string));
+
+    if daily_quota.is_none()
+        && weekly_quota.is_none()
+        && monthly_quota.is_none()
+        && expires_at.is_none()
+        && amount.is_none()
+        && package_type.is_none()
+    {
+        return None;
+    }
+
+    Some(ThirdPartySubscriptionSnapshot {
+        daily_quota,
+        weekly_quota,
+        monthly_quota,
+        expires_at,
+        amount,
+        package_type,
+    })
+}
+
+fn parse_ylscode_credit(value: &serde_json::Value) -> Option<ThirdPartyCreditSnapshot> {
+    if !value.is_object() {
+        return None;
+    }
+
+    let free_balance = value.get("free_balance").and_then(json_scalar_to_string);
+    let paid_balance = value.get("paid_balance").and_then(json_scalar_to_string);
+    let total_balance = value.get("total_balance").and_then(json_scalar_to_string);
+    if free_balance.is_none() && paid_balance.is_none() && total_balance.is_none() {
+        return None;
+    }
+
+    Some(ThirdPartyCreditSnapshot {
+        free_balance,
+        paid_balance,
+        total_balance,
+    })
+}
+
 fn json_scalar_to_string(value: &serde_json::Value) -> Option<String> {
     if let Some(text) = value.as_str() {
         return Some(text.trim().to_string()).filter(|text| !text.is_empty());
@@ -4859,6 +5314,29 @@ fn json_scalar_to_string(value: &serde_json::Value) -> Option<String> {
         return Some(number.to_string());
     }
     value.as_f64().map(|number| number.to_string())
+}
+
+fn parse_quota_decimal(value: &str) -> Option<f64> {
+    value
+        .trim()
+        .trim_start_matches('$')
+        .replace(',', "")
+        .parse()
+        .ok()
+}
+
+fn format_compact_number(value: f64) -> String {
+    if value.is_finite() && value.fract().abs() < f64::EPSILON {
+        format!("{}", value as i64)
+    } else {
+        value.to_string()
+    }
+}
+
+fn parse_utc_datetime(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|value| value.with_timezone(&Utc))
 }
 
 fn json_scalar_to_f64(value: &serde_json::Value) -> Option<f64> {
@@ -5238,6 +5716,8 @@ fn third_party_usage_failure(provider: Option<String>, error: String) -> ThirdPa
         unit: Some("USD".into()),
         daily: None,
         weekly: None,
+        subscription: None,
+        credit: None,
         updated_at: Utc::now(),
         error: Some(error),
     }

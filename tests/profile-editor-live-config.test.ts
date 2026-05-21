@@ -192,6 +192,7 @@ test("creates new profiles from third-party api delta fields", async () => {
   expect(payload.configToml).toContain('plan_mode_reasoning_effort = "xhigh"');
   expect(payload.configToml).toContain('approval_policy = "never"');
   expect(payload.configToml).toContain('sandbox_mode = "danger-full-access"');
+  expect(payload.configToml).toContain("supports_websockets = false");
   expect(payload.configToml).toContain("[tui]");
   expect(payload.configToml).toContain("[sandbox_workspace_write]");
   expect(payload.configToml).not.toContain("[model_providers.");
@@ -338,6 +339,13 @@ test("creates symbiotic third-party api profiles from an existing official oauth
   expect(payload.configToml).toContain('base_url = "https://code.ylsagi.com/v1"');
   expect(payload.configToml).toContain('experimental_bearer_token = "oauth-provider-token"');
   expect(payload.configToml).toContain("requires_openai_auth = true");
+  expect(payload.configToml).toContain("supports_websockets = false");
+  expect(payload.configToml.indexOf("supports_websockets = false")).toBeGreaterThan(
+    payload.configToml.indexOf("[model_providers.ylscode]"),
+  );
+  expect(payload.configToml.indexOf("supports_websockets = false")).toBeLessThan(
+    payload.configToml.indexOf("[features]"),
+  );
   expect(payload.configToml).toContain("[features]");
   expect(payload.configToml).toContain("remote_connections = true");
   expect(payload.configToml).toContain("remote_control = true");

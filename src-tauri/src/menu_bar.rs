@@ -1,6 +1,6 @@
 use crate::core::{
-    AppSnapshot, CodexUsageCredits, CodexUsageSnapshot, CodexUsageWindow,
-    ThirdPartyUsageQuotaSnapshot,
+    AppSnapshot, CodexUsageCredits, CodexUsageSnapshot, CodexUsageWindow, ThirdPartyCreditSnapshot,
+    ThirdPartySubscriptionSnapshot, ThirdPartyUsageQuotaSnapshot,
 };
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -295,7 +295,20 @@ fn third_party_usage_status(
         format!("今日：{}", format_quota_pair(usage.daily.as_ref())),
         format!("本周：{}", format_quota_pair(usage.weekly.as_ref())),
     ];
-    if let Some(remaining) = usage
+
+    if usage.subscription.is_some() || usage.credit.is_some() {
+        detail_lines.truncate(1);
+        detail_lines.push(format_subscription_line(
+            usage.daily.as_ref(),
+            usage.weekly.as_ref(),
+            usage.subscription.as_ref(),
+        ));
+        detail_lines.push(format_credit_line(usage.credit.as_ref()));
+        detail_lines.push(format!(
+            "更新于：{}",
+            usage.updated_at.format("%Y-%m-%d %H:%M")
+        ));
+    } else if let Some(remaining) = usage
         .remaining
         .as_ref()
         .filter(|value| !value.trim().is_empty())
@@ -316,6 +329,38 @@ fn third_party_usage_status(
         detail_lines,
         progress_percent: daily_percent,
     }
+}
+
+fn format_subscription_line(
+    daily: Option<&ThirdPartyUsageQuotaSnapshot>,
+    weekly: Option<&ThirdPartyUsageQuotaSnapshot>,
+    subscription: Option<&ThirdPartySubscriptionSnapshot>,
+) -> String {
+    let today = format_quota_pair(daily);
+    let week = format_quota_pair(weekly);
+    let month = subscription
+        .and_then(|value| value.monthly_quota.as_deref())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("--");
+    let expires = subscription
+        .and_then(|value| value.expires_at.as_ref())
+        .map(|value| value.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| "--".into());
+
+    format!("订阅：今日 {today}｜本周 {week}｜本月 {month}｜到期 {expires}")
+}
+
+fn format_credit_line(credit: Option<&ThirdPartyCreditSnapshot>) -> String {
+    let free = credit
+        .and_then(|value| value.free_balance.as_deref())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("--");
+    let paid = credit
+        .and_then(|value| value.paid_balance.as_deref())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("--");
+
+    format!("信用额度：免费余额 {free}｜信用余额 {paid}")
 }
 
 fn status_without_progress(

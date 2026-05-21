@@ -1,19 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
-import {
-  importCurrentAntigravityProfile,
-  loadAntigravitySnapshot,
-  restoreLastAntigravityBackup,
-  revealAntigravitySource,
-  switchAntigravityProfile,
-  type AntigravitySnapshot,
-} from "./antigravity";
 import "./styles.css";
 
 type FlashKind = "info" | "success" | "error";
-type ViewMode = "cards" | "editor";
+type ViewMode = "cards" | "editor" | "settings";
 type EditorMode = "new" | "fromCurrent" | "existing";
-type PlatformMode = "codex" | "antigravity";
+type PlatformMode = "codex";
 type ProfileLayoutMode = "list" | "grid";
 type NewProfileTemplate = "standaloneThirdParty" | "symbioticThirdParty";
 type BusyDialogState = {
@@ -59,6 +51,8 @@ type ThirdPartyUsageSnapshot = {
   unit: string | null;
   daily?: ThirdPartyUsageQuotaSnapshot | null;
   weekly?: ThirdPartyUsageQuotaSnapshot | null;
+  subscription?: ThirdPartySubscriptionSnapshot | null;
+  credit?: ThirdPartyCreditSnapshot | null;
   updatedAt: string;
   error: string | null;
 };
@@ -68,6 +62,21 @@ type ThirdPartyUsageQuotaSnapshot = {
   total: string | null;
   remaining: string | null;
   usedPercent: number | null;
+};
+
+type ThirdPartySubscriptionSnapshot = {
+  dailyQuota: string | null;
+  weeklyQuota: string | null;
+  monthlyQuota: string | null;
+  expiresAt: string | null;
+  amount: string | null;
+  packageType: string | null;
+};
+
+type ThirdPartyCreditSnapshot = {
+  freeBalance: string | null;
+  paidBalance: string | null;
+  totalBalance: string | null;
 };
 
 type ProfileSummary = {
@@ -145,6 +154,11 @@ type AppSnapshot = {
 
 type LegacyThirdPartyMigrationResult = {
   migratedProfileIds: string[];
+  skippedProfileIds: string[];
+};
+
+type ThirdPartyWebsocketsDefaultResult = {
+  updatedProfileIds: string[];
   skippedProfileIds: string[];
 };
 
@@ -382,31 +396,10 @@ const mockSnapshot: AppSnapshot = {
   ],
 };
 
-const mockAntigravitySnapshot: AntigravitySnapshot = {
-  sourceDbPath:
-    "/Users/example/Library/Application Support/Antigravity/User/globalStorage/state.vscdb",
-  sourceExists: true,
-  activeProfileId: "ag-1",
-  lastSelectedProfileId: "ag-1",
-  lastSwitchProfileId: "ag-1",
-  lastSwitchedAt: new Date().toISOString(),
-  profiles: [
-    {
-      id: "ag-1",
-      name: "Current Antigravity Account",
-      notes: "Imported from local state.vscdb",
-      email: "alice@example.com",
-      displayName: "Alice",
-      createdAt: "2026-04-10T00:00:00Z",
-      updatedAt: new Date().toISOString(),
-    },
-  ],
-};
 
 const state: {
   platform: PlatformMode;
   snapshot: AppSnapshot | null;
-  antigravitySnapshot: AntigravitySnapshot | null;
   view: ViewMode;
   selectedProfileId: string | null;
   editor: EditorState;
@@ -423,13 +416,9 @@ const state: {
     checking: boolean;
     lastResult: UpdateCheckResult | null;
   };
-  sessionRecoveryExpanded: boolean;
-  sessionRecoveryReport: SessionRecoveryReport | null;
-  sessionRecoveryLastResult: SessionRepairResult | null;
 } = {
   platform: "codex",
   snapshot: null,
-  antigravitySnapshot: null,
   view: "cards",
   selectedProfileId: null,
   editor: createEditorState(),
@@ -446,18 +435,34 @@ const state: {
     checking: false,
     lastResult: null,
   },
-  sessionRecoveryExpanded: false,
-  sessionRecoveryReport: null,
-  sessionRecoveryLastResult: null,
 };
+
+let flashTimeoutId: number | null = null;
 
 function setFlash(kind: FlashKind, text: string): void {
   state.flash = { kind, text };
   render();
+
+  if (flashTimeoutId !== null) {
+    window.clearTimeout(flashTimeoutId);
+  }
+  flashTimeoutId = window.setTimeout(() => {
+    state.flash = null;
+    flashTimeoutId = null;
+    render();
+  }, 4000);
+}
+
+function formatErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function clearFlash(): void {
   state.flash = null;
+  if (flashTimeoutId !== null) {
+    window.clearTimeout(flashTimeoutId);
+    flashTimeoutId = null;
+  }
 }
 
 function setBusy(nextBusy: boolean): void {
@@ -502,14 +507,12 @@ function thirdPartyUsageActionKey(profileId: string): string {
 
 const refreshAllUsageActionKey = "codex-usage:all";
 const migrateLegacyThirdPartyActionKey = "third-party:migrate-legacy";
-const diagnoseCodexSessionsActionKey = "session-recovery:diagnose";
-const repairCodexSessionsActionKey = "session-recovery:repair";
-const repairCodexSessionsAdvancedActionKey = "session-recovery:repair-times";
+const writeThirdPartyWebsocketsDefaultsActionKey = "third-party:websockets-defaults";
 
 function setSnapshot(snapshot: AppSnapshot): void {
   state.snapshot = snapshot;
-  state.sessionRecoveryReport = null;
-  state.sessionRecoveryLastResult = null;
+
+
   if (!snapshot.profiles.some((profile) => profile.id === state.selectedProfileId)) {
     state.selectedProfileId =
       snapshot.activeProfileId ??
@@ -625,6 +628,7 @@ function standaloneThirdPartyConfigInputFromDraft(editor: EditorState): ProfileI
     notes: editor.notes.trim(),
     authJson: JSON.stringify({ OPENAI_API_KEY: apiKey }, null, 2),
     configToml: `openai_base_url = "${escapeTomlString(baseUrl)}"
+supports_websockets = false
 model_provider = "openai"
 model = "${escapeTomlString(model)}"
 review_model = "${escapeTomlString(model)}"
@@ -693,6 +697,7 @@ name = "${escapeTomlString(provider)}"
 base_url = "${escapeTomlString(baseUrl)}"
 experimental_bearer_token = "${escapeTomlString(token)}"
 requires_openai_auth = true
+supports_websockets = false
 
 [features]
 remote_connections = true
@@ -824,94 +829,19 @@ async function refreshSnapshot(): Promise<void> {
   }
 }
 
-async function fetchAntigravitySnapshot(): Promise<AntigravitySnapshot> {
-  if (!isTauriRuntime) {
-    return mockAntigravitySnapshot;
-  }
 
-  return loadAntigravitySnapshot();
-}
 
-async function refreshAntigravitySnapshot(): Promise<void> {
-  setBusy(true);
-  try {
-    state.antigravitySnapshot = await fetchAntigravitySnapshot();
-    clearFlash();
-  } catch (error) {
-    setFlash("error", error instanceof Error ? error.message : String(error));
-  } finally {
-    state.busy = false;
-    render();
-  }
-}
 
-async function switchPlatform(platform: PlatformMode): Promise<void> {
-  state.platform = platform;
 
-  if (platform === "antigravity" && !state.antigravitySnapshot) {
-    try {
-      state.antigravitySnapshot = await fetchAntigravitySnapshot();
-      clearFlash();
-    } catch (error) {
-      setFlash("error", error instanceof Error ? error.message : String(error));
-    }
-  }
 
-  render();
-}
 
-async function handleImportCurrentAntigravity(): Promise<void> {
-  setBusy(true);
-  try {
-    await importCurrentAntigravityProfile();
-    state.antigravitySnapshot = await fetchAntigravitySnapshot();
-    setFlash("success", "已导入当前 Antigravity 账号。");
-  } catch (error) {
-    setFlash("error", error instanceof Error ? error.message : String(error));
-  } finally {
-    state.busy = false;
-    render();
-  }
-}
 
-async function handleSwitchAntigravityProfile(
-  profileId: string,
-  profileName: string,
-): Promise<void> {
-  setBusy(true);
-  try {
-    await switchAntigravityProfile(profileId);
-    state.antigravitySnapshot = await fetchAntigravitySnapshot();
-    setFlash("success", `已切换到 Antigravity 账号「${profileName}」。`);
-  } catch (error) {
-    setFlash("error", error instanceof Error ? error.message : String(error));
-  } finally {
-    state.busy = false;
-    render();
-  }
-}
 
-async function handleRestoreAntigravityBackup(): Promise<void> {
-  setBusy(true);
-  try {
-    await restoreLastAntigravityBackup();
-    state.antigravitySnapshot = await fetchAntigravitySnapshot();
-    setFlash("success", "已恢复最近一次 Antigravity 备份。");
-  } catch (error) {
-    setFlash("error", error instanceof Error ? error.message : String(error));
-  } finally {
-    state.busy = false;
-    render();
-  }
-}
 
-async function handleRevealAntigravitySource(): Promise<void> {
-  try {
-    await revealAntigravitySource();
-  } catch (error) {
-    setFlash("error", error instanceof Error ? error.message : String(error));
-  }
-}
+
+
+
+
 
 async function loadAppVersion(): Promise<void> {
   if (!isTauriRuntime) {
@@ -1402,27 +1332,94 @@ async function refreshProfileCodexUsage(profileId: string, profileName: string):
 }
 
 async function refreshAllCodexUsage(): Promise<void> {
+  const initialSnapshot = state.snapshot;
+  if (!initialSnapshot) {
+    throw new Error("当前没有可用快照。");
+  }
+
+  // Auto-opt in official Codex usage query if disabled and we have official profiles
+  const officialProfiles = initialSnapshot.profiles.filter(isOfficialOauthProfile);
+  if (officialProfiles.length > 0 && !initialSnapshot.codexUsageApiEnabled) {
+    await setCodexUsageApiEnabled(true);
+    if (state.snapshot && !state.snapshot.codexUsageApiEnabled) {
+      return;
+    }
+  }
+
   beginPendingAction(refreshAllUsageActionKey);
   try {
-    setFlash("info", "正在刷新全部官方 OAuth 档案的 Codex 额度…");
-    if (!isTauriRuntime) {
-      const snapshot = state.snapshot;
-      if (!snapshot) {
-        throw new Error("当前没有可用快照。");
-      }
-      setSnapshot(snapshot);
-    } else {
-      const snapshot = await desktopInvoke<AppSnapshot>("refresh_all_codex_usage");
-      setSnapshot(snapshot);
+    let currentSnapshot = state.snapshot;
+    if (!currentSnapshot) {
+      throw new Error("当前没有可用快照。");
     }
-    const failedProfiles =
+
+    const thirdPartyProfiles = currentSnapshot.profiles.filter(isThirdPartyBackedProfile);
+    const hasOfficial = currentSnapshot.profiles.some(isOfficialOauthProfile);
+
+    let failedThirdPartyCount = 0;
+
+    if (!isTauriRuntime) {
+      setSnapshot(currentSnapshot);
+    } else {
+      // 1. Refresh official profiles first (if any exist)
+      if (hasOfficial) {
+        setFlash("info", "正在刷新官方 OAuth 档案的 Codex 额度…");
+        try {
+          currentSnapshot = await desktopInvoke<AppSnapshot>("refresh_all_codex_usage");
+          setSnapshot(currentSnapshot);
+        } catch (error) {
+          console.error("刷新官方 OAuth 额度失败:", error);
+          // Do not fail the whole operation, let third-party profiles try
+        }
+      }
+
+      // 2. Refresh third-party profiles sequentially
+      for (let i = 0; i < thirdPartyProfiles.length; i++) {
+        const profile = thirdPartyProfiles[i];
+        const profileActionKey = thirdPartyUsageActionKey(profile.id);
+        beginPendingAction(profileActionKey);
+        setFlash(
+          "info",
+          `正在刷新第三方档案「${profile.name}」的额度 (${i + 1}/${thirdPartyProfiles.length})…`
+        );
+        try {
+          currentSnapshot = await desktopInvoke<AppSnapshot>("refresh_profile_third_party_usage", {
+            profileId: profile.id,
+          });
+          setSnapshot(currentSnapshot);
+
+          const updatedProfile = currentSnapshot.profiles.find((p) => p.id === profile.id);
+          if (updatedProfile?.thirdPartyUsage?.error) {
+            failedThirdPartyCount++;
+          }
+        } catch (error) {
+          console.error(`刷新第三方档案「${profile.name}」额度失败:`, error);
+          failedThirdPartyCount++;
+        } finally {
+          endPendingAction(profileActionKey);
+        }
+      }
+    }
+
+    const failedOfficialProfiles =
       state.snapshot?.profiles.filter(
         (profile) => isOfficialOauthProfile(profile) && profile.codexUsage?.error,
       ) ?? [];
-    if (failedProfiles.length > 0) {
-      setFlash("error", `额度刷新完成，${failedProfiles.length} 个 profile 报错，其余已更新。`);
+
+    const totalFailed = failedOfficialProfiles.length + failedThirdPartyCount;
+
+    if (totalFailed > 0) {
+      let msg = "额度刷新完成。";
+      const parts: string[] = [];
+      if (failedOfficialProfiles.length > 0) {
+        parts.push(`${failedOfficialProfiles.length} 个官方档案失败`);
+      }
+      if (failedThirdPartyCount > 0) {
+        parts.push(`${failedThirdPartyCount} 个第三方档案失败`);
+      }
+      setFlash("error", `${msg}其中 ${parts.join("，")}。`);
     } else {
-      setFlash("success", "已刷新全部官方 OAuth 档案的 Codex 额度。");
+      setFlash("success", "已刷新全部档案的 Codex 额度。");
     }
   } catch (error) {
     setFlash("error", error instanceof Error ? error.message : String(error));
@@ -1520,66 +1517,35 @@ async function migrateLegacyThirdPartyProfiles(): Promise<void> {
   }
 }
 
-async function diagnoseCodexSessions(showFlash = true): Promise<void> {
-  if (!isTauriRuntime) {
-    setFlash("info", "浏览器预览模式无法诊断本地 Codex 会话。");
-    return;
-  }
-
-  beginPendingAction(diagnoseCodexSessionsActionKey);
-  try {
-    const report = await desktopInvoke<SessionRecoveryReport>("diagnose_codex_sessions");
-    state.sessionRecoveryReport = report;
-    if (showFlash) {
-      setFlash("info", formatSessionRecoveryFlash(report));
-    } else {
-      render();
-    }
-  } catch (error) {
-    setFlash("error", error instanceof Error ? error.message : String(error));
-  } finally {
-    endPendingAction(diagnoseCodexSessionsActionKey);
-  }
-}
-
-async function repairCodexSessions(repairTimesFromSessionIndex: boolean): Promise<void> {
-  if (!isTauriRuntime) {
-    setFlash("info", "浏览器预览模式无法修复本地 Codex 会话。");
-    return;
-  }
-
-  if (repairTimesFromSessionIndex) {
-    const confirmed = await nativeConfirm(
-      "高级时间修复会把数据库时间和 rollout mtime 回写成 session_index.jsonl 里的值。只建议用于批量时间戳污染，不适合一两个正在活跃的会话。继续吗？",
-      "继续修复",
-      true,
-    );
-    if (!confirmed) {
-      return;
-    }
-  }
-
-  const actionKey = repairTimesFromSessionIndex
-    ? repairCodexSessionsAdvancedActionKey
-    : repairCodexSessionsActionKey;
+async function writeThirdPartyWebsocketsDefaults(): Promise<void> {
+  const actionKey = writeThirdPartyWebsocketsDefaultsActionKey;
   beginPendingAction(actionKey);
   try {
-    const result = await desktopInvoke<SessionRepairResult>("repair_codex_sessions", {
-      repairTimesFromSessionIndex,
-    });
-    state.sessionRecoveryLastResult = result;
-    if (result.repaired) {
-      setFlash("success", formatSessionRepairFlash(result, repairTimesFromSessionIndex));
-    } else {
-      setFlash("info", formatSessionRepairFlash(result, repairTimesFromSessionIndex));
+    if (!isTauriRuntime) {
+      setFlash("success", "已为 0 个第三方 API 配置写入 supports_websockets = false。");
+      return;
     }
-    await diagnoseCodexSessions(false);
+
+    const result = await desktopInvoke<ThirdPartyWebsocketsDefaultResult>(
+      "write_third_party_websockets_defaults",
+    );
+    const snapshot = await desktopInvoke<AppSnapshot>("load_snapshot");
+    setSnapshot(snapshot);
+    const updatedCount = result.updatedProfileIds.length;
+    const skippedCount = result.skippedProfileIds.length;
+    setFlash(
+      "success",
+      updatedCount > 0
+        ? `已为 ${updatedCount} 个第三方 API 配置写入 supports_websockets = false，跳过 ${skippedCount} 个无需更新的配置。`
+        : `没有发现需要更新的第三方 API 配置，已检查 ${skippedCount} 个配置。`,
+    );
   } catch (error) {
     setFlash("error", error instanceof Error ? error.message : String(error));
   } finally {
     endPendingAction(actionKey);
   }
 }
+
 
 function formatDateTime(value: string | null): string {
   if (!value) {
@@ -1906,7 +1872,14 @@ function renderThirdPartyUsagePanel(profile: ProfileSummary): string {
   const usage = profile.thirdPartyUsage ?? null;
   const updated = usage ? formatDateTime(usage.updatedAt) : "还没有";
   const refreshingUsage = isPendingAction(thirdPartyUsageActionKey(profile.id));
-  const actionLabel = refreshingUsage ? "刷新中..." : usage ? "重新刷新" : "刷新用量";
+  const refreshingAllCodexUsage = isPendingAction(refreshAllUsageActionKey);
+  const actionLabel = refreshingUsage
+    ? "刷新中..."
+    : refreshingAllCodexUsage
+    ? "等待中..."
+    : usage
+    ? "重新刷新"
+    : "刷新用量";
   const provider = usage?.provider ?? "ylscode";
   const usageUpdatedCopy = refreshingUsage ? "正在刷新用量…" : `更新于：${updated}`;
 
@@ -1922,7 +1895,7 @@ function renderThirdPartyUsagePanel(profile: ProfileSummary): string {
           data-action="refresh-third-party-usage"
           data-id="${profile.id}"
           data-name="${escapeHtml(profile.name)}"
-          ${state.busy || refreshingUsage ? "disabled" : ""}
+          ${state.busy || refreshingUsage || refreshingAllCodexUsage ? "disabled" : ""}
         >
           ${escapeHtml(actionLabel)}
         </button>
@@ -1953,6 +1926,7 @@ function renderThirdPartyRuntimePanel(profile: ProfileSummary): string {
   const probe = profile.thirdPartyLatency;
   const refreshingUsage = isPendingAction(thirdPartyUsageActionKey(profile.id));
   const refreshingLatency = isPendingAction(latencyProbeActionKey(profile.id));
+  const refreshingAllCodexUsage = isPendingAction(refreshAllUsageActionKey);
   const provider = usage?.provider ?? "ylscode";
 
   return `
@@ -1965,9 +1939,9 @@ function renderThirdPartyRuntimePanel(profile: ProfileSummary): string {
             data-action="refresh-third-party-usage"
             data-id="${profile.id}"
             data-name="${escapeHtml(profile.name)}"
-            ${state.busy || refreshingUsage ? "disabled" : ""}
+            ${state.busy || refreshingUsage || refreshingAllCodexUsage ? "disabled" : ""}
           >
-            ${refreshingUsage ? "用量中..." : "刷新用量"}
+            ${refreshingUsage ? "用量中..." : refreshingAllCodexUsage ? "等待中..." : "刷新用量"}
           </button>
           <button
             class="button button-ghost runtime-action-button"
@@ -2081,117 +2055,6 @@ function formatSessionRepairFlash(result: SessionRepairResult, advanced: boolean
     : `安全修复已完成：${repairedSummary || "没有需要落盘的修复项"}。`;
 }
 
-function renderSessionRecoveryPanel(): string {
-  const report = state.sessionRecoveryReport;
-  const lastResult = state.sessionRecoveryLastResult;
-  const expanded = state.sessionRecoveryExpanded || Boolean(report) || Boolean(lastResult);
-  const diagnosing = isPendingAction(diagnoseCodexSessionsActionKey);
-  const repairing = isPendingAction(repairCodexSessionsActionKey);
-  const repairingAdvanced = isPendingAction(repairCodexSessionsAdvancedActionKey);
-
-  return `
-    <section
-      class="session-recovery-panel"
-      data-role="session-recovery-panel"
-      data-state="${expanded ? "expanded" : "collapsed"}"
-    >
-      <div class="session-recovery-head">
-        <div class="session-recovery-copy">
-          <strong>高级会话工具</strong>
-          <span class="session-recovery-updated">
-            ${
-              report
-                ? `SQLite：${escapeHtml(report.sqliteIntegrity)} · recent window：${escapeHtml(String(report.recentLimit))}`
-                : expanded
-                  ? "仅用于排查本地 Codex 会话索引、时间戳或侧边栏显示异常。"
-                  : "默认收起；普通配置切换不需要操作这里。"
-            }
-          </span>
-        </div>
-        <div class="session-recovery-actions">
-          <button
-            class="button button-ghost usage-refresh-button"
-            data-action="toggle-session-recovery-panel"
-            ${state.busy || diagnosing || repairing || repairingAdvanced ? "disabled" : ""}
-          >
-            ${expanded ? "收起" : "展开"}
-          </button>
-          ${expanded ? `
-          <button
-            class="button button-ghost usage-refresh-button"
-            data-action="diagnose-codex-sessions"
-            ${state.busy || diagnosing || repairing || repairingAdvanced ? "disabled" : ""}
-          >
-            ${diagnosing ? "诊断中..." : "诊断会话"}
-          </button>
-          <button
-            class="button button-secondary usage-refresh-button"
-            data-action="repair-codex-sessions"
-            ${state.busy || diagnosing || repairing || repairingAdvanced ? "disabled" : ""}
-          >
-            ${repairing ? "修复中..." : "安全修复"}
-          </button>
-          <button
-            class="button button-ghost usage-refresh-button"
-            data-action="repair-codex-sessions-advanced"
-            ${state.busy || diagnosing || repairing || repairingAdvanced ? "disabled" : ""}
-          >
-            ${repairingAdvanced ? "修复中..." : "高级时间修复"}
-          </button>
-          ` : ""}
-        </div>
-      </div>
-      ${
-        expanded && report
-          ? `
-            <div class="session-recovery-stats">
-              <div class="session-recovery-stat">
-                <span>安全修复候选</span>
-                <strong>${escapeHtml(String(totalSafeRepairCandidates(report)))}</strong>
-              </div>
-              <div class="session-recovery-stat">
-                <span>时间修复候选</span>
-                <strong>${escapeHtml(String(totalTimeRepairCandidates(report)))}</strong>
-              </div>
-              <div class="session-recovery-stat">
-                <span>侧边栏窗口外项目</span>
-                <strong>${escapeHtml(
-                  String(report.samples.savedRootsWithChatsOutsideRecentWindow.length),
-                )}</strong>
-              </div>
-              <div class="session-recovery-stat">
-                <span>未归档线程</span>
-                <strong>${escapeHtml(String(report.counts.unarchived))}</strong>
-              </div>
-            </div>
-            <div class="session-recovery-meta">
-              <span>session_index：${escapeHtml(String(report.counts.sessionIndexEntries))}</span>
-              <span>db threads：${escapeHtml(String(report.counts.dbThreads))}</span>
-              ${
-                report.samples.savedRootsWithChatsOutsideRecentWindow[0]
-                  ? `<span>样例：${escapeHtml(
-                      report.samples.savedRootsWithChatsOutsideRecentWindow[0].root,
-                    )}</span>`
-                  : ""
-              }
-            </div>
-          `
-          : expanded
-            ? `
-            <p class="session-recovery-empty">
-              旧项目显示“暂无聊天”不一定是损坏，也可能只是 Codex 侧边栏 recent-window 限制。
-            </p>
-          `
-            : ""
-      }
-      ${
-        expanded && lastResult
-          ? `<p class="session-recovery-result">${escapeHtml(lastResult.note)}</p>`
-          : ""
-      }
-    </section>
-  `;
-}
 
 function renderProfileLayoutToggle(): string {
   return `
@@ -2354,9 +2217,9 @@ function renderProfileList(snapshot: AppSnapshot, profiles: ProfileSummary[]): s
                         data-action="refresh-third-party-usage"
                         data-id="${profile.id}"
                         data-name="${escapeHtml(profile.name)}"
-                        ${state.busy || refreshingThirdPartyUsage ? "disabled" : ""}
+                        ${state.busy || refreshingThirdPartyUsage || refreshingAllCodexUsage ? "disabled" : ""}
                       >
-                        ${refreshingThirdPartyUsage ? "刷新中..." : "额度"}
+                        ${refreshingThirdPartyUsage ? "刷新中..." : refreshingAllCodexUsage ? "等待中..." : "额度"}
                       </button>
                     `
                 }
@@ -2610,15 +2473,31 @@ function escapeHtml(value: string): string {
     .replaceAll("'", "&#39;");
 }
 
+function getFlashIcon(kind: FlashKind): string {
+  switch (kind) {
+    case "success":
+      return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
+    case "error":
+      return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>`;
+    case "info":
+    default:
+      return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>`;
+  }
+}
+
 function renderFlash(): string {
   if (!state.flash) {
     return "";
   }
 
   return `
-    <aside class="flash flash-${state.flash.kind}">
-      <span>${escapeHtml(state.flash.text)}</span>
-    </aside>
+    <div class="toast-notification toast-${state.flash.kind}">
+      <span class="toast-icon">${getFlashIcon(state.flash.kind)}</span>
+      <span class="toast-text">${escapeHtml(state.flash.text)}</span>
+      <button class="toast-close" data-action="clear-flash" aria-label="关闭">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+      </button>
+    </div>
   `;
 }
 
@@ -2649,142 +2528,13 @@ function renderBusyDialog(): string {
   `;
 }
 
-function renderPlatformTabs(): string {
-  return `
-    <section class="tabs platform-tabs">
-      <button
-        class="tab-button ${state.platform === "codex" ? "active" : ""}"
-        data-action="switch-platform"
-        data-platform="codex"
-      >
-        Codex
-      </button>
-      <button
-        class="tab-button ${state.platform === "antigravity" ? "active" : ""}"
-        data-action="switch-platform"
-        data-platform="antigravity"
-      >
-        Antigravity
-      </button>
-    </section>
-  `;
-}
 
-function renderAntigravityPage(): string {
-  const snapshot = state.antigravitySnapshot;
 
-  if (!snapshot) {
-    return `
-      <section class="cards-page" data-page="antigravity">
-        <header class="top-nav" data-tauri-drag-region>
-          <div class="top-nav-copy">
-            <h1>Google Antigravity</h1>
-            <p>导入并切换当前本机的 Antigravity 登录状态。</p>
-          </div>
-        </header>
-        ${renderFlash()}
-        <section class="loading-page">
-          <h1>正在读取 Antigravity 配置…</h1>
-        </section>
-      </section>
-    `;
-  }
 
-  return `
-    <section class="cards-page" data-page="antigravity">
-      <header class="top-nav" data-tauri-drag-region>
-        <div class="top-nav-copy">
-          <h1>Google Antigravity</h1>
-          <p>导入并切换当前本机的 Antigravity 登录状态。</p>
-        </div>
-      </header>
 
-      ${renderFlash()}
 
-      <section class="grid-container">
-        <div class="section-header">
-          <h3 class="section-title">已保存的 Antigravity 账号 (${snapshot.profiles.length})</h3>
-          <div class="section-actions">
-            <button
-              class="button button-secondary"
-              data-action="import-current-antigravity"
-              ${state.busy ? "disabled" : ""}
-            >
-              导入当前账号
-            </button>
-            <button
-              class="button button-secondary"
-              data-action="restore-antigravity-backup"
-              ${state.busy ? "disabled" : ""}
-            >
-              恢复最近备份
-            </button>
-            <button
-              class="button button-ghost"
-              data-action="reveal-antigravity-source"
-              ${state.busy ? "disabled" : ""}
-            >
-              打开数据目录
-            </button>
-            <button
-              class="icon-button section-refresh-button"
-              title="刷新状态"
-              data-role="global-refresh"
-              data-action="refresh"
-              ${state.busy ? "disabled" : ""}
-            >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
-            </button>
-          </div>
-        </div>
-
-        <div class="card-grid">
-          ${snapshot.profiles.length === 0 ? `
-            <div class="empty-state">
-              <h3>暂无 Antigravity 账号快照</h3>
-              <p>点击“导入当前账号”把现在本机登录状态保存成一个可切换的配置。</p>
-            </div>
-          ` : ""}
-          ${snapshot.profiles
-            .map(
-              (profile) => `
-                <article
-                  class="card profile-card ${snapshot.activeProfileId === profile.id ? "profile-card-live" : ""}"
-                  data-role="antigravity-profile-card"
-                  data-id="${profile.id}"
-                >
-                  <div class="card-head">
-                    <h2>${escapeHtml(profile.name)}</h2>
-                    ${snapshot.activeProfileId === profile.id ? `
-                      <div class="status-badge">
-                        <div class="status-dot status-dot-pulse"></div>
-                        <span>Active</span>
-                      </div>
-                    ` : ""}
-                  </div>
-                  <p class="card-note">${escapeHtml(profile.email)}</p>
-                  <div class="card-actions-overlay">
-                    <div style="display: flex; flex-direction: column; gap: 4px; flex-grow: 1;">
-                      <p class="card-date">更新于：${formatDateTime(profile.updatedAt)}</p>
-                      ${
-                        snapshot.activeProfileId === profile.id
-                          ? `<div class="env-active-label"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg> 当前生效中</div>`
-                          : `<button class="button button-secondary" style="width:100%" data-action="switch-antigravity" data-id="${profile.id}" data-name="${escapeHtml(profile.name)}" ${state.busy ? "disabled" : ""}>切换到此账号</button>`
-                      }
-                    </div>
-                  </div>
-                </article>
-              `,
-            )
-            .join("")}
-        </div>
-      </section>
-    </section>
-  `;
-}
 
 function renderCardsPage(snapshot: AppSnapshot): string {
-  const anyUsageRefreshPending = isPendingActionPrefix("codex-usage");
   const migratingLegacyThirdParty = isPendingAction(migrateLegacyThirdPartyActionKey);
   const orderedProfiles = [...snapshot.profiles].sort((a, b) => {
     if (a.id === snapshot.activeProfileId) return -1;
@@ -2815,75 +2565,35 @@ function renderCardsPage(snapshot: AppSnapshot): string {
 
   return `
     <section class="cards-page" data-page="cards">
-      <header class="top-nav" data-tauri-drag-region>
-        <div class="top-nav-copy">
-          <h1>Codex Auth Switch</h1>
-          <p>统一管理与快速分发您的环境代理和身份配置。</p>
+      <header class="content-header" data-tauri-drag-region>
+        <div class="tabs">
+          <button class="tab-button ${state.activeTab === 'local' ? 'active' : ''}" data-action="tab-local">本地档案</button>
+          <button class="tab-button ${state.activeTab === 'network' ? 'active' : ''}" data-action="tab-network">网络共享库</button>
         </div>
-        <div class="top-nav-actions" style="align-items: center;">
-          <button
-            class="${updateEntryClass}"
-            title="检查更新"
-            data-role="update-entry"
-            data-action="check-update"
-            ${state.busy || state.update.checking ? "disabled" : ""}
-          >
-            <span class="version-update-copy">
-              <span class="version-update-label">${escapeHtml(updateLabelText)}</span>
-              <strong>${escapeHtml(updateVersionText)}</strong>
-            </span>
-            <span class="version-update-action">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"></polyline></svg>
-              ${escapeHtml(updateActionText)}
-            </span>
+        <div class="content-actions">
+          <button class="button button-primary" data-role="add-card" data-action="new-profile">+ 新建配置</button>
+          <button class="icon-button section-refresh-button" title="刷新状态" data-role="global-refresh" data-action="refresh" ${state.busy ? "disabled" : ""}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
           </button>
         </div>
       </header>
-
-      ${renderFlash()}
-
-      <div class="tabs">
-        <button class="tab-button ${state.activeTab === 'local' ? 'active' : ''}" data-action="tab-local">🏠 本地档案</button>
-        <button class="tab-button ${state.activeTab === 'network' ? 'active' : ''}" data-action="tab-network">☁️ 网络共享库</button>
-      </div>
 
       ${state.activeTab === 'local' ? `
       <section class="grid-container">
         <div class="section-header">
           <h3 class="section-title">已保存的配置文件 (${snapshot.profiles.length})</h3>
           <div class="section-actions">
-            ${renderProfileLayoutToggle()}
             <button
               class="button button-secondary"
-              data-action="migrate-legacy-third-party"
-              ${state.busy || migratingLegacyThirdParty ? "disabled" : ""}
+              data-action="refresh-all-codex-usage"
+              ${state.busy || isPendingActionPrefix("codex-usage") ? "disabled" : ""}
+              style="padding: 6px 12px; font-size: 0.82rem; height: 32px;"
             >
-              ${migratingLegacyThirdParty ? "迁移中..." : "迁移旧第三方配置"}
+              ${isPendingAction(refreshAllUsageActionKey) ? "刷新中..." : "刷新全部额度"}
             </button>
-            ${snapshot.profiles.some((profile) => isOfficialOauthProfile(profile)) ? `
-              ${
-                snapshot.codexUsageApiEnabled
-                  ? `
-                    <button class="button button-secondary" data-action="refresh-all-codex-usage" ${state.busy || anyUsageRefreshPending ? "disabled" : ""}>
-                      ${isPendingAction(refreshAllUsageActionKey) ? "刷新中..." : "刷新全部额度"}
-                    </button>
-                    <button class="button button-ghost" data-action="disable-codex-usage" ${state.busy || anyUsageRefreshPending ? "disabled" : ""}>
-                      关闭额度查询
-                    </button>
-                  `
-                  : `
-                    <button class="button button-secondary" data-action="enable-codex-usage" ${state.busy || anyUsageRefreshPending ? "disabled" : ""}>
-                      启用 Codex 额度查询
-                    </button>
-                  `
-              }
-            ` : ""}
-            <button class="icon-button section-refresh-button" title="刷新状态" data-role="global-refresh" data-action="refresh" ${state.busy ? "disabled" : ""}>
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
-            </button>
+            ${renderProfileLayoutToggle()}
           </div>
         </div>
-        ${renderSessionRecoveryPanel()}
         ${
           state.profileLayout === "list"
             ? renderProfileList(snapshot, orderedProfiles)
@@ -3038,8 +2748,6 @@ function renderEditorPage(): string {
           `}
       </header>
 
-      ${renderFlash()}
-
       ${readOnly
         ? `
           <aside class="flash flash-info" data-role="editor-readonly-notice">
@@ -3135,29 +2843,98 @@ function render(): void {
   const snapshot = state.snapshot;
 
   let content = "";
-  if (state.platform === "antigravity") {
-    content = renderAntigravityPage();
-  } else if (!snapshot) {
-    content = `
-      <section class="loading-page" data-page="cards">
-        <p class="eyebrow">Codex Profiles</p>
-        <h1>正在读取配置…</h1>
-      </section>
-    `;
+  if (state.view === "cards" && snapshot) {
+    content = renderCardsPage(snapshot);
+  } else if (state.view === "settings") {
+    content = renderSettingsPage();
   } else {
-    content = state.view === "cards" ? renderCardsPage(snapshot) : renderEditorPage();
+    content = renderEditorPage();
   }
 
+  const hasPendingUpdate = state.update.lastResult?.hasUpdate ?? false;
+  const currentVersionText = state.update.lastResult?.currentVersion ?? state.appVersion ?? "--";
+  const updateLabelText = hasPendingUpdate ? "发现新版本" : "检查更新";
+  const updateVersionText = hasPendingUpdate
+    ? `v${state.update.lastResult?.latestVersion ?? "--"}`
+    : `v${currentVersionText}`;
+
   app.innerHTML = `
-    <main class="app-shell">
-      ${renderPlatformTabs()}
-      ${content}
-    </main>
+    <div class="app-layout">
+      <aside class="app-sidebar">
+        <div class="sidebar-header">
+          <div class="app-logo">Codex Auth</div>
+        </div>
+        <nav class="sidebar-nav">
+          <button class="nav-item ${state.view === 'cards' || state.view === 'editor' ? 'active' : ''}" data-action="nav-profiles">
+            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+            配置管理
+          </button>
+          <button class="nav-item ${state.view === 'settings' ? 'active' : ''}" data-action="nav-settings">
+            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+            全局设置
+          </button>
+        </nav>
+        <div class="sidebar-footer">
+          <button class="nav-item ${hasPendingUpdate ? 'version-update-entry-available' : ''}" data-role="update-entry" data-action="check-update" style="display: flex; justify-content: space-between;">
+            <div style="display:flex; align-items:center; gap: 12px;">
+              <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M2.13 15.57a10 10 0 1 0 3.4-9.26L2.5 8"></path></svg>
+              <span>${updateLabelText}</span>
+            </div>
+            <span style="font-size: 0.8rem; font-weight: bold; color: ${hasPendingUpdate ? 'var(--danger)' : 'var(--text-muted)'}">${updateVersionText}</span>
+          </button>
+        </div>
+      </aside>
+      <main class="app-main-content">
+        ${content}
+      </main>
+      ${renderFlash()}
+    </div>
     ${renderBusyDialog()}
   `;
 
   bindEvents();
 }
+
+function renderSettingsPage(): string {
+  const migratingLegacyThirdParty = isPendingAction(migrateLegacyThirdPartyActionKey);
+  const writingThirdPartyWebsocketsDefaults = isPendingAction(
+    writeThirdPartyWebsocketsDefaultsActionKey,
+  );
+  
+  return `
+    <section class="cards-page" data-page="settings">
+      <header class="content-header" data-tauri-drag-region>
+        <h2>全局设置</h2>
+      </header>
+      
+      <div class="grid-container" style="max-width: 600px;">
+        <div class="card">
+          <div class="card-head">
+            <h3>数据迁移</h3>
+          </div>
+          <p class="card-note">将旧版本的第三方 API 配置迁移到新的配置格式。如果您之前有使用旧版配置，建议执行此操作。</p>
+          <div class="content-actions" style="margin-top: 16px;">
+            <button
+              class="button button-secondary"
+              data-action="migrate-legacy-third-party"
+              ${state.busy || migratingLegacyThirdParty ? "disabled" : ""}
+            >
+              ${migratingLegacyThirdParty ? "迁移中..." : "迁移旧第三方配置"}
+            </button>
+            <button
+              class="button button-secondary"
+              data-action="write-third-party-websockets-defaults"
+              ${state.busy || writingThirdPartyWebsocketsDefaults ? "disabled" : ""}
+            >
+              ${writingThirdPartyWebsocketsDefaults ? "写入中..." : "写入第三方 WebSocket 默认值"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 
 function bindEvents(): void {
   const editorNameInput = document.querySelector<HTMLInputElement>("#editor-name");
@@ -3214,26 +2991,23 @@ function bindEvents(): void {
     button.addEventListener("click", async () => {
       const action = button.dataset.action;
 
-      if (action === "refresh") {
-        if (state.platform === "antigravity") {
-          await refreshAntigravitySnapshot();
-        } else if (state.activeTab === "network") {
-          await fetchNetworkProfiles();
-        } else {
-          await refreshSnapshot();
-        }
-      } else if (action === "diagnose-codex-sessions") {
-        await diagnoseCodexSessions(true);
-      } else if (action === "repair-codex-sessions") {
-        await repairCodexSessions(false);
-      } else if (action === "repair-codex-sessions-advanced") {
-        await repairCodexSessions(true);
-      } else if (action === "toggle-session-recovery-panel") {
-        state.sessionRecoveryExpanded = !state.sessionRecoveryExpanded;
+      if (action === "clear-flash") {
+        clearFlash();
         render();
-      } else if (action === "switch-platform" && button.dataset.platform) {
-        await switchPlatform(button.dataset.platform as PlatformMode);
-      } else if (action === "tab-local") {
+        return;
+      }
+
+      if (action === "refresh") {
+        
+          await refreshSnapshot();
+        
+      } else if (action === "nav-profiles") {
+        state.view = "cards";
+        render();
+      } else if (action === "nav-settings") {
+        state.view = "settings";
+        render();
+} else if (action === "tab-local") {
         state.activeTab = "local";
         render();
       } else if (action === "tab-network") {
@@ -3255,6 +3029,8 @@ function bindEvents(): void {
         await refreshAllCodexUsage();
       } else if (action === "migrate-legacy-third-party") {
         await migrateLegacyThirdPartyProfiles();
+      } else if (action === "write-third-party-websockets-defaults") {
+        await writeThirdPartyWebsocketsDefaults();
       } else if (action === "refresh-codex-usage" && button.dataset.id && button.dataset.name) {
         await refreshProfileCodexUsage(button.dataset.id, button.dataset.name);
       } else if (action === "profile-layout-list") {
@@ -3279,18 +3055,6 @@ function bindEvents(): void {
         await openEditorForNewProfile();
       } else if (action === "view-profile-details" && button.dataset.id) {
         await openEditorForProfile(button.dataset.id);
-      } else if (action === "import-current-antigravity") {
-        await handleImportCurrentAntigravity();
-      } else if (action === "restore-antigravity-backup") {
-        await handleRestoreAntigravityBackup();
-      } else if (action === "reveal-antigravity-source") {
-        await handleRevealAntigravitySource();
-      } else if (
-        action === "switch-antigravity" &&
-        button.dataset.id &&
-        button.dataset.name
-      ) {
-        await handleSwitchAntigravityProfile(button.dataset.id, button.dataset.name);
       } else if (action === "switch" && button.dataset.id && button.dataset.name) {
         await switchProfile(button.dataset.id, button.dataset.name);
       } else if (action === "delete-profile" && button.dataset.id && button.dataset.name) {
@@ -3311,7 +3075,7 @@ function bindEvents(): void {
           setFlash("success", "Codex 程序已被拉起重启指令！");
         } catch (error) {
           console.error("重启 Codex 失败", error);
-          setFlash("error", "通过 AppleScript 触发重启失败，或者目标程序未执行！");
+          setFlash("error", `重启 Codex 失败：${formatErrorMessage(error)}`);
         } finally {
           state.busy = false; render();
         }

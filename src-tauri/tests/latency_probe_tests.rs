@@ -201,7 +201,16 @@ fn refresh_profile_third_party_usage_fetches_ylscode_usage() {
         json!({
             "state": {
                 "package": {
-                    "weeklyQuota": 500
+                    "total_quota": 100,
+                    "weeklyQuota": 500,
+                    "packages": [
+                        {
+                            "package_type": "Pro",
+                            "amount": 288,
+                            "package_quota": 100,
+                            "expires_at": "2026-06-13T09:15:42.303Z"
+                        }
+                    ]
                 },
                 "userPackgeUsage_week": {
                     "total_cost": 300.49,
@@ -214,6 +223,11 @@ fn refresh_profile_third_party_usage_fetches_ylscode_usage() {
                     "total_quota": 100,
                     "remaining_quota": -0.03,
                     "used_percentage": "100%"
+                },
+                "userAccountInfo": {
+                    "total_balance": 100000,
+                    "free_balance": 100000,
+                    "paid_balance": 0
                 }
             }
         }),
@@ -254,6 +268,23 @@ fn refresh_profile_third_party_usage_fetches_ylscode_usage() {
     assert_eq!(weekly.total.as_deref(), Some("500"));
     assert_eq!(weekly.remaining.as_deref(), Some("199.51"));
     assert_eq!(weekly.used_percent, Some(60.0));
+    let subscription = usage.subscription.expect("subscription");
+    assert_eq!(subscription.daily_quota.as_deref(), Some("100"));
+    assert_eq!(subscription.weekly_quota.as_deref(), Some("500"));
+    assert_eq!(subscription.monthly_quota.as_deref(), Some("3100"));
+    assert_eq!(subscription.amount.as_deref(), Some("288"));
+    assert_eq!(subscription.package_type.as_deref(), Some("Pro"));
+    assert_eq!(
+        subscription
+            .expires_at
+            .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+            .as_deref(),
+        Some("2026-06-13T09:15:42.303Z")
+    );
+    let credit = usage.credit.expect("credit");
+    assert_eq!(credit.free_balance.as_deref(), Some("100000"));
+    assert_eq!(credit.paid_balance.as_deref(), Some("0"));
+    assert_eq!(credit.total_balance.as_deref(), Some("100000"));
     assert!(usage.error.is_none());
 
     let request = server

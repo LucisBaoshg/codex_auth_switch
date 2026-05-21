@@ -446,32 +446,6 @@ test("opens the single profile detail page with usage latency editor and delete 
   expect(page?.querySelector('[data-action="delete-profile"][data-id="profile-2"]')).not.toBeNull();
 });
 
-test("keeps Codex session recovery tools collapsed until explicitly expanded", async () => {
-  await import("../src/main");
-  await flushUi();
-
-  expect(
-    document.querySelector('[data-role="session-recovery-panel"][data-state="collapsed"]'),
-  ).not.toBeNull();
-  expect(document.body.textContent).toContain("高级会话工具");
-  expect(document.querySelector('[data-action="diagnose-codex-sessions"]')).toBeNull();
-  expect(document.querySelector('[data-action="repair-codex-sessions"]')).toBeNull();
-  expect(document.body.textContent).not.toContain("高级时间修复");
-
-  document
-    .querySelector<HTMLButtonElement>('[data-action="toggle-session-recovery-panel"]')
-    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-
-  await flushUi();
-
-  expect(
-    document.querySelector('[data-role="session-recovery-panel"][data-state="expanded"]'),
-  ).not.toBeNull();
-  expect(document.querySelector('[data-action="diagnose-codex-sessions"]')).not.toBeNull();
-  expect(document.querySelector('[data-action="repair-codex-sessions"]')).not.toBeNull();
-  expect(document.querySelector('[data-action="repair-codex-sessions-advanced"]')).not.toBeNull();
-});
-
 test("shows current version in the update entry for desktop runtime", async () => {
   invokeMock.mockImplementation(async (command: string) => {
     if (command === "load_snapshot") {
@@ -715,6 +689,57 @@ test("opens the editor flow when clicking the add-profile card", async () => {
   expect(document.querySelector("#editor-config-toml")).toBeNull();
 });
 
+test("keeps codex usage query controls in profile management instead of settings", async () => {
+  const snapshot = {
+    targetDir: "/Users/example/.codex",
+    usingDefaultTargetDir: true,
+    targetExists: true,
+    targetAuthExists: true,
+    targetConfigExists: true,
+    targetUpdatedAt: "2026-03-25T00:00:00Z",
+    targetAuthTypeLabel: "官方 OAuth",
+    activeProfileId: "profile-official",
+    lastSelectedProfileId: "profile-official",
+    lastSwitchProfileId: "profile-official",
+    lastSwitchedAt: "2026-03-25T00:00:00Z",
+    codexUsageApiEnabled: true,
+    profiles: [
+      {
+        id: "profile-official",
+        name: "Official",
+        notes: "official account",
+        authTypeLabel: "官方 OAuth",
+        createdAt: "2026-03-24T00:00:00Z",
+        updatedAt: "2026-03-24T13:24:00Z",
+        authHash: "auth-official",
+        configHash: "config-official",
+        codexUsage: null,
+        thirdPartyLatency: null,
+        thirdPartyUsage: null,
+      },
+    ],
+  };
+
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "load_snapshot") {
+      return snapshot;
+    }
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  await import("../src/main");
+  await flushUi();
+
+  expect(document.querySelector('[data-action="refresh-all-codex-usage"]')).not.toBeNull();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="nav-settings"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+
+  expect(document.querySelector('[data-action="refresh-all-codex-usage"]')).toBeNull();
+});
+
 test("migrates legacy third-party profiles from the local profile toolbar", async () => {
   const snapshot = {
     targetDir: "/Users/example/.codex",
@@ -779,6 +804,12 @@ test("migrates legacy third-party profiles from the local profile toolbar", asyn
   await import("../src/main");
   await flushUi();
 
+  // Switch to settings page where migrate button is rendered
+  document
+    .querySelector<HTMLButtonElement>('[data-action="nav-settings"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+
   document
     .querySelector<HTMLButtonElement>('[data-action="migrate-legacy-third-party"]')
     ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -787,7 +818,84 @@ test("migrates legacy third-party profiles from the local profile toolbar", asyn
 
   expect(invokeMock).toHaveBeenCalledWith("migrate_legacy_third_party_profiles", undefined);
   expect(document.body.textContent).toContain("已迁移 1 个旧第三方 API 配置");
+
+  // Switch back to profile page to see updated profiles list
+  document
+    .querySelector<HTMLButtonElement>('[data-action="nav-profiles"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+
   expect(document.body.textContent).toContain("openai");
+});
+
+test("writes websocket defaults to third-party profiles from settings", async () => {
+  const snapshot = {
+    targetDir: "/Users/example/.codex",
+    usingDefaultTargetDir: true,
+    targetExists: true,
+    targetAuthExists: true,
+    targetConfigExists: true,
+    targetUpdatedAt: "2026-03-25T00:00:00Z",
+    targetAuthTypeLabel: "第三方 API",
+    activeProfileId: "profile-third",
+    lastSelectedProfileId: "profile-third",
+    lastSwitchProfileId: "profile-third",
+    lastSwitchedAt: "2026-03-25T00:00:00Z",
+    codexUsageApiEnabled: false,
+    profiles: [
+      {
+        id: "profile-third",
+        name: "Third API",
+        notes: "third-party profile",
+        authTypeLabel: "第三方 API",
+        modelProviderKey: "openai",
+        createdAt: "2026-03-24T00:00:00Z",
+        updatedAt: "2026-03-24T13:24:00Z",
+        authHash: "auth-third",
+        configHash: "config-third",
+        codexUsage: null,
+        thirdPartyLatency: null,
+        thirdPartyUsage: null,
+      },
+    ],
+  };
+
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "load_snapshot") {
+      return snapshot;
+    }
+    if (command === "write_third_party_websockets_defaults") {
+      return {
+        updatedProfileIds: ["profile-third"],
+        skippedProfileIds: [],
+      };
+    }
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+
+  await import("../src/main");
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="nav-settings"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="write-third-party-websockets-defaults"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  await flushUi();
+
+  expect(invokeMock).toHaveBeenCalledWith("write_third_party_websockets_defaults", undefined);
+  expect(document.body.textContent).toContain(
+    "已为 1 个第三方 API 配置写入 supports_websockets = false",
+  );
 });
 
 test("renders codex usage as a plan header with two progress rows", async () => {
@@ -1935,4 +2043,87 @@ test("shows Applications install guidance before checking for update on macOS", 
   await flushUi();
 
   expect(document.body.textContent).toContain("当前应用不在 Applications 文件夹中");
+});
+
+test("refreshes all profiles (official and third-party) when clicking global refresh all button", async () => {
+  const snapshot = {
+    targetDir: "/Users/example/.codex",
+    usingDefaultTargetDir: true,
+    targetExists: true,
+    targetAuthExists: true,
+    targetConfigExists: true,
+    targetUpdatedAt: "2026-03-25T00:00:00Z",
+    targetAuthTypeLabel: "官方 OAuth",
+    activeProfileId: "profile-1",
+    lastSelectedProfileId: "profile-1",
+    lastSwitchProfileId: "profile-1",
+    lastSwitchedAt: "2026-03-25T00:00:00Z",
+    codexUsageApiEnabled: true,
+    profiles: [
+      {
+        id: "profile-1",
+        name: "Official",
+        notes: "official account",
+        authTypeLabel: "官方 OAuth",
+        createdAt: "2026-03-24T00:00:00Z",
+        updatedAt: "2026-03-24T13:24:00Z",
+        authHash: "auth-official",
+        configHash: "config-official",
+        codexUsage: null,
+        thirdPartyLatency: null,
+        thirdPartyUsage: null,
+      },
+      {
+        id: "profile-2",
+        name: "ThirdParty",
+        notes: "third party account",
+        authTypeLabel: "第三方 API",
+        createdAt: "2026-03-24T00:00:00Z",
+        updatedAt: "2026-03-24T13:24:00Z",
+        authHash: "auth-thirdparty",
+        configHash: "config-thirdparty",
+        codexUsage: null,
+        thirdPartyLatency: null,
+        thirdPartyUsage: null,
+      },
+    ],
+  };
+
+  const commandsCalled: { command: string; args?: any }[] = [];
+
+  invokeMock.mockImplementation(async (command: string, args?: any) => {
+    commandsCalled.push({ command, args });
+    if (command === "load_snapshot") {
+      return snapshot;
+    }
+    if (command === "refresh_all_codex_usage") {
+      return snapshot;
+    }
+    if (command === "refresh_profile_third_party_usage") {
+      return snapshot;
+    }
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+
+  await import("../src/main");
+  await flushUi();
+
+  const refreshAllButton = document.querySelector<HTMLButtonElement>(
+    '[data-action="refresh-all-codex-usage"]'
+  );
+  expect(refreshAllButton).not.toBeNull();
+
+  refreshAllButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+
+  // Verify that both Tauri commands were called
+  expect(commandsCalled.some((c) => c.command === "refresh_all_codex_usage")).toBe(true);
+  expect(commandsCalled.some(
+    (c) => c.command === "refresh_profile_third_party_usage" && c.args?.profileId === "profile-2"
+  )).toBe(true);
 });

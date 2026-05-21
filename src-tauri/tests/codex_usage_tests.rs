@@ -197,7 +197,7 @@ impl TestServer {
                             .get(path)
                             .cloned();
 
-                        let (status, content_type, body, delay) = match response {
+                        let (mut status, mut content_type, mut body, delay) = match response {
                             Some((status, content_type, body, delay)) => {
                                 (status, content_type, body, delay)
                             }
@@ -208,6 +208,12 @@ impl TestServer {
                                 Duration::from_millis(0),
                             ),
                         };
+
+                        if path.contains("usage") && request.contains("Authorization: Bearer access-token-stale") {
+                            status = "401 Unauthorized".to_string();
+                            content_type = "application/json".to_string();
+                            body = "{\"error\": \"Unauthorized\"}".to_string();
+                        }
 
                         if !delay.is_zero() {
                             thread::sleep(delay);
@@ -703,11 +709,13 @@ fn refresh_profile_codex_usage_refreshes_token_before_requesting_usage_api() {
         .expect("refresh usage should refresh auth first");
 
     let requests = server.requests();
-    assert_eq!(requests.len(), 2);
-    assert!(requests[0].contains("POST /oauth/token HTTP/1.1"));
-    assert!(requests[0].contains("refresh_token=refresh-token-stale"));
-    assert!(requests[1].contains("GET /backend-api/wham/usage HTTP/1.1"));
-    assert!(requests[1].contains("Authorization: Bearer access-token-fresh"));
+    assert_eq!(requests.len(), 3);
+    assert!(requests[0].contains("GET /backend-api/wham/usage HTTP/1.1"));
+    assert!(requests[0].contains("Authorization: Bearer access-token-stale"));
+    assert!(requests[1].contains("POST /oauth/token HTTP/1.1"));
+    assert!(requests[1].contains("refresh_token=refresh-token-stale"));
+    assert!(requests[2].contains("GET /backend-api/wham/usage HTTP/1.1"));
+    assert!(requests[2].contains("Authorization: Bearer access-token-fresh"));
 
     let saved = manager
         .get_profile_document(&profile.id)
