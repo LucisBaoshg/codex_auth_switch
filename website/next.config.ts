@@ -9,11 +9,8 @@ const nextConfig: NextConfig = {
   },
   // @ts-ignore: dynamic extension property
   allowedDevOrigins: ["10.12.2.127", "localhost", "127.0.0.1"],
-  experimental: {
-    // @ts-ignore
-    turbopack: {
-      root: "/Volumes/Acer/Dev/codex_auth_switch/website"
-    }
+  turbopack: {
+    root: process.cwd(),
   }
 };
 

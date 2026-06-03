@@ -1,20 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { promises as fs } from "fs";
-import path from "path";
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
-};
-
-const noStoreHeaders = {
-  ...corsHeaders,
-  "Cache-Control": "private, no-cache, no-store, max-age=0, must-revalidate",
-};
+import { noStoreHeaders, optionsResponse } from "@/lib/api-response";
+import { principalFromRequest, verifySessionCookieValue, sessionCookieName } from "@/lib/auth";
+import { getVisibleProfile, publicProfile, updateProfileMetadata } from "@/lib/profile-store";
 
 export async function OPTIONS() {
-  return new NextResponse(null, { headers: noStoreHeaders });
+  return optionsResponse();
 }
 
 export async function GET(
@@ -23,19 +13,19 @@ export async function GET(
 ) {
   const p = await params;
   const id = p.id;
-  const dataDir = path.join(process.cwd(), "data");
-  const profilesFile = path.join(dataDir, "profiles.json");
+  const principal = await principalFromRequest(request);
+  if (!principal) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers: noStoreHeaders });
+  }
 
   try {
-    const data = await fs.readFile(profilesFile, "utf-8");
-    const profiles = JSON.parse(data);
-    const profile = profiles.find((p: any) => p.id === id);
+    const profile = await getVisibleProfile(id, principal);
 
     if (!profile) {
       return NextResponse.json({ error: "Profile not found" }, { status: 404, headers: noStoreHeaders });
     }
 
-    return NextResponse.json(profile, { headers: noStoreHeaders });
+    return NextResponse.json(publicProfile(profile), { headers: noStoreHeaders });
   } catch (error) {
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500, headers: noStoreHeaders });
   }
@@ -47,30 +37,20 @@ export async function POST(
 ) {
   const p = await params;
   const id = p.id;
-  const dataDir = path.join(process.cwd(), "data");
-  const profilesFile = path.join(dataDir, "profiles.json");
+  const principal = verifySessionCookieValue(request.cookies.get(sessionCookieName)?.value);
+  if (!principal) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers: noStoreHeaders });
+  }
 
   try {
-    const data = await fs.readFile(profilesFile, "utf-8");
-    const profiles = JSON.parse(data);
-    const profileIndex = profiles.findIndex((p: any) => p.id === id);
+    const { name, description, sharedWith } = await request.json();
+    const updated = await updateProfileMetadata(id, principal, { name, description, sharedWith });
 
-    if (profileIndex === -1) {
+    if (!updated) {
       return NextResponse.json({ error: "Profile not found" }, { status: 404, headers: noStoreHeaders });
     }
 
-    const { name, description } = await request.json();
-    
-    if (name !== undefined && name.trim() !== '') {
-      profiles[profileIndex].name = name;
-    }
-    if (description !== undefined) {
-      profiles[profileIndex].description = description;
-    }
-
-    await fs.writeFile(profilesFile, JSON.stringify(profiles, null, 2));
-
-    return NextResponse.json(profiles[profileIndex], { headers: noStoreHeaders });
+    return NextResponse.json(publicProfile(updated), { headers: noStoreHeaders });
   } catch (error) {
     console.error("Error updating profile:", error);
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500, headers: noStoreHeaders });

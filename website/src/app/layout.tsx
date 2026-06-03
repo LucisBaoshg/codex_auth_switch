@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Codex Auth Switch | Internal Portal",
-  description: "Internal sharing and documentation portal for Codex Auth Switch",
+  title: "Codex 助手 | Internal Portal",
+  description: "Internal sharing and documentation portal for Codex 助手",
 };
 
 export default function RootLayout({

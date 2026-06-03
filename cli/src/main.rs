@@ -6,7 +6,7 @@ use chrono::{DateTime, Local, Utc};
 use core::{default_cli_app_data_dir, CodexUsageSnapshot, CodexUsageWindow, ProfileManager, ProfileSummary};
 use std::path::PathBuf;
 
-const DEFAULT_REMOTE_PROFILES_URL: &str = "http://sub2api.ite.tapcash.com/codex/api/profiles";
+const DEFAULT_REMOTE_PROFILES_URL: &str = "https://codex-helper.ite.tool4seller.com/codex/api/profiles";
 
 fn main() {
     if let Err(error) = run() {

@@ -9,7 +9,7 @@ export default function Home() {
           內部资源中心
         </div>
         <h1 className="text-5xl md:text-7xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-br from-neutral-800 to-neutral-500 dark:from-white dark:to-gray-400">
-          Codex Auth Switch
+          Codex 助手
         </h1>
         <p className="text-lg md:text-xl text-neutral-600 dark:text-neutral-400 max-w-2xl mx-auto leading-relaxed transition-colors">
           在您的 Codex 账号额度不够时，提供团队共享账号的一键快速切换方案，彻底免去手动配置底层文件的繁琐步骤。
@@ -57,7 +57,7 @@ export default function Home() {
               </div>
               <h3 className="mb-3 text-xl font-semibold text-neutral-900 dark:text-white transition-colors">安装本项目客户端</h3>
               <p className="mb-8 text-neutral-600 dark:text-neutral-400 flex-1 transition-colors whitespace-pre-line">
-                下载安装 Codex Auth Switch 的最新客户端发行版。{"\n"}
+                下载安装 Codex 助手的最新客户端发行版。{"\n"}
                 <span className="text-sm">Mac 请下载 <strong>.dmg</strong> 结尾的文件，Windows 请下载 <strong>.exe</strong> 结尾的文件。</span>
               </p>
               <a
@@ -82,7 +82,7 @@ export default function Home() {
               </div>
               <h3 className="mb-3 text-xl font-semibold text-neutral-900 dark:text-white transition-colors">一键同步到桌面客户端</h3>
               <p className="mb-8 text-neutral-600 dark:text-neutral-400 flex-1 transition-colors">
-                打开 Codex Auth Switch 客户端，进入「☁️ 网络共享库」页面，浏览团队配置并点击「一键下载并应用」，即可完成账号切换。
+                打开 Codex 助手客户端，进入「☁️ 网络共享库」页面，浏览团队配置并点击「一键下载并应用」，即可完成账号切换。
               </p>
               <Link
                 href="/profiles"
@@ -126,9 +126,9 @@ export default function Home() {
               </div>
             </div>
             <div>
-              <h3 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-2 transition-colors">安装 Codex Auth Switch 客户端</h3>
+              <h3 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-2 transition-colors">安装 Codex 助手客户端</h3>
               <p className="text-neutral-600 dark:text-neutral-400 leading-relaxed transition-colors">
-                前往 <a href="https://github.com/LucisBaoshg/codex_auth_switch/releases" target="_blank" className="font-medium text-indigo-600 hover:underline dark:text-indigo-400">GitHub Releases</a> 下载最新版 Codex Auth Switch：
+                前往 <a href="https://github.com/LucisBaoshg/codex_auth_switch/releases" target="_blank" className="font-medium text-indigo-600 hover:underline dark:text-indigo-400">GitHub Releases</a> 下载最新版 Codex 助手：
               </p>
               <ul className="mt-2 space-y-1 text-sm text-neutral-600 dark:text-neutral-400 list-disc list-inside">
                 <li><strong>macOS</strong>：下载 <code className="bg-neutral-100 dark:bg-white/10 px-1 rounded">.dmg</code> 文件，打开后拖拽到「应用程序」文件夹即可安装。</li>
@@ -146,7 +146,7 @@ export default function Home() {
             <div>
               <h3 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-2 transition-colors">在客户端中同步网络共享配置</h3>
               <p className="text-neutral-600 dark:text-neutral-400 leading-relaxed transition-colors">
-                启动 Codex Auth Switch，点击顶部的「☁️ 网络共享库」标签页。客户端会自动拉取本平台发布的所有共享配置，找到您需要的配置条目，点击「一键下载并应用」按钮，确认提示后即可完成账号切换。<br className="hidden sm:block" />
+                启动 Codex 助手，点击顶部的「☁️ 网络共享库」标签页。客户端会自动拉取本平台发布的所有共享配置，找到您需要的配置条目，点击「一键下载并应用」按钮，确认提示后即可完成账号切换。<br className="hidden sm:block" />
                 <span className="text-sm mt-1 block">无需手动复制粘贴任何文本，客户端会自动完成全部参数同步与写入。</span>
               </p>
             </div>

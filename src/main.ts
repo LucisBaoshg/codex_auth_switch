@@ -3,10 +3,27 @@ import { getVersion } from "@tauri-apps/api/app";
 import "./styles.css";
 
 type FlashKind = "info" | "success" | "error";
-type ViewMode = "cards" | "editor" | "settings";
+type ViewMode = "cards" | "editor" | "settings" | "sessions" | "session-cleanup";
 type EditorMode = "new" | "fromCurrent" | "existing";
 type PlatformMode = "codex";
 type ProfileLayoutMode = "list" | "grid";
+
+type CodexSessionInfo = {
+  id: string;
+  rolloutPath?: string | null;
+  updatedAtMs: number;
+  cwd?: string | null;
+  title?: string | null;
+  hasUserEvent: boolean;
+  archived: boolean;
+  modelProvider?: string | null;
+  fileSize?: number | null;
+};
+
+type CodexMessage = {
+  role: string;
+  text: string;
+};
 type NewProfileTemplate = "standaloneThirdParty" | "symbioticThirdParty";
 type BusyDialogState = {
   title: string;
@@ -276,6 +293,7 @@ type EditorState = {
   hasTargetChanges: boolean;
   readOnly: boolean;
   source: "local" | "network";
+  newTab?: "manual-delta" | "manual-full" | "network";
 };
 
 type NetworkProfile = {
@@ -283,11 +301,25 @@ type NetworkProfile = {
   name: string;
   description: string;
   createdAt: string;
+  updatedAt?: string;
   files: string[];
+  ownerName?: string;
+  ownerMobile?: string;
+  sharedWith?: string[];
 };
 
-const NETWORK_PROFILES_API = "http://sub2api.ite.tapcash.com/codex/api/profiles";
-const NETWORK_FETCH_OPTIONS: RequestInit = { cache: "no-store" };
+type NetworkSharingSettings = {
+  profilesApi: string;
+  token: string;
+};
+
+const CANONICAL_NETWORK_PROFILES_HOST = "codex-helper.ite.tool4seller.com";
+const LEGACY_NETWORK_PROFILES_HOST = "sub2api.ite.tapcash.com";
+const DEFAULT_NETWORK_PROFILES_API = `https://${CANONICAL_NETWORK_PROFILES_HOST}/codex/api/profiles`;
+const desktopLoginPollIntervalMs =
+  typeof process !== "undefined" && process.env.NODE_ENV === "test" ? 10 : 2000;
+const networkProfilesApiStorageKey = "codex-auth-switch.networkProfilesApi";
+const networkProfileTokenStorageKey = "codex-auth-switch.networkProfileToken";
 
 const isTauriRuntime = "__TAURI_INTERNALS__" in window;
 const appRoot = document.querySelector<HTMLDivElement>("#app");
@@ -297,6 +329,75 @@ if (!appRoot) {
 }
 
 const app = appRoot;
+
+function loadNetworkSharingSettings(): NetworkSharingSettings {
+  return {
+    profilesApi: normalizeNetworkProfilesApiUrl(
+      window.localStorage.getItem(networkProfilesApiStorageKey)?.trim() ||
+        DEFAULT_NETWORK_PROFILES_API,
+    ),
+    token: window.localStorage.getItem(networkProfileTokenStorageKey)?.trim() || "",
+  };
+}
+
+function saveNetworkSharingSettings(settings: NetworkSharingSettings): void {
+  settings.profilesApi = normalizeNetworkProfilesApiUrl(settings.profilesApi);
+  window.localStorage.setItem(networkProfilesApiStorageKey, settings.profilesApi);
+  window.localStorage.setItem(networkProfileTokenStorageKey, settings.token.trim());
+}
+
+function normalizeNetworkProfilesApiUrl(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return DEFAULT_NETWORK_PROFILES_API;
+
+  try {
+    const url = new URL(trimmed);
+    if (url.hostname === LEGACY_NETWORK_PROFILES_HOST) {
+      url.hostname = CANONICAL_NETWORK_PROFILES_HOST;
+      url.protocol = "https:";
+      return url.toString().replace(/\/$/, "");
+    }
+  } catch {
+    return trimmed;
+  }
+
+  return trimmed;
+}
+
+function networkProfilesApiUrl(): string {
+  const trimmed = normalizeNetworkProfilesApiUrl(state.networkSharing.profilesApi).replace(/\/+$/, "");
+  return trimmed || DEFAULT_NETWORK_PROFILES_API;
+}
+
+function networkPortalBaseUrl(): string {
+  return networkProfilesApiUrl().replace(/\/api\/profiles\/?$/, "");
+}
+
+function networkSsoLoginUrl(): string {
+  const loginUrl = new URL(`${networkPortalBaseUrl()}/api/auth/login`);
+  loginUrl.searchParams.set("returnTo", "/profiles");
+  return loginUrl.toString();
+}
+
+function networkDesktopLoginApiUrl(): string {
+  return `${networkPortalBaseUrl()}/api/auth/desktop-login`;
+}
+
+function networkFetchOptions(): RequestInit {
+  const token = state.networkSharing.token.trim();
+  if (token) {
+    return {
+      cache: "no-store",
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    };
+  }
+
+  return {
+    cache: "no-store",
+  };
+}
 
 function createEditorState(mode: EditorMode = "new"): EditorState {
   return {
@@ -327,6 +428,7 @@ theme = "system"
     hasTargetChanges: false,
     readOnly: false,
     source: "local",
+    newTab: "manual-delta",
   };
 }
 
@@ -411,11 +513,21 @@ const state: {
   profileLayout: ProfileLayoutMode;
   networkProfiles: NetworkProfile[];
   networkLoading: boolean;
+  networkAuthRequired: boolean;
+  networkSharing: NetworkSharingSettings;
   appVersion: string | null;
   update: {
     checking: boolean;
     lastResult: UpdateCheckResult | null;
   };
+  sessions: CodexSessionInfo[];
+  selectedSessionId: string | null;
+  sessionMessages: CodexMessage[];
+  sessionSearchQuery: string;
+  sessionFilter: "all" | "active" | "archived";
+  sessionSortOrder: "time" | "cwd";
+  sessionsLoading: boolean;
+  messagesLoading: boolean;
 } = {
   platform: "codex",
   snapshot: null,
@@ -430,11 +542,21 @@ const state: {
   profileLayout: "list",
   networkProfiles: [],
   networkLoading: false,
+  networkAuthRequired: !loadNetworkSharingSettings().token,
+  networkSharing: loadNetworkSharingSettings(),
   appVersion: null,
   update: {
     checking: false,
     lastResult: null,
   },
+  sessions: [],
+  selectedSessionId: null,
+  sessionMessages: [],
+  sessionSearchQuery: "",
+  sessionFilter: "all",
+  sessionSortOrder: "time",
+  sessionsLoading: false,
+  messagesLoading: false,
 };
 
 let flashTimeoutId: number | null = null;
@@ -608,30 +730,32 @@ function editorCannotSaveBecauseMissingOauth(): boolean {
   );
 }
 
-function standaloneThirdPartyConfigInputFromDraft(editor: EditorState): ProfileInput {
+function standaloneThirdPartyConfigInputFromDraft(editor: EditorState, strict: boolean = true): ProfileInput {
   const baseUrl = editor.thirdParty.baseUrl.trim();
   const apiKey = editor.thirdParty.apiKey.trim();
   const model = editor.thirdParty.model.trim();
 
-  if (!baseUrl) {
-    throw new Error("请填写第三方 API 的 openai_base_url。");
-  }
-  if (!apiKey) {
-    throw new Error("请填写 auth.json 中 OPENAI_API_KEY 的 value。");
-  }
-  if (!model) {
-    throw new Error("请填写 model。");
+  if (strict) {
+    if (!baseUrl) {
+      throw new Error("请填写第三方 API 的 openai_base_url。");
+    }
+    if (!apiKey) {
+      throw new Error("请填写 auth.json 中 OPENAI_API_KEY 的 value。");
+    }
+    if (!model) {
+      throw new Error("请填写 model。");
+    }
   }
 
   return {
     name: editor.name.trim(),
     notes: editor.notes.trim(),
-    authJson: JSON.stringify({ OPENAI_API_KEY: apiKey }, null, 2),
-    configToml: `openai_base_url = "${escapeTomlString(baseUrl)}"
+    authJson: JSON.stringify({ OPENAI_API_KEY: apiKey || "<your_api_key_here>" }, null, 2),
+    configToml: `openai_base_url = "${escapeTomlString(baseUrl || "https://api.openai.com/v1")}"
 supports_websockets = false
 model_provider = "openai"
-model = "${escapeTomlString(model)}"
-review_model = "${escapeTomlString(model)}"
+model = "${escapeTomlString(model || "gpt-5.5")}"
+review_model = "${escapeTomlString(model || "gpt-5.5")}"
 model_reasoning_effort = "high"
 plan_mode_reasoning_effort = "xhigh"
 show_raw_agent_reasoning = true
@@ -664,38 +788,41 @@ function symbioticAuthJsonFromOfficial(authJson: string): string {
   return JSON.stringify(parsed, null, 2);
 }
 
-function symbioticThirdPartyConfigTomlFromDraft(editor: EditorState): string {
+function symbioticThirdPartyConfigTomlFromDraft(editor: EditorState, strict: boolean = true): string {
   const provider = editor.thirdParty.provider.trim();
   const baseUrl = editor.thirdParty.baseUrl.trim();
   const token = editor.thirdParty.apiKey.trim();
   const model = editor.thirdParty.model.trim();
 
-  if (!provider) {
-    throw new Error("请填写共生配置的 model_provider。");
-  }
-  if (!baseUrl) {
-    throw new Error("请填写第三方 API 的 base_url。");
-  }
-  if (!token) {
-    throw new Error("请填写第三方 API 的 experimental_bearer_token。");
-  }
-  if (!model) {
-    throw new Error("请填写 model。");
+  if (strict) {
+    if (!provider) {
+      throw new Error("请填写共生配置的 model_provider。");
+    }
+    if (!baseUrl) {
+      throw new Error("请填写第三方 API 的 base_url。");
+    }
+    if (!token) {
+      throw new Error("请填写第三方 API 的 experimental_bearer_token。");
+    }
+    if (!model) {
+      throw new Error("请填写 model。");
+    }
   }
 
-  return `model_provider = "${escapeTomlString(provider)}"
-model = "${escapeTomlString(model)}"
-review_model = "${escapeTomlString(model)}"
+  const resolvedProvider = provider || "custom-provider";
+  return `model_provider = "${escapeTomlString(resolvedProvider)}"
+model = "${escapeTomlString(model || "gpt-5.5")}"
+review_model = "${escapeTomlString(model || "gpt-5.5")}"
 model_reasoning_effort = "high"
 plan_mode_reasoning_effort = "xhigh"
 show_raw_agent_reasoning = true
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
 
-[model_providers.${tomlTableKey(provider)}]
-name = "${escapeTomlString(provider)}"
-base_url = "${escapeTomlString(baseUrl)}"
-experimental_bearer_token = "${escapeTomlString(token)}"
+[model_providers.${tomlTableKey(resolvedProvider)}]
+name = "${escapeTomlString(resolvedProvider)}"
+base_url = "${escapeTomlString(baseUrl || "https://api.openai.com/v1")}"
+experimental_bearer_token = "${escapeTomlString(token || "<your_bearer_token_here>")}"
 requires_openai_auth = true
 supports_websockets = false
 
@@ -705,10 +832,15 @@ remote_control = true
 `;
 }
 
-async function symbioticThirdPartyConfigInputFromDraft(editor: EditorState): Promise<ProfileInput> {
+async function symbioticThirdPartyConfigInputFromDraft(
+  editor: EditorState,
+  strict: boolean = true,
+): Promise<ProfileInput> {
   const oauthProfileId = resolveSymbioticOauthProfileId();
   if (!oauthProfileId) {
-    throw new Error("请先登录并保存一个官方 OAuth 账号，再创建共生配置。");
+    if (strict) {
+      throw new Error("请先登录并保存一个官方 OAuth 账号，再创建共生配置。");
+    }
   }
 
   let document: ProfileDocument;
@@ -717,25 +849,75 @@ async function symbioticThirdPartyConfigInputFromDraft(editor: EditorState): Pro
       (candidate) => candidate.id === oauthProfileId,
     );
     if (!profile) {
-      throw new Error("请先登录并保存一个官方 OAuth 账号，再创建共生配置。");
+      if (strict) {
+        throw new Error("请先登录并保存一个官方 OAuth 账号，再创建共生配置。");
+      }
+      document = {
+        id: "",
+        name: "",
+        notes: "",
+        authTypeLabel: "",
+        modelProviderId: null,
+        modelProviderApiKeyId: null,
+        modelProviderKey: null,
+        modelProviderName: null,
+        modelProviderBaseUrl: null,
+        modelProviderWireApi: null,
+        createdAt: "",
+        updatedAt: "",
+        authJson: "{}",
+        configToml: "",
+        loadedFromTarget: false,
+        hasTargetChanges: false,
+      };
+    } else {
+      document = createMockDocument(profile);
     }
-    document = createMockDocument(profile);
   } else {
-    document = await desktopInvoke<ProfileDocument>("get_profile_document", {
-      profileId: oauthProfileId,
-    });
+    if (!oauthProfileId) {
+      document = {
+        id: "",
+        name: "",
+        notes: "",
+        authTypeLabel: "",
+        modelProviderId: null,
+        modelProviderApiKeyId: null,
+        modelProviderKey: null,
+        modelProviderName: null,
+        modelProviderBaseUrl: null,
+        modelProviderWireApi: null,
+        createdAt: "",
+        updatedAt: "",
+        authJson: "{}",
+        configToml: "",
+        loadedFromTarget: false,
+        hasTargetChanges: false,
+      };
+    } else {
+      document = await desktopInvoke<ProfileDocument>("get_profile_document", {
+        profileId: oauthProfileId,
+      });
+    }
   }
 
   return {
     name: editor.name.trim(),
     notes: editor.notes.trim(),
     authJson: symbioticAuthJsonFromOfficial(document.authJson),
-    configToml: symbioticThirdPartyConfigTomlFromDraft(editor),
+    configToml: symbioticThirdPartyConfigTomlFromDraft(editor, strict),
   };
 }
 
 async function buildEditorProfileInput(): Promise<ProfileInput> {
   if (state.editor.mode === "new") {
+    if (state.editor.newTab === "manual-full" || state.editor.newTab === "network") {
+      return {
+        name: state.editor.name.trim(),
+        notes: state.editor.notes.trim(),
+        authJson: state.editor.authJson,
+        configToml: state.editor.configToml,
+      };
+    }
     if (state.editor.thirdParty.template === "symbioticThirdParty") {
       return symbioticThirdPartyConfigInputFromDraft(state.editor);
     }
@@ -893,7 +1075,7 @@ function nativeConfirm(msg: string, okText = "确定", isDanger = false): Promis
     overlay.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);backdrop-filter:blur(4px);z-index:9999;display:flex;align-items:center;justify-content:center;transition:all 0.2s;";
     const box = document.createElement("div");
     box.style.cssText = "background:var(--bg-panel);border:1px solid var(--border);padding:28px 32px;border-radius:24px;box-shadow:var(--shadow-lg);max-width:320px;text-align:center;color:var(--text-main);transform:scale(0.95);animation:zoomIn 0.2s forwards;";
-    
+
     const okColor = isDanger ? "var(--danger)" : "var(--accent)";
     const okShadow = isDanger ? "rgba(239,68,68,0.2)" : "rgba(99,102,241,0.2)";
 
@@ -906,7 +1088,7 @@ function nativeConfirm(msg: string, okText = "确定", isDanger = false): Promis
       </div>`;
     overlay.appendChild(box);
     document.body.appendChild(overlay);
-    
+
     document.getElementById("btn-cancel")!.onclick = () => { document.body.removeChild(overlay); resolve(false); };
     document.getElementById("btn-ok")!.onclick = () => { document.body.removeChild(overlay); resolve(true); };
   });
@@ -956,6 +1138,91 @@ async function deleteProfile(profileId: string, profileName: string): Promise<vo
 async function openEditorForNewProfile(): Promise<void> {
   state.editor = createEditorState("new");
   state.view = "editor";
+  render();
+}
+
+async function generateSymbioticFromExisting(profileId: string): Promise<void> {
+  let document: ProfileDocument;
+
+  if (!isTauriRuntime) {
+    const profile = state.snapshot?.profiles.find((candidate) => candidate.id === profileId);
+    if (!profile) {
+      setFlash("error", "找不到这套 profile。");
+      return;
+    }
+    document = createMockDocument(profile);
+  } else {
+    setBusy(true);
+    try {
+      document = await desktopInvoke<ProfileDocument>("get_profile_document", { profileId });
+    } catch (error) {
+      setFlash("error", error instanceof Error ? error.message : String(error));
+      setBusy(false);
+      render();
+      return;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  let apiKey = "";
+  try {
+    const parsedAuth = JSON.parse(document.authJson);
+    apiKey = parsedAuth.OPENAI_API_KEY || "";
+  } catch (e) {
+    // Ignore JSON parsing errors
+  }
+
+  let baseUrl = "";
+  let model = "";
+  let provider = "";
+
+  const baseUrlMatch = document.configToml.match(/openai_base_url\s*=\s*"([^"]+)"/);
+  if (baseUrlMatch) {
+    baseUrl = baseUrlMatch[1];
+  } else {
+    const fallbackBaseUrlMatch = document.configToml.match(/base_url\s*=\s*"([^"]+)"/);
+    if (fallbackBaseUrlMatch) {
+      baseUrl = fallbackBaseUrlMatch[1];
+    }
+  }
+
+  const modelMatch = document.configToml.match(/model\s*=\s*"([^"]+)"/);
+  if (modelMatch) {
+    model = modelMatch[1];
+  }
+
+  const providerMatch = document.configToml.match(/model_provider\s*=\s*"([^"]+)"/);
+  if (providerMatch) {
+    provider = providerMatch[1];
+  }
+
+  state.editor = {
+    mode: "new",
+    profileId: null,
+    name: `${document.name} (共生)`,
+    notes: document.notes || "",
+    authJson: "",
+    configToml: "",
+    thirdParty: {
+      template: "symbioticThirdParty",
+      oauthProfileId: resolveSymbioticOauthProfileId(),
+      provider: provider || "openai",
+      baseUrl: baseUrl || "",
+      apiKey: apiKey || "",
+      model: model || "gpt-5.5",
+    },
+    createdAt: null,
+    updatedAt: null,
+    loadedFromTarget: false,
+    hasTargetChanges: false,
+    readOnly: false,
+    source: "local",
+    newTab: "manual-delta",
+  };
+
+  state.view = "editor";
+  setFlash("info", "已基于第三方 API 配置生成共生配置模板。请选择用于授权的官方账号，并保存。");
   render();
 }
 
@@ -1080,9 +1347,14 @@ async function fetchNetworkProfiles(): Promise<void> {
   state.networkLoading = true;
   render();
   try {
-    const res = await fetch(NETWORK_PROFILES_API, NETWORK_FETCH_OPTIONS);
+    const res = await fetch(networkProfilesApiUrl(), networkFetchOptions());
+    if (res.status === 401) {
+      state.networkAuthRequired = true;
+      throw new Error("云端共享库需要桌面访问令牌。请先在网页端钉钉 SSO 登录并生成令牌，再到全局设置中填写。");
+    }
     if (!res.ok) throw new Error("加载网络共享配置失败");
     state.networkProfiles = await res.json();
+    state.networkAuthRequired = false;
   } catch (error) {
     setFlash("error", error instanceof Error ? error.message : String(error));
   } finally {
@@ -1091,8 +1363,73 @@ async function fetchNetworkProfiles(): Promise<void> {
   }
 }
 
+async function openNetworkSsoLogin(): Promise<void> {
+  saveNetworkSharingSettings(state.networkSharing);
+  try {
+    const sessionResponse = await fetch(networkDesktopLoginApiUrl(), {
+      method: "POST",
+      cache: "no-store",
+    });
+    if (!sessionResponse.ok) {
+      throw new Error("创建桌面登录会话失败。");
+    }
+    const session = (await sessionResponse.json()) as {
+      id: string;
+      pollToken: string;
+    };
+    const loginUrl = new URL(networkSsoLoginUrl());
+    loginUrl.searchParams.set("desktopLoginId", session.id);
+
+    if (isTauriRuntime) {
+      await invoke("open_external_url", { url: loginUrl.toString() });
+    } else {
+      window.open(loginUrl.toString(), "_blank", "noopener,noreferrer");
+    }
+    setFlash("info", "已打开钉钉 SSO 登录页。完成登录后客户端会自动连接企业共享库。");
+    render();
+    await pollNetworkDesktopLogin(session.id, session.pollToken);
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    render();
+  }
+}
+
+async function pollNetworkDesktopLogin(sessionId: string, pollToken: string): Promise<void> {
+  const pollUrl = new URL(`${networkDesktopLoginApiUrl()}/${sessionId}`);
+  pollUrl.searchParams.set("pollToken", pollToken);
+
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    await new Promise((resolve) => window.setTimeout(resolve, desktopLoginPollIntervalMs));
+    const response = await fetch(pollUrl.toString(), { cache: "no-store" });
+    if (response.status === 202) continue;
+    if (!response.ok) {
+      throw new Error("桌面登录状态检查失败。");
+    }
+
+    const result = (await response.json()) as { token?: string };
+    if (!result.token) {
+      throw new Error("桌面登录没有返回访问令牌。");
+    }
+
+    state.networkSharing.token = result.token;
+    state.networkAuthRequired = false;
+    saveNetworkSharingSettings(state.networkSharing);
+    setFlash("success", "已完成钉钉 SSO 登录，并自动连接企业共享库。");
+    await fetchNetworkProfiles();
+    return;
+  }
+
+  throw new Error("钉钉 SSO 登录等待超时，请重新登录。");
+}
+
 async function fetchNetworkProfileDocument(networkProfileId: string): Promise<ProfileDocument> {
-  const res = await fetch(`${NETWORK_PROFILES_API}/${networkProfileId}`, NETWORK_FETCH_OPTIONS);
+  const apiUrl = networkProfilesApiUrl();
+  const fetchOptions = networkFetchOptions();
+  const res = await fetch(`${apiUrl}/${networkProfileId}`, fetchOptions);
+  if (res.status === 401) {
+    throw new Error("云端共享库需要桌面访问令牌。请先在网页端生成令牌并填入全局设置。");
+  }
   if (!res.ok) {
     throw new Error("获取网络配置详情失败");
   }
@@ -1104,8 +1441,8 @@ async function fetchNetworkProfileDocument(networkProfileId: string): Promise<Pr
 
   if (profileData.files?.includes("auth.json")) {
     const authRes = await fetch(
-      `${NETWORK_PROFILES_API}/${networkProfileId}/auth.json`,
-      NETWORK_FETCH_OPTIONS,
+      `${apiUrl}/${networkProfileId}/auth.json`,
+      fetchOptions,
     );
     if (authRes.ok) {
       authJson = await authRes.text();
@@ -1114,8 +1451,8 @@ async function fetchNetworkProfileDocument(networkProfileId: string): Promise<Pr
 
   if (profileData.files?.includes("config.toml")) {
     const configRes = await fetch(
-      `${NETWORK_PROFILES_API}/${networkProfileId}/config.toml`,
-      NETWORK_FETCH_OPTIONS,
+      `${apiUrl}/${networkProfileId}/config.toml`,
+      fetchOptions,
     );
     if (configRes.ok) {
       configToml = await configRes.text();
@@ -1262,6 +1599,39 @@ async function checkForUpdate(): Promise<void> {
     state.update.checking = false;
     render();
   }
+}
+
+async function autoCheckForUpdate(): Promise<void> {
+  if (!isTauriRuntime) {
+    return;
+  }
+
+  state.update.checking = true;
+  render();
+
+  try {
+    const update = await desktopInvoke<UpdateCheckResult>("check_update");
+    if (update.hasUpdate) {
+      state.update.lastResult = update;
+    } else {
+      state.update.lastResult = null;
+    }
+  } catch (error) {
+    console.error("自动检查更新失败：", error);
+  } finally {
+    state.update.checking = false;
+    render();
+  }
+}
+
+function startAutoUpdateChecker(): void {
+  setTimeout(() => {
+    void autoCheckForUpdate();
+  }, 1000);
+
+  setInterval(() => {
+    void autoCheckForUpdate();
+  }, 8 * 60 * 60 * 1000);
 }
 
 async function setCodexUsageApiEnabled(enabled: boolean): Promise<void> {
@@ -2153,10 +2523,6 @@ function renderProfileRowMetrics(profile: ProfileSummary): string {
 function renderProfileList(snapshot: AppSnapshot, profiles: ProfileSummary[]): string {
   return `
     <div class="profile-list" data-role="profile-list">
-      <button class="profile-row profile-row-add" data-role="add-card" data-action="new-profile" ${state.busy ? "disabled" : ""}>
-        <span class="profile-row-plus">+</span>
-        <span>加配置</span>
-      </button>
       ${profiles
         .map((profile) => {
           const live = snapshot.activeProfileId === profile.id;
@@ -2167,7 +2533,6 @@ function renderProfileList(snapshot: AppSnapshot, profiles: ProfileSummary[]): s
           return `
             <article class="profile-row ${live ? "profile-row-live" : ""}" data-role="profile-row" data-state="${live ? "live" : "idle"}">
               <div class="profile-row-main">
-                <span class="profile-row-avatar" aria-hidden="true">${escapeHtml(profile.name.trim().charAt(0) || "P")}</span>
                 <span class="profile-row-copy">
                   <span class="profile-row-title">
                     <strong>${escapeHtml(profile.name)}</strong>
@@ -2241,7 +2606,11 @@ function renderProfileList(snapshot: AppSnapshot, profiles: ProfileSummary[]): s
                     : `<span class="profile-row-action-placeholder">--</span>`
                 }
                 </span>
-                <span class="profile-row-action-slot" data-role="profile-row-detail-action">
+                <span class="profile-row-action-slot" data-role="profile-row-detail-action" style="display: flex; gap: 4px; align-items: center;">
+                ${profile.authTypeLabel === "第三方 API"
+                  ? `<button class="button button-ghost" data-action="generate-symbiotic" data-id="${profile.id}" title="以此配置生成共生配置" ${state.busy ? "disabled" : ""}>生成共生</button>`
+                  : ""
+                }
                 <button class="button button-ghost profile-row-detail" title="查看和编辑完整信息" data-action="view-profile-details" data-id="${profile.id}" ${state.busy ? "disabled" : ""}>详情</button>
                 </span>
               </div>
@@ -2256,15 +2625,10 @@ function renderProfileList(snapshot: AppSnapshot, profiles: ProfileSummary[]): s
 function renderProfileGrid(snapshot: AppSnapshot, profiles: ProfileSummary[]): string {
   return `
     <div class="card-grid" data-role="profile-grid">
-      <button class="card add-profile-card" data-role="add-card" data-action="new-profile" ${state.busy ? "disabled" : ""}>
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-        加配置
-      </button>
-
       ${profiles.length === 0 ? `
         <div class="empty-state">
           <h3>暂无存档记录</h3>
-          <p>点击 "加配置" 录入您的第一套 Profile 集合吧！</p>
+          <p>点击右上角 "+ 新建配置" 按钮录入您的第一套 Profile 集合吧！</p>
         </div>
       ` : ""}
       ${profiles
@@ -2276,8 +2640,8 @@ function renderProfileGrid(snapshot: AppSnapshot, profiles: ProfileSummary[]): s
               data-state="${snapshot.activeProfileId === profile.id ? "live" : "idle"}"
             >
               <div class="card-head">
-                <h2>${escapeHtml(profile.name)}</h2>
-                <div style="display: flex; gap: 8px; align-items: center;">
+                <h2 title="${escapeHtml(profile.name)}">${escapeHtml(profile.name)}</h2>
+                <div style="display: flex; gap: 8px; align-items: center; flex-shrink: 0;">
                   ${snapshot.activeProfileId === profile.id ? `
                     <div class="status-badge">
                       <div class="status-dot status-dot-pulse"></div>
@@ -2299,7 +2663,10 @@ function renderProfileGrid(snapshot: AppSnapshot, profiles: ProfileSummary[]): s
                     : `<button class="button button-secondary" style="width:100%" data-action="switch" data-id="${profile.id}" data-name="${escapeHtml(profile.name)}" ${state.busy ? "disabled" : ""}>应用此配置</button>`}
                 </div>
 
-                <div class="card-secondary-actions" style="align-self: flex-end; padding-bottom: 2px;">
+                <div class="card-secondary-actions" style="align-self: flex-end; padding-bottom: 2px; display: flex; gap: 4px;">
+                  ${profile.authTypeLabel === "第三方 API"
+                    ? `<button class="button button-ghost" data-action="generate-symbiotic" data-id="${profile.id}" title="以此配置生成共生配置" ${state.busy ? "disabled" : ""}>生成共生</button>`
+                    : ""}
                   <button class="button button-ghost profile-row-detail" title="查看和编辑完整信息" data-action="view-profile-details" data-id="${profile.id}" ${state.busy ? "disabled" : ""}>详情</button>
                 </div>
               </div>
@@ -2350,19 +2717,132 @@ function renderThirdPartyConfigFields(readOnly: boolean): string {
   const selectedOauthProfileId = resolveSymbioticOauthProfileId();
   const isSymbiotic = state.editor.thirdParty.template === "symbioticThirdParty";
   const missingOauth = isSymbiotic && officialProfiles.length === 0;
-  const tokenLabel = isSymbiotic ? "experimental_bearer_token" : "OPENAI_API_KEY value";
   const tokenPlaceholder = isSymbiotic ? "第三方 API token" : "sk-...";
+
+  // Build the option panels layout depending on selection
+  let gridContentHtml = "";
+  if (isSymbiotic) {
+    gridContentHtml = `
+      <label class="field full-width">
+        <span>复用官方 OAuth 账号</span>
+        <select id="symbiotic-oauth-profile" ${disabled || missingOauth ? "disabled" : ""}>
+          ${officialProfiles
+            .map(
+              (profile) => `
+                <option value="${escapeHtml(profile.id)}" ${profile.id === selectedOauthProfileId ? "selected" : ""}>
+                  ${escapeHtml(profile.name)}
+                </option>
+              `,
+            )
+            .join("")}
+        </select>
+        <span class="field-hint">共生模式必须借用一个官方已登录账号的鉴权状态。</span>
+      </label>
+
+      <label class="field">
+        <span>提供商代码 <code class="raw-key">model_provider</code></span>
+        <input
+          id="third-party-provider"
+          type="text"
+          value="${escapeHtml(state.editor.thirdParty.provider)}"
+          placeholder="ylscode"
+          ${disabled}
+        />
+        <span class="field-hint">提供商简码，建议小写拼音或英文。</span>
+      </label>
+
+      <label class="field">
+        <span>默认模型 <code class="raw-key">model</code></span>
+        <input
+          id="third-party-model"
+          type="text"
+          value="${escapeHtml(state.editor.thirdParty.model)}"
+          placeholder="gpt-5.4"
+          ${disabled}
+        />
+        <span class="field-hint">默认请求的模型名称，例如 deepseek-chat。</span>
+      </label>
+
+      <label class="field full-width">
+        <span>接口地址 <code class="raw-key">base_url</code></span>
+        <input
+          id="third-party-base-url"
+          type="url"
+          value="${escapeHtml(state.editor.thirdParty.baseUrl)}"
+          placeholder="https://example.com/v1"
+          ${disabled}
+        />
+        <span class="field-hint">第三方服务商的 API 基础端点地址。</span>
+      </label>
+
+      <label class="field full-width">
+        <span>API 密钥 <code class="raw-key">experimental_bearer_token</code></span>
+        <input
+          id="third-party-api-key"
+          type="password"
+          value="${escapeHtml(state.editor.thirdParty.apiKey)}"
+          placeholder="${escapeHtml(tokenPlaceholder)}"
+          autocomplete="off"
+          ${disabled}
+        />
+        <span class="field-hint">用于共生接口请求的 Bearer Token / 密钥。</span>
+      </label>
+    `;
+  } else {
+    gridContentHtml = `
+      <label class="field full-width">
+        <span>接口地址 <code class="raw-key">openai_base_url</code></span>
+        <input
+          id="third-party-base-url"
+          type="url"
+          value="${escapeHtml(state.editor.thirdParty.baseUrl)}"
+          placeholder="https://example.com/v1"
+          ${disabled}
+        />
+        <span class="field-hint">第三方 API 的基础路径，兼容 OpenAI 格式。</span>
+      </label>
+
+      <label class="field">
+        <span>API 密钥 <code class="raw-key">OPENAI_API_KEY</code></span>
+        <input
+          id="third-party-api-key"
+          type="password"
+          value="${escapeHtml(state.editor.thirdParty.apiKey)}"
+          placeholder="${escapeHtml(tokenPlaceholder)}"
+          autocomplete="off"
+          ${disabled}
+        />
+        <span class="field-hint">您的 API 密钥，仅保存在本地。</span>
+      </label>
+
+      <label class="field">
+        <span>默认模型 <code class="raw-key">model</code></span>
+        <input
+          id="third-party-model"
+          type="text"
+          value="${escapeHtml(state.editor.thirdParty.model)}"
+          placeholder="gpt-5.5"
+          ${disabled}
+        />
+        <span class="field-hint">默认请求的模型名称，例如 deepseek-chat。</span>
+      </label>
+    `;
+  }
+
   return `
     <section class="third-party-delta-card" data-role="third-party-delta-form">
-      <div>
+      <div class="delta-card-header" style="display: none;">
         <p class="eyebrow">Third-party API</p>
-        <h2>${isSymbiotic ? "共生配置" : "只填写第三方 API 的差异量"}</h2>
-        <p>${isSymbiotic
-          ? "复用已经登录的官方 OAuth 账号，同时把模型请求转到第三方 API。"
-          : "保存时会自动生成 auth.json 和 config.toml，不会要求你手写完整配置。"}</p>
+        <h2 style="font-size: 1.25rem; font-weight: 750; color: var(--text-main); margin: 0 0 6px 0;">${isSymbiotic ? "共生配置" : "只填写第三方 API 的差异量"}</h2>
+        <p style="font-size: 0.85rem; color: var(--text-muted); margin: 0 0 16px 0; line-height: 1.4;">
+          ${isSymbiotic
+            ? "复用已经登录的官方 OAuth 账号，同时把模型请求转到第三方 API。"
+            : "保存时会自动生成 auth.json 和 config.toml，不会要求你手写完整配置。"}
+        </p>
       </div>
+
       <div class="profile-template-options" data-role="profile-template-options">
-        <label>
+        <label class="template-card-option">
           <input
             id="profile-template-standalone"
             name="profile-template"
@@ -2371,9 +2851,12 @@ function renderThirdPartyConfigFields(readOnly: boolean): string {
             ${state.editor.thirdParty.template === "standaloneThirdParty" ? "checked" : ""}
             ${disabled}
           />
-          <span>独立第三方 API</span>
+          <div class="option-content">
+            <span class="option-title">独立第三方 API</span>
+            <span class="option-desc">仅配置第三方接口与模型参数，与官方登录账号互不干扰。</span>
+          </div>
         </label>
-        <label>
+        <label class="template-card-option">
           <input
             id="profile-template-symbiotic"
             name="profile-template"
@@ -2382,86 +2865,166 @@ function renderThirdPartyConfigFields(readOnly: boolean): string {
             ${isSymbiotic ? "checked" : ""}
             ${disabled}
           />
-          <span>共生配置</span>
+          <div class="option-content">
+            <span class="option-title">共生配置</span>
+            <span class="option-desc">复用已登录的官方 OAuth 账号授权，同时把模型调用转到第三方接口。</span>
+          </div>
         </label>
       </div>
-      ${isSymbiotic
-        ? `
-          <aside class="flash flash-info" data-role="symbiotic-enhanced-launch-hint">
-            <span>共生配置已经替代增强启动；插件入口会通过官方 OAuth 登录状态保持可用，不再需要单独执行增强启动。</span>
-          </aside>
-          <label class="field">
-            <span>复用官方 OAuth 账号</span>
-            <select id="symbiotic-oauth-profile" ${disabled || missingOauth ? "disabled" : ""}>
-              ${officialProfiles
-                .map(
-                  (profile) => `
-                    <option value="${escapeHtml(profile.id)}" ${profile.id === selectedOauthProfileId ? "selected" : ""}>
-                      ${escapeHtml(profile.name)}
-                    </option>
-                  `,
-                )
-                .join("")}
-            </select>
-          </label>
-          ${missingOauth
-            ? `
-              <aside class="flash flash-info" data-role="symbiotic-oauth-missing">
-                <span>请先登录并保存一个官方 OAuth 账号，再创建共生配置。</span>
-              </aside>
-            `
-            : ""}
-        `
-        : ""}
-      <div class="third-party-delta-grid">
-        ${isSymbiotic
+
+      ${
+        isSymbiotic
           ? `
-            <label class="field">
-              <span>model_provider</span>
-              <input
-                id="third-party-provider"
-                type="text"
-                value="${escapeHtml(state.editor.thirdParty.provider)}"
-                placeholder="ylscode"
-                ${disabled}
-              />
-            </label>
+            <aside class="flash flash-info" data-role="symbiotic-enhanced-launch-hint" style="margin: 4px 0 12px 0; padding: 12px 14px;">
+              <span style="font-size: 0.82rem; line-height: 1.4;">共生配置已经替代增强启动；插件入口会通过官方 OAuth 登录状态保持可用，不再需要单独执行增强启动。</span>
+            </aside>
           `
-          : ""}
-        <label class="field">
-          <span>${isSymbiotic ? "base_url" : "openai_base_url"}</span>
-          <input
-            id="third-party-base-url"
-            type="url"
-            value="${escapeHtml(state.editor.thirdParty.baseUrl)}"
-            placeholder="https://example.com/v1"
-            ${disabled}
-          />
-        </label>
-        <label class="field">
-          <span>${tokenLabel}</span>
-          <input
-            id="third-party-api-key"
-            type="password"
-            value="${escapeHtml(state.editor.thirdParty.apiKey)}"
-            placeholder="${escapeHtml(tokenPlaceholder)}"
-            autocomplete="off"
-            ${disabled}
-          />
-        </label>
-        <label class="field">
-          <span>model</span>
-          <input
-            id="third-party-model"
-            type="text"
-            value="${escapeHtml(state.editor.thirdParty.model)}"
-            placeholder="gpt-5.4"
-            ${disabled}
-          />
-        </label>
+          : ""
+      }
+
+      ${
+        isSymbiotic && missingOauth
+          ? `
+            <aside class="flash flash-error" data-role="symbiotic-oauth-missing" style="margin: 4px 0 12px 0; padding: 12px 14px;">
+              <span style="font-size: 0.82rem; line-height: 1.4;">错误：请先登录并保存一个官方 OAuth 账号，再创建共生配置。</span>
+            </aside>
+          `
+          : ""
+      }
+
+      <div class="third-party-delta-grid">
+        ${gridContentHtml}
       </div>
     </section>
   `;
+}
+
+function renderNewProfileTabSelector(): string {
+  const currentTab = state.editor.newTab || "manual-delta";
+  return `
+    <div class="editor-template-tabs" data-role="editor-template-tabs">
+      <button class="tab-btn ${currentTab === "manual-delta" ? "active" : ""}" data-action="editor-tab-delta">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+        极简第三方 API
+      </button>
+      <button class="tab-btn ${currentTab === "manual-full" ? "active" : ""}" data-action="editor-tab-full">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+        空白完整配置
+      </button>
+      <button class="tab-btn ${currentTab === "network" ? "active" : ""}" data-action="editor-tab-network">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"></path></svg>
+        从云端共享库导入
+      </button>
+    </div>
+  `;
+}
+
+function renderNewPageNetworkSection(): string {
+  const authPrompt = `
+    <div data-role="network-auth-prompt" style="display:flex; flex-direction:column; align-items:center; gap:10px; margin-top:14px;">
+      <p style="max-width:520px; color:var(--text-muted); line-height:1.5;">
+        云端共享库需要钉钉 SSO 登录。完成登录后客户端会自动连接企业共享库。
+      </p>
+      <div class="content-actions" style="justify-content:center; flex-wrap:wrap;">
+        <button class="button button-primary" data-action="open-network-sso-login">
+          钉钉 SSO 登录
+        </button>
+        <button class="button button-secondary" data-action="refresh-network-in-editor">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+          重新加载
+        </button>
+      </div>
+    </div>
+  `;
+
+  if (state.networkLoading) {
+    return `
+      <div class="empty-state" style="border:none;background:transparent;padding:48px 0;">
+        <div class="busy-dialog-spinner" style="margin: 0 auto 16px auto; width: 28px; height: 28px;"></div>
+        <p style="color:var(--text-muted);">正在获取云端共享配置，请稍候...</p>
+      </div>
+    `;
+  }
+
+  if (state.networkAuthRequired || !state.networkSharing.token.trim()) {
+    return `
+      <div class="empty-state">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--text-muted);margin-bottom:12px;"><path d="M15 3h4a2 2 0 0 1 2 2v4"></path><path d="M10 14 21 3"></path><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path></svg>
+        <h3>需要登录企业共享库</h3>
+        ${authPrompt}
+      </div>
+    `;
+  }
+
+  if (state.networkProfiles.length === 0) {
+    return `
+      <div class="empty-state">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--text-muted);margin-bottom:12px;"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"></path></svg>
+        <h3>云端共享库为空</h3>
+        <p>目前还没有任何云端共享的配置文件。</p>
+        <button class="button button-secondary" data-action="refresh-network-in-editor" style="margin-top:12px;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+          重新加载
+        </button>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="network-section-header" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+      <h3 style="font-size:1.1rem; font-weight:700; color:var(--text-main); margin:0;">可用云端共享配置 (${state.networkProfiles.length})</h3>
+      <button class="button button-secondary" data-action="refresh-network-in-editor" style="padding:4px 10px; font-size:0.8rem; height:28px; display:inline-flex; align-items:center; gap:4px;">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+        <span>刷新列表</span>
+      </button>
+    </div>
+    <div class="card-grid" style="grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; margin-bottom: 24px;">
+      ${state.networkProfiles.map((profile) => `
+        <article class="card profile-card" style="padding: 16px; display: flex; flex-direction: column; justify-content: space-between; min-height: 160px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-panel); transition: all 0.2s;">
+          <div>
+            <div class="card-head" style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px; margin-bottom:8px;">
+              <h4 style="font-size:1rem; font-weight:700; color:var(--text-main); margin:0;" title="${escapeHtml(profile.name)}">${escapeHtml(profile.name)}</h4>
+              <span class="pill pill-type" style="font-size:0.7rem; padding: 2px 6px; color:var(--text-muted); border-color:var(--border-light); background:var(--bg-page); flex-shrink: 0;">☁️ 远程</span>
+            </div>
+            <p style="font-size:0.85rem; color:var(--text-muted); margin: 0 0 12px 0; display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;text-overflow:ellipsis;line-height:1.4;">${escapeHtml(profile.description || "云端共享配置")}</p>
+          </div>
+          <div style="display:flex; justify-content:space-between; align-items:center; border-top:1px solid var(--border-light); padding-top:12px; margin-top:auto;">
+            <span style="font-size:0.75rem; color:var(--text-muted);">更新: ${formatDateTime(profile.createdAt).split(" ")[0]}</span>
+            <div style="display:flex; gap:8px;">
+              <button class="button button-ghost" data-action="view-network-profile-details" data-id="${profile.id}" style="padding: 4px 8px; font-size: 0.8rem; height: 28px;">
+                详情
+              </button>
+              <button class="button button-primary" data-action="import-network-profile-to-editor" data-id="${profile.id}" style="padding: 4px 10px; font-size: 0.8rem; height: 28px; display:inline-flex; align-items:center; gap:2px;">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                导入
+              </button>
+            </div>
+          </div>
+        </article>
+      `).join("")}
+    </div>
+  `;
+}
+
+async function importNetworkProfileToEditor(networkProfileId: string): Promise<void> {
+  setBusy(true);
+  try {
+    const document = await fetchNetworkProfileDocument(networkProfileId);
+    state.editor.name = document.name;
+    state.editor.notes = document.notes;
+    state.editor.authJson = document.authJson;
+    state.editor.configToml = document.configToml;
+    state.editor.newTab = "manual-full";
+    state.editor.source = "local";
+    state.editor.readOnly = false;
+    clearFlash();
+    setFlash("success", `已将共享配置「${document.name}」导入编辑器，您可以继续编辑并保存。`);
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    setBusy(false);
+    render();
+  }
 }
 
 function escapeHtml(value: string): string {
@@ -2541,55 +3104,39 @@ function renderCardsPage(snapshot: AppSnapshot): string {
     if (b.id === snapshot.activeProfileId) return 1;
     return 0;
   });
-  const hasPendingUpdate = state.update.lastResult?.hasUpdate ?? false;
-  const currentVersionText = state.update.lastResult?.currentVersion ?? state.appVersion ?? "--";
-  const updateLabelText = hasPendingUpdate ? "发现新版本" : "当前版本";
-  const updateVersionText = hasPendingUpdate
-    ? `v${state.update.lastResult?.latestVersion ?? "--"}`
-    : `v${currentVersionText}`;
-  const updateActionText = state.update.checking
-    ? "检查中…"
-    : hasPendingUpdate
-      ? state.update.lastResult?.canInstall
-        ? "立即更新"
-        : "下载新版"
-      : "检查更新";
-  const updateHint = hasPendingUpdate
-    ? state.update.lastResult?.canInstall
-      ? `当前 v${currentVersionText}，点击下载并安装`
-      : `当前 v${currentVersionText}，点击获取安装包`
-    : "通过内网镜像检查更新";
-  const updateEntryClass = hasPendingUpdate
-    ? "version-update-entry version-update-entry-available"
-    : "version-update-entry";
 
   return `
     <section class="cards-page" data-page="cards">
       <header class="content-header" data-tauri-drag-region>
-        <div class="tabs">
-          <button class="tab-button ${state.activeTab === 'local' ? 'active' : ''}" data-action="tab-local">本地档案</button>
-          <button class="tab-button ${state.activeTab === 'network' ? 'active' : ''}" data-action="tab-network">网络共享库</button>
+        <div class="header-title">
+          <h2>配置管理</h2>
+          <span class="header-subtitle">共 ${snapshot.profiles.length} 个本地配置文件</span>
         </div>
         <div class="content-actions">
-          <button class="button button-primary" data-role="add-card" data-action="new-profile">+ 新建配置</button>
-          <button class="icon-button section-refresh-button" title="刷新状态" data-role="global-refresh" data-action="refresh" ${state.busy ? "disabled" : ""}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+          <button class="button button-secondary" title="重新从本地目录读取配置文件" data-role="global-refresh" data-action="refresh" ${state.busy ? "disabled" : ""}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+            <span>同步本地配置</span>
+          </button>
+          <button class="button button-primary" data-role="add-card" data-action="new-profile" ${state.busy ? "disabled" : ""}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            新建配置
           </button>
         </div>
       </header>
 
-      ${state.activeTab === 'local' ? `
       <section class="grid-container">
         <div class="section-header">
-          <h3 class="section-title">已保存的配置文件 (${snapshot.profiles.length})</h3>
+          <h3 class="section-title">已保存的配置文件</h3>
           <div class="section-actions">
             <button
               class="button button-secondary"
               data-action="refresh-all-codex-usage"
+              title="连接 API 接口以获取并更新所有配置的最新额度使用情况"
               ${state.busy || isPendingActionPrefix("codex-usage") ? "disabled" : ""}
-              style="padding: 6px 12px; font-size: 0.82rem; height: 32px;"
+              style="padding: 6px 12px; font-size: 0.82rem; height: 32px; display: inline-flex; align-items: center; gap: 4px;"
             >
-              ${isPendingAction(refreshAllUsageActionKey) ? "刷新中..." : "刷新全部额度"}
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"></line><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
+              <span>${isPendingAction(refreshAllUsageActionKey) ? "更新中..." : "更新全部额度用量"}</span>
             </button>
             ${renderProfileLayoutToggle()}
           </div>
@@ -2600,67 +3147,6 @@ function renderCardsPage(snapshot: AppSnapshot): string {
             : renderProfileGrid(snapshot, orderedProfiles)
         }
       </section>
-      ` : `
-      <section class="grid-container">
-        <div class="section-header">
-          <h3 class="section-title">网络共享库 (${state.networkProfiles.length})</h3>
-          <button class="icon-button section-refresh-button" title="刷新状态" data-role="global-refresh" data-action="refresh" ${state.busy ? "disabled" : ""}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
-          </button>
-        </div>
-        ${state.networkLoading ? `
-          <div class="empty-state" style="border:none;background:transparent;">
-            <p>正在获取网络共享配置，请稍候...</p>
-          </div>
-        ` : `
-          <div class="card-grid">
-            ${state.networkProfiles.length === 0 ? `
-              <div class="empty-state">
-                <h3>暂无网络存档</h3>
-                <p>资源分发中心目前还没有任何共享配置。</p>
-              </div>
-            ` : ""}
-            ${state.networkProfiles.map((profile) => `
-              <article class="card profile-card" data-role="profile-card">
-                <div class="card-head">
-                  <h2>${escapeHtml(profile.name)}</h2>
-                  <span class="pill pill-type" style="color:var(--text-main);border-color:var(--border);background:transparent;">☁️ 远程资源</span>
-                </div>
-                <p class="card-note">${escapeHtml(profile.description || "提供自线上团队分享")}</p>
-                
-                <div class="card-actions-overlay">
-                  <div style="display: flex; flex-direction: column; gap: 4px; flex-grow: 1;">
-                    <p class="card-date">上传于：${formatDateTime(profile.createdAt)}</p>
-                    <button
-                      class="button button-primary"
-                      data-action="download-and-apply"
-                      data-id="${profile.id}"
-                      data-name="${escapeHtml(profile.name)}"
-                      ${state.busy ? "disabled" : ""}
-                      style="width: 100%;"
-                    >
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-                      安装并应用
-                    </button>
-                  </div>
-                  <div class="card-secondary-actions" style="align-self: flex-end; padding-bottom: 2px;">
-                    <button
-                      class="icon-button"
-                      title="查看共享配置详情"
-                      data-action="view-network-profile-details"
-                      data-id="${profile.id}"
-                      ${state.busy ? "disabled" : ""}
-                    >
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"></path><circle cx="12" cy="12" r="3"></circle></svg>
-                    </button>
-                  </div>
-                </div>
-              </article>
-            `).join("")}
-          </div>
-        `}
-      </section>
-      `}
     </section>
   `;
 }
@@ -2674,13 +3160,19 @@ function renderEditorPage(): string {
   const readOnly = state.editor.readOnly;
   const saveDisabled = state.busy || editorCannotSaveBecauseMissingOauth();
   const editorProfile = getEditorProfileSummary(snapshot);
+
+  const showTabs = state.editor.mode === "new";
+  const currentTab = state.editor.newTab || "manual-delta";
+
   const title =
     readOnly
-      ? "查看网络共享配置"
+      ? (state.editor.name || "查看网络共享配置")
       : state.editor.mode === "fromCurrent"
       ? "保存当前 Codex 配置为新 Profile"
       : existing
-        ? "查看和编辑 Profile"
+        ? (state.editor.name || "查看和编辑 Profile")
+        : currentTab === "network"
+        ? "从云端共享库导入"
         : "手动创建新 Profile";
 
   const subtitle =
@@ -2689,8 +3181,160 @@ function renderEditorPage(): string {
       : state.editor.mode === "fromCurrent"
       ? "把当前 `.codex` 里的内容复制成一套新的 profile。"
       : existing
-        ? "你现在编辑的是已保存 profile 的完整配置文本。"
-        : "直接手工填写名称、备注以及两份配置内容。";
+        ? "查看和编辑此 Profile 的配置文本。"
+        : currentTab === "network"
+        ? "选择一个可用的云端共享配置模板并导入到编辑器。"
+        : "直接手工填写名称、备注以及配置内容。";
+
+  let bodyContent = "";
+  if (showTabs && currentTab === "network") {
+    bodyContent = `
+      <section class="new-profile-network-section">
+        ${renderNewPageNetworkSection()}
+      </section>
+    `;
+  } else {
+    const configFields = (showTabs && currentTab === "manual-delta")
+      ? renderThirdPartyConfigFields(readOnly)
+      : `
+        <div class="editor-panels">
+          <div class="code-editor-card">
+            <div class="code-editor-header">
+              <span class="code-editor-title">auth.json</span>
+              <span class="code-editor-format">JSON</span>
+            </div>
+            <textarea
+              id="editor-auth-json"
+              class="code-textarea"
+              spellcheck="false"
+              ${state.busy || readOnly ? "disabled" : ""}
+            >${escapeHtml(state.editor.authJson)}</textarea>
+          </div>
+
+          <div class="code-editor-card">
+            <div class="code-editor-header">
+              <span class="code-editor-title">config.toml</span>
+              <span class="code-editor-format">TOML</span>
+            </div>
+            <textarea
+              id="editor-config-toml"
+              class="code-textarea"
+              spellcheck="false"
+              ${state.busy || readOnly ? "disabled" : ""}
+            >${escapeHtml(state.editor.configToml)}</textarea>
+          </div>
+        </div>
+      `;
+
+    bodyContent = `
+      <div class="editor-layout-grid">
+        <!-- Left Main Column: Config inputs / textareas -->
+        <div class="editor-main-column">
+          ${configFields}
+        </div>
+
+        <!-- Right Sidebar Column: Metadata & stats -->
+        <div class="editor-sidebar-column">
+          <!-- Profile Basic Info Card -->
+          <div class="sidebar-card">
+            <div class="sidebar-card-title">基本信息</div>
+            <label class="field">
+              <span>Profile 名称</span>
+              <input
+                id="editor-name"
+                type="text"
+                value="${escapeHtml(state.editor.name)}"
+                placeholder="例如：淘宝 1 / Work / Backup"
+                ${state.busy || readOnly ? "disabled" : ""}
+              />
+            </label>
+
+            <label class="field" style="margin-top: 16px;">
+              <span>备注</span>
+              <textarea
+                id="editor-notes"
+                rows="3"
+                placeholder="写一点识别信息，比如账号用途、邮箱、额度状态"
+                ${state.busy || readOnly ? "disabled" : ""}
+              >${escapeHtml(state.editor.notes)}</textarea>
+            </label>
+
+            ${readOnly
+              ? (state.editor.source === "network"
+                ? `
+                  <div class="sidebar-actions">
+                    <button class="button button-primary button-full" data-action="import-current-network-profile" ${state.busy ? "disabled" : ""}>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;"><polyline points="4 17 10 11 16 17"></polyline><polyline points="4 6 10 12 16 6"></polyline></svg>
+                      导入并编辑配置
+                    </button>
+                  </div>
+                `
+                : "")
+              : (showTabs && currentTab === "network")
+                ? ""
+                : `
+                  <div class="sidebar-actions">
+                    <button class="button button-primary button-full" data-action="save-and-switch" ${saveDisabled ? "disabled" : ""}>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                      ${existing ? "保存并立即启动" : "创建并立即启动"}
+                    </button>
+                    ${existing && editorProfile?.authTypeLabel === "第三方 API" && state.editor.profileId
+                      ? `
+                        <button class="button button-secondary button-full" style="border-color: var(--accent); color: var(--accent); margin-bottom: 4px;" data-action="generate-symbiotic" data-id="${state.editor.profileId}">
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+                          生成共生配置
+                        </button>
+                      `
+                      : ""
+                    }
+                    <div class="sidebar-actions-row">
+                      <button class="button button-secondary" data-action="save-editor" ${saveDisabled ? "disabled" : ""}>
+                        ${existing
+                          ? `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>保存修改`
+                          : `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>创建配置`
+                        }
+                      </button>
+                      ${existing && state.editor.profileId
+                        ? `
+                          <button
+                            class="button button-danger"
+                            data-action="delete-profile"
+                            data-id="${state.editor.profileId}"
+                            data-name="${escapeHtml(state.editor.name)}"
+                            ${state.busy ? "disabled" : ""}
+                          >
+                            删除
+                          </button>
+                        `
+                        : ""
+                      }
+                    </div>
+                  </div>
+                `
+            }
+          </div>
+
+          <!-- Runtime panel (Quota metrics, speed tests) -->
+          ${renderEditorRuntimePanel(snapshot, editorProfile)}
+
+          <!-- Metadata card (Creation/Update time) -->
+          ${existing || readOnly ? `
+            <div class="sidebar-card metadata-card">
+              <div class="sidebar-card-title">版本与时间</div>
+              <div class="meta-row">
+                <span class="meta-label">创建时间</span>
+                <span class="meta-value">${formatDateTime(state.editor.createdAt)}</span>
+              </div>
+              <div class="meta-row">
+                <span class="meta-label">最近更新</span>
+                <span class="meta-value">${formatDateTime(state.editor.updatedAt)}</span>
+              </div>
+            </div>
+          ` : ""}
+        </div>
+      </div>
+    `;
+  }
 
   return `
     <section class="editor-page" data-page="editor">
@@ -2701,51 +3345,11 @@ function renderEditorPage(): string {
             返回卡片网格
           </button>
           <div>
-            <p class="eyebrow">Profile Detail</p>
-            <h1>${title}</h1>
-            <p class="page-copy">${subtitle}</p>
+            <p class="eyebrow" style="display: none;">Profile Detail</p>
+            <h1 style="margin-top: 4px;">${title}</h1>
+            <p class="page-copy" style="display: none;">${subtitle}</p>
           </div>
         </div>
-        ${readOnly
-          ? ""
-          : `
-            <div class="editor-header-actions">
-              ${
-                existing
-                  ? `
-                    <button class="button button-secondary" data-action="save-editor" ${saveDisabled ? "disabled" : ""}>
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:2px;"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
-                      保存修改
-                    </button>
-                  `
-                  : `
-                    <button class="button button-secondary" data-action="save-editor" ${saveDisabled ? "disabled" : ""}>
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:2px;"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-                      创建配置
-                    </button>
-                  `
-              }
-              <button class="button button-primary" data-action="save-and-switch" ${saveDisabled ? "disabled" : ""}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:2px;"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
-                ${existing ? "保存并立即启动" : "创建并立即启动"}
-              </button>
-              ${
-                existing && state.editor.profileId
-                  ? `
-                    <button
-                      class="button button-danger"
-                      data-action="delete-profile"
-                      data-id="${state.editor.profileId}"
-                      data-name="${escapeHtml(state.editor.name)}"
-                      ${state.busy ? "disabled" : ""}
-                    >
-                      删除
-                    </button>
-                  `
-                  : ""
-              }
-            </div>
-          `}
       </header>
 
       ${readOnly
@@ -2764,71 +3368,9 @@ function renderEditorPage(): string {
         `
         : ""}
 
-      <section class="editor-meta">
-        <div class="meta-chip">
-          <span>创建时间</span>
-          <strong>${formatDateTime(state.editor.createdAt)}</strong>
-        </div>
-        <div class="meta-chip">
-          <span>最近更新</span>
-          <strong>${formatDateTime(state.editor.updatedAt)}</strong>
-        </div>
-      </section>
+      ${showTabs ? renderNewProfileTabSelector() : ""}
 
-      ${renderEditorRuntimePanel(snapshot, editorProfile)}
-
-      <section class="editor-body">
-        <label class="field">
-          <span>Profile 名称</span>
-          <input
-            id="editor-name"
-            type="text"
-            value="${escapeHtml(state.editor.name)}"
-            placeholder="例如：淘宝 1 / Work / Backup"
-            ${state.busy || readOnly ? "disabled" : ""}
-          />
-        </label>
-
-        <label class="field">
-          <span>备注</span>
-          <textarea
-            id="editor-notes"
-            rows="3"
-            placeholder="写一点识别信息，比如账号用途、邮箱、额度状态"
-            ${state.busy || readOnly ? "disabled" : ""}
-          >${escapeHtml(state.editor.notes)}</textarea>
-        </label>
-
-        ${
-          state.editor.mode === "new"
-            ? renderThirdPartyConfigFields(readOnly)
-            : `
-              <div class="editor-panels">
-                <label class="field">
-                  <span>auth.json</span>
-                  <textarea
-                    id="editor-auth-json"
-                    class="code-textarea"
-                    rows="18"
-                    spellcheck="false"
-                    ${state.busy || readOnly ? "disabled" : ""}
-                  >${escapeHtml(state.editor.authJson)}</textarea>
-                </label>
-
-                <label class="field">
-                  <span>config.toml</span>
-                  <textarea
-                    id="editor-config-toml"
-                    class="code-textarea"
-                    rows="18"
-                    spellcheck="false"
-                    ${state.busy || readOnly ? "disabled" : ""}
-                  >${escapeHtml(state.editor.configToml)}</textarea>
-                </label>
-              </div>
-            `
-        }
-      </section>
+      ${bodyContent}
     </section>
   `;
 }
@@ -2847,13 +3389,16 @@ function render(): void {
     content = renderCardsPage(snapshot);
   } else if (state.view === "settings") {
     content = renderSettingsPage();
+  } else if (state.view === "sessions") {
+    content = renderSessionsPage();
+  } else if (state.view === "session-cleanup") {
+    content = renderSessionCleanupPage();
   } else {
     content = renderEditorPage();
   }
 
   const hasPendingUpdate = state.update.lastResult?.hasUpdate ?? false;
   const currentVersionText = state.update.lastResult?.currentVersion ?? state.appVersion ?? "--";
-  const updateLabelText = hasPendingUpdate ? "发现新版本" : "检查更新";
   const updateVersionText = hasPendingUpdate
     ? `v${state.update.lastResult?.latestVersion ?? "--"}`
     : `v${currentVersionText}`;
@@ -2862,12 +3407,29 @@ function render(): void {
     <div class="app-layout">
       <aside class="app-sidebar">
         <div class="sidebar-header">
-          <div class="app-logo">Codex Auth</div>
+          <div class="app-logo">
+            <svg class="app-logo-icon" viewBox="0 0 24 24" width="24" height="24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <defs>
+                <linearGradient id="logo-grad" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">
+                  <stop offset="0%" stop-color="#22D3EE"/>
+                  <stop offset="100%" stop-color="#4F46E5"/>
+                </linearGradient>
+              </defs>
+              <rect x="2" y="2" width="20" height="20" rx="6" fill="url(#logo-grad)"/>
+              <rect x="6" y="9" width="12" height="6" rx="3" fill="rgba(255,255,255,0.2)" stroke="#FFFFFF" stroke-width="1.2"/>
+              <circle cx="13.5" cy="12" r="2.2" fill="#FFFFFF"/>
+            </svg>
+            <span>Codex 助手</span>
+          </div>
         </div>
         <nav class="sidebar-nav">
           <button class="nav-item ${state.view === 'cards' || state.view === 'editor' ? 'active' : ''}" data-action="nav-profiles">
             <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
             配置管理
+          </button>
+          <button class="nav-item ${state.view === 'sessions' ? 'active' : ''}" data-action="nav-sessions">
+            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+            会话管理
           </button>
           <button class="nav-item ${state.view === 'settings' ? 'active' : ''}" data-action="nav-settings">
             <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
@@ -2875,13 +3437,16 @@ function render(): void {
           </button>
         </nav>
         <div class="sidebar-footer">
-          <button class="nav-item ${hasPendingUpdate ? 'version-update-entry-available' : ''}" data-role="update-entry" data-action="check-update" style="display: flex; justify-content: space-between;">
-            <div style="display:flex; align-items:center; gap: 12px;">
-              <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M2.13 15.57a10 10 0 1 0 3.4-9.26L2.5 8"></path></svg>
-              <span>${updateLabelText}</span>
-            </div>
-            <span style="font-size: 0.8rem; font-weight: bold; color: ${hasPendingUpdate ? 'var(--danger)' : 'var(--text-muted)'}">${updateVersionText}</span>
-          </button>
+          <div class="version-status ${state.update.checking ? 'version-status-checking' : hasPendingUpdate ? 'version-status-update' : 'version-status-latest'}" data-role="update-entry" data-action="check-update" style="display: flex; align-items: center; gap: 8px; cursor: pointer;" title="${hasPendingUpdate ? '有新版本，点击下载并安装' : '最新版本，点击重新检查'}">
+            <span class="version-status-dot"></span>
+            <span>${
+              state.update.checking
+                ? "检测版本中..."
+                : hasPendingUpdate
+                  ? `有新版本 ${updateVersionText}`
+                  : `最新版 v${currentVersionText}`
+            }</span>
+          </div>
         </div>
       </aside>
       <main class="app-main-content">
@@ -2900,14 +3465,57 @@ function renderSettingsPage(): string {
   const writingThirdPartyWebsocketsDefaults = isPendingAction(
     writeThirdPartyWebsocketsDefaultsActionKey,
   );
-  
+
   return `
     <section class="cards-page" data-page="settings">
       <header class="content-header" data-tauri-drag-region>
         <h2>全局设置</h2>
       </header>
-      
-      <div class="grid-container" style="max-width: 600px;">
+
+      <div class="grid-container" style="max-width: 760px;">
+        <div class="card">
+          <div class="card-head">
+            <h3>企业共享库</h3>
+          </div>
+          <p class="card-note">从这里打开钉钉 SSO 登录页，登录完成后客户端会自动连接企业共享库。客户端只会拉取您有权限访问的配置。</p>
+          <div style="display:grid; gap: 14px; margin-top: 16px;">
+            <label class="field">
+              <span>共享库 API 地址</span>
+              <input
+                id="network-profiles-api"
+                type="url"
+                value="${escapeHtml(state.networkSharing.profilesApi)}"
+                placeholder="${escapeHtml(DEFAULT_NETWORK_PROFILES_API)}"
+              />
+            </label>
+            <label class="field">
+              <span>桌面访问令牌</span>
+              <input
+                id="network-profile-token"
+                type="password"
+                value="${escapeHtml(state.networkSharing.token)}"
+                placeholder="cas_..."
+                autocomplete="off"
+              />
+            </label>
+            <div class="content-actions">
+              <button class="button button-primary" data-action="open-network-sso-login">
+                钉钉 SSO 登录
+              </button>
+              <a class="button button-secondary" href="${escapeHtml(networkPortalBaseUrl())}/profiles" target="_blank" rel="noreferrer">
+                打开共享库网页
+              </a>
+            </div>
+            <div class="content-actions">
+              <button class="button button-primary" data-action="save-network-sharing-settings">
+                保存共享库设置
+              </button>
+              <button class="button button-secondary" data-action="refresh-network-after-settings">
+                保存并刷新共享库
+              </button>
+            </div>
+          </div>
+        </div>
         <div class="card">
           <div class="card-head">
             <h3>数据迁移</h3>
@@ -2935,11 +3543,779 @@ function renderSettingsPage(): string {
   `;
 }
 
+function getSessionsListHtml(): string {
+  // Filter sessions
+  let filtered = state.sessions;
+  if (state.sessionFilter === "active") {
+    filtered = filtered.filter(s => !s.archived);
+  } else if (state.sessionFilter === "archived") {
+    filtered = filtered.filter(s => s.archived);
+  }
+
+  // Search filter
+  const query = state.sessionSearchQuery.toLowerCase().trim();
+  if (query) {
+    filtered = filtered.filter(s =>
+      (s.title && s.title.toLowerCase().includes(query)) ||
+      s.id.toLowerCase().includes(query) ||
+      (s.cwd && s.cwd.toLowerCase().includes(query))
+    );
+  }
+
+  // Formatting helper for size
+  const formatSize = (bytes?: number | null) => {
+    if (bytes === undefined || bytes === null) return "未知大小";
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
+  const selectedSession = state.sessions.find(s => s.id === state.selectedSessionId);
+
+  // Rendering session list (left pane content)
+  let listHtml = "";
+  if (state.sessionsLoading) {
+    listHtml = `
+      <div class="sessions-empty-state" style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 40px 20px;">
+        <div class="busy-dialog-spinner" style="margin: 0 auto; width: 24px; height: 24px; border-width: 2px;"></div>
+        <span style="color: var(--text-muted); font-size: 0.85rem;">正在加载会话列表...</span>
+      </div>
+    `;
+  } else if (filtered.length === 0) {
+    listHtml = `<div class="sessions-empty-state">没有找到符合条件的会话</div>`;
+  } else if (state.sessionSortOrder === "cwd") {
+    // Group by CWD
+    const groups: Record<string, CodexSessionInfo[]> = {};
+    for (const s of filtered) {
+      const cwd = s.cwd || "未指定工作空间";
+      if (!groups[cwd]) groups[cwd] = [];
+      groups[cwd].push(s);
+    }
+
+    // Sort cwd keys by the most recent session's update time descending (pre-calculated for performance)
+    const cwdMaxTimes: Record<string, number> = {};
+    for (const cwd of Object.keys(groups)) {
+      cwdMaxTimes[cwd] = Math.max(...groups[cwd].map(s => s.updatedAtMs));
+    }
+    const sortedCwds = Object.keys(groups).sort((a, b) => {
+      return cwdMaxTimes[b] - cwdMaxTimes[a];
+    });
+    for (const cwd of sortedCwds) {
+      const folderSessions = groups[cwd];
+      // Sort sessions within cwd by updatedAtMs descending
+      folderSessions.sort((a, b) => b.updatedAtMs - a.updatedAtMs);
+
+      listHtml += `
+        <details class="workspace-group" open>
+          <summary class="workspace-header">
+            <svg class="icon-folder" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+            <span class="workspace-title" title="${escapeHtml(cwd)}">${escapeHtml(cwd.split(/[/\\]/).pop() || cwd)}</span>
+            <span class="workspace-count">${folderSessions.length}</span>
+            <svg class="icon-chevron" viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><polyline points="6 9 12 15 18 9"></polyline></svg>
+          </summary>
+          <div class="workspace-sessions">
+            ${folderSessions.map(s => renderSessionItemHtml(s, selectedSession, formatSize)).join("")}
+          </div>
+        </details>
+      `;
+    }
+  } else {
+    // Sort by updatedAtMs descending
+    const sorted = [...filtered].sort((a, b) => b.updatedAtMs - a.updatedAtMs);
+    listHtml = `<div class="sessions-linear-list">${sorted.map(s => renderSessionItemHtml(s, selectedSession, formatSize)).join("")}</div>`;
+  }
+  return listHtml;
+}
+
+function getSessionDetailHtml(): string {
+  const selectedSession = state.sessions.find(s => s.id === state.selectedSessionId);
+
+  // Formatting helper for size
+  const formatSize = (bytes?: number | null) => {
+    if (bytes === undefined || bytes === null) return "未知大小";
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
+  let rightPaneHtml = "";
+  if (!selectedSession) {
+    rightPaneHtml = `
+      <div class="session-detail-empty">
+        <svg viewBox="0 0 24 24" width="48" height="48" stroke="currentColor" stroke-width="1.5" fill="none"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+        <p>选择左侧的 Codex 会话以预览历史消息</p>
+      </div>
+    `;
+  } else {
+    rightPaneHtml = `
+      <div class="session-detail-active">
+        <header class="session-detail-header">
+          <div class="session-detail-title-row">
+            <h3 class="session-detail-title" title="${escapeHtml(selectedSession.title || selectedSession.id)}">
+              ${escapeHtml(selectedSession.title || "未命名会话")}
+            </h3>
+            <span class="session-detail-badge ${selectedSession.archived ? 'badge-archived' : 'badge-active'}">
+              ${selectedSession.archived ? '已归档' : '活跃'}
+            </span>
+          </div>
+          <div class="session-detail-meta-row">
+            <span class="meta-item">
+              <strong>路径:</strong> <code title="${escapeHtml(selectedSession.rolloutPath || '')}">${escapeHtml(selectedSession.rolloutPath || '无')}</code>
+            </span>
+            <span class="meta-item">
+              <strong>工作目录:</strong> <code title="${escapeHtml(selectedSession.cwd || '')}">${escapeHtml(selectedSession.cwd || '无')}</code>
+            </span>
+            <span class="meta-item">
+              <strong>大小:</strong> ${formatSize(selectedSession.fileSize)}
+            </span>
+            ${selectedSession.modelProvider ? `
+              <span class="meta-item">
+                <strong>提供商:</strong> <span class="pill pill-provider">${escapeHtml(selectedSession.modelProvider)}</span>
+              </span>
+            ` : ""}
+          </div>
+          <div class="session-detail-actions">
+            <button class="button button-secondary" data-action="rename-session" data-id="${selectedSession.id}">
+              <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M12 20h9M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>
+              重命名
+            </button>
+            <button class="button button-secondary" data-action="toggle-archive-session" data-id="${selectedSession.id}" data-archived="${selectedSession.archived}">
+              <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="9" y1="9" x2="15" y2="9"></line><line x1="9" y1="13" x2="15" y2="13"></line><line x1="9" y1="17" x2="15" y2="17"></line></svg>
+              ${selectedSession.archived ? '取消归档' : '归档会话'}
+            </button>
+            <button class="button button-secondary" data-action="export-session" data-id="${selectedSession.id}">
+              <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"></path></svg>
+              导出
+            </button>
+            <button class="button button-danger" data-action="delete-session" data-id="${selectedSession.id}">
+              <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+              彻底删除
+            </button>
+          </div>
+        </header>
+        <div class="session-messages-container">
+          ${renderSessionMessages()}
+        </div>
+      </div>
+    `;
+  }
+  return rightPaneHtml;
+}
+
+function refreshSessionsListView(): void {
+  const listScroll = document.querySelector(".sessions-list-scroll");
+  if (listScroll) {
+    listScroll.innerHTML = getSessionsListHtml();
+  }
+}
+
+function refreshSessionDetailPane(): void {
+  const detailPane = document.querySelector(".sessions-detail-pane");
+  if (detailPane) {
+    detailPane.innerHTML = getSessionDetailHtml();
+  }
+}
+
+function renderSessionsPage(): string {
+  const listHtml = getSessionsListHtml();
+  const rightPaneHtml = getSessionDetailHtml();
+
+  return `
+    <div class="sessions-page-container">
+      <div class="sessions-sidebar-pane">
+        <div class="sessions-pane-header" data-tauri-drag-region style="display: flex; justify-content: space-between; align-items: center;">
+          <h2>Codex 会话管理</h2>
+          <button class="icon-button" data-action="nav-session-cleanup" title="清理旧会话" style="width: 28px; height: 28px; border-radius: 6px;">
+            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+          </button>
+        </div>
+        <div class="sessions-pane-filters">
+          <div class="search-input-wrapper">
+            <svg class="search-icon" viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <input type="text" id="session-search" placeholder="搜索标题、工作空间..." value="${escapeHtml(state.sessionSearchQuery)}">
+            <span id="search-clear-container">
+              ${state.sessionSearchQuery ? `<button class="search-clear-btn" id="session-search-clear">×</button>` : ""}
+            </span>
+          </div>
+          <div class="filter-controls-row">
+            <div class="filter-group">
+              <button class="filter-tab ${state.sessionFilter === 'all' ? 'active' : ''}" data-filter="all">全部</button>
+              <button class="filter-tab ${state.sessionFilter === 'active' ? 'active' : ''}" data-filter="active">活跃</button>
+              <button class="filter-tab ${state.sessionFilter === 'archived' ? 'active' : ''}" data-filter="archived">已归档</button>
+            </div>
+            <div class="sort-group">
+              <button class="sort-btn ${state.sessionSortOrder === 'time' ? 'active' : ''}" data-sort="time" title="按时间排序">
+                <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+              </button>
+              <button class="sort-btn ${state.sessionSortOrder === 'cwd' ? 'active' : ''}" data-sort="cwd" title="按工作空间分组">
+                <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+        <div class="sessions-list-scroll">
+          ${listHtml}
+        </div>
+      </div>
+      <div class="sessions-detail-pane">
+        ${rightPaneHtml}
+      </div>
+    </div>
+  `;
+}
+
+function renderSessionItemHtml(
+  s: CodexSessionInfo,
+  selectedSession: CodexSessionInfo | undefined,
+  formatSize: (bytes?: number | null) => string
+): string {
+  const isSelected = selectedSession && selectedSession.id === s.id;
+
+  // High-performance custom formatting to bypass slow Intl/toLocaleString inside list renders
+  const date = new Date(s.updatedAtMs);
+  const month = date.getMonth() + 1;
+  const day = date.getDate();
+  const hours = date.getHours().toString().padStart(2, '0');
+  const minutes = date.getMinutes().toString().padStart(2, '0');
+  const timeStr = `${month}月${day}日 ${hours}:${minutes}`;
+
+  return `
+    <div class="session-item-card ${isSelected ? 'selected' : ''}" data-action="select-session" data-id="${s.id}">
+      <div class="session-card-header">
+        <span class="session-card-title" title="${escapeHtml(s.title || s.id)}">${escapeHtml(s.title || "未命名会话")}</span>
+        ${s.archived ? `<span class="session-card-archive-badge">已归档</span>` : ""}
+      </div>
+      <div class="session-card-details">
+        <span class="session-card-cwd" title="${escapeHtml(s.cwd || '')}">${escapeHtml(s.cwd ? (s.cwd.split(/[/\\]/).pop() || '') : '无目录')}</span>
+        <div class="session-card-meta">
+          <span>${timeStr}</span>
+          <span class="dot-separator">•</span>
+          <span>${formatSize(s.fileSize)}</span>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderSessionMessages(): string {
+  if (state.messagesLoading) {
+    return `
+      <div class="messages-loading-state" style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; height: 100%; min-height: 200px; padding: 40px 20px;">
+        <div class="busy-dialog-spinner" style="margin: 0 auto; width: 24px; height: 24px; border-width: 2px;"></div>
+        <span style="color: var(--text-muted); font-size: 0.85rem;">正在加载会话消息...</span>
+      </div>
+    `;
+  }
+
+  if (state.sessionMessages.length === 0) {
+    return `<div class="messages-empty">该会话暂无消息，或对话文件为空。</div>`;
+  }
+
+  return state.sessionMessages.map(msg => {
+    const isUser = msg.role === "user";
+    const bubbleClass = isUser ? "msg-user" : "msg-assistant";
+    const avatarChar = isUser ? "👤" : "🤖";
+    const displayName = isUser ? "User" : "Codex";
+
+    return `
+      <div class="message-bubble-wrapper ${bubbleClass}">
+        <div class="message-avatar">${avatarChar}</div>
+        <div class="message-content-box">
+          <div class="message-sender">${displayName}</div>
+          <div class="message-text">${formatMessageText(msg.text)}</div>
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+function formatMessageText(text: string): string {
+  // Escape HTML first to prevent XSS
+  let escaped = escapeHtml(text);
+
+  // Replace code blocks: ```lang ... ```
+  escaped = escaped.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (_, lang, codeContent) => {
+    return `<pre class="code-block" data-lang="${lang || 'code'}"><code>${codeContent}</code></pre>`;
+  });
+
+  // Replace inline code: `code`
+  escaped = escaped.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+
+  // Replace markdown links: [text](url)
+  escaped = escaped.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" class="chat-link">$1</a>');
+
+  // Replace paragraph newlines
+  escaped = escaped.split('\n').join('<br>');
+
+  return escaped;
+}
+
+function renderSessionCleanupPage(): string {
+  const ONE_MONTH_MS = 30 * 24 * 60 * 60 * 1000;
+  const now = Date.now();
+  const oneMonthAgo = now - ONE_MONTH_MS;
+
+  // Formatting helper for size
+  const formatSize = (bytes?: number | null) => {
+    if (bytes === undefined || bytes === null) return "未知大小";
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
+  // Group all sessions by CWD
+  const groups: Record<string, CodexSessionInfo[]> = {};
+  for (const s of state.sessions) {
+    const cwd = s.cwd || "未指定工作空间";
+    if (!groups[cwd]) groups[cwd] = [];
+    groups[cwd].push(s);
+  }
+
+  // 1. Projects with NO sessions updated in the last 30 days
+  interface InactiveProject {
+    cwd: string;
+    sessions: CodexSessionInfo[];
+    lastActiveTime: number;
+  }
+
+  const inactiveProjects: InactiveProject[] = [];
+  for (const [cwd, sessions] of Object.entries(groups)) {
+    // Find the latest update time in this group
+    const latestActive = Math.max(...sessions.map(s => s.updatedAtMs));
+    if (latestActive < oneMonthAgo) {
+      inactiveProjects.push({
+        cwd,
+        sessions,
+        lastActiveTime: latestActive
+      });
+    }
+  }
+
+  // Sort inactive projects by lastActiveTime descending (most recently inactive first)
+  inactiveProjects.sort((a, b) => b.lastActiveTime - a.lastActiveTime);
+
+  // 2. Individual sessions updated more than 30 days ago
+  const oldSessions = state.sessions
+    .filter(s => s.updatedAtMs < oneMonthAgo)
+    .sort((a, b) => b.updatedAtMs - a.updatedAtMs);
+
+  // Render inactive projects HTML
+  let projectsHtml = "";
+  if (inactiveProjects.length === 0) {
+    projectsHtml = `<div class="cleanup-empty-state">没有超过 1 个月未活跃的项目</div>`;
+  } else {
+    projectsHtml = `
+      <div class="cleanup-list">
+        ${inactiveProjects.map(p => {
+          const date = new Date(p.lastActiveTime);
+          const timeStr = `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`;
+          const totalSize = p.sessions.reduce((acc, s) => acc + (s.fileSize || 0), 0);
+          const idsJson = JSON.stringify(p.sessions.map(s => s.id));
+          return `
+            <div class="cleanup-project-card">
+              <div class="project-info">
+                <svg class="icon-folder" viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+                <div class="project-details">
+                  <span class="project-path" title="${escapeHtml(p.cwd)}">${escapeHtml(p.cwd)}</span>
+                  <div class="project-meta">
+                    <span>最后活跃: ${timeStr}</span>
+                    <span class="dot-separator">•</span>
+                    <span>会话总数: ${p.sessions.length} 个</span>
+                    <span class="dot-separator">•</span>
+                    <span>总计占用: ${formatSize(totalSize)}</span>
+                  </div>
+                </div>
+              </div>
+              <button class="button button-danger btn-clean-project" data-cwd="${escapeHtml(p.cwd)}" data-ids='${escapeHtml(idsJson)}'>
+                清空项目会话
+              </button>
+            </div>
+          `;
+        }).join("")}
+      </div>
+    `;
+  }
+
+  // Render old sessions HTML
+  let sessionsHtml = "";
+  if (oldSessions.length === 0) {
+    sessionsHtml = `<div class="cleanup-empty-state">没有超过 1 个月的旧会话</div>`;
+  } else {
+    sessionsHtml = `
+      <div class="batch-action-bar">
+        <label class="checkbox-wrapper select-all-wrapper">
+          <input type="checkbox" id="cleanup-select-all">
+          <span>全选所有旧会话 (${oldSessions.length})</span>
+        </label>
+        <button class="button button-danger" id="cleanup-batch-delete-btn" disabled>
+          批量物理删除 (已选 <span id="cleanup-selected-count">0</span>)
+        </button>
+      </div>
+      <div class="cleanup-table-wrapper">
+        <table class="cleanup-table">
+          <thead>
+            <tr>
+              <th width="40"></th>
+              <th>会话标题</th>
+              <th>工作空间 (CWD)</th>
+              <th width="120">最后活跃</th>
+              <th width="100">大小</th>
+              <th width="80">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${oldSessions.map(s => {
+              const date = new Date(s.updatedAtMs);
+              const timeStr = `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`;
+              return `
+                <tr class="cleanup-row" data-id="${s.id}">
+                  <td>
+                    <input type="checkbox" class="cleanup-item-checkbox" data-id="${s.id}">
+                  </td>
+                  <td class="cell-title" title="${escapeHtml(s.title || s.id)}">
+                    <strong>${escapeHtml(s.title || "未命名会话")}</strong>
+                    ${s.archived ? `<span class="session-card-archive-badge">已归档</span>` : ""}
+                  </td>
+                  <td class="cell-cwd" title="${escapeHtml(s.cwd || '')}">
+                    <code>${escapeHtml(s.cwd || '无')}</code>
+                  </td>
+                  <td>${timeStr}</td>
+                  <td>${formatSize(s.fileSize)}</td>
+                  <td>
+                    <button class="button button-danger btn-clean-single-session" data-id="${s.id}">删除</button>
+                  </td>
+                </tr>
+              `;
+            }).join("")}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="cleanup-page-container">
+      <header class="cleanup-header">
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <button class="icon-button" data-action="back-to-sessions" title="返回会话管理">
+            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+          </button>
+          <h2>会话清理</h2>
+        </div>
+        <p class="cleanup-subtitle">清理长期未使用的会话，物理删除对话 rollout 文件，释放磁盘空间。</p>
+      </header>
+
+      <div class="cleanup-sections-wrapper">
+        <div class="cleanup-section">
+          <div class="cleanup-section-header">
+            <h3>超过 1 个月没有任何会话产生的工作空间项目 (${inactiveProjects.length})</h3>
+            <span class="section-desc">这些项目的开发工作可能已经结束，可以安全清理。</span>
+          </div>
+          ${projectsHtml}
+        </div>
+
+        <div class="cleanup-section">
+          <div class="cleanup-section-header">
+            <h3>所有项目中早于 1 个月的旧会话 (${oldSessions.length})</h3>
+            <span class="section-desc">清理时间久远的聊天记录，保留近期活动。</span>
+          </div>
+          ${sessionsHtml}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function fetchCodexSessions(): Promise<void> {
+  if (!isTauriRuntime) {
+    state.sessions = [
+      {
+        id: "session-1",
+        rolloutPath: "/Users/example/.codex/sessions/2026/05/21/rollout-1.jsonl",
+        updatedAtMs: Date.now() - 1000 * 60 * 10,
+        cwd: "/Volumes/Acer/Dev/codex_auth_switch",
+        title: "新增会话管理功能讨论",
+        hasUserEvent: true,
+        archived: false,
+        modelProvider: "openai",
+        fileSize: 12048,
+      },
+      {
+        id: "session-2",
+        rolloutPath: "/Users/example/.codex/sessions/2026/05/20/rollout-2.jsonl",
+        updatedAtMs: Date.now() - 1000 * 60 * 60 * 25,
+        cwd: "/Volumes/Acer/Dev/another_project",
+        title: "修复 Tailwind 样式错误",
+        hasUserEvent: true,
+        archived: false,
+        modelProvider: "anthropic",
+        fileSize: 4567,
+      },
+      {
+        id: "session-3",
+        rolloutPath: "/Users/example/.codex/archived_sessions/rollout-3.jsonl",
+        updatedAtMs: Date.now() - 1000 * 60 * 60 * 24 * 5,
+        cwd: "/Volumes/Acer/Dev/codex_auth_switch",
+        title: "旧的登录逻辑重构",
+        hasUserEvent: true,
+        archived: true,
+        modelProvider: "openai",
+        fileSize: 85930,
+      }
+    ];
+    state.selectedSessionId = null;
+    state.sessionMessages = [];
+    render();
+    return;
+  }
+
+  // Only show the list-wide loading spinner on initial load (when list is empty)
+  // to prevent UI layout flash when navigating between active views
+  const isFirstLoad = state.sessions.length === 0;
+  if (isFirstLoad) {
+    state.sessionsLoading = true;
+    refreshSessionsListView();
+  }
+  try {
+    const list = await desktopInvoke<CodexSessionInfo[]>("list_codex_sessions");
+    state.sessions = list;
+
+    // Preserve the active session selection if it remains in the new list
+    if (state.selectedSessionId) {
+      const exists = list.some(s => s.id === state.selectedSessionId);
+      if (!exists) {
+        state.selectedSessionId = null;
+        state.sessionMessages = [];
+      }
+    }
+  } catch (error) {
+    setFlash("error", `获取会话失败: ${formatErrorMessage(error)}`);
+  } finally {
+    state.sessionsLoading = false;
+    refreshSessionsListView();
+    refreshSessionDetailPane();
+  }
+}
+
+async function fetchCodexSessionMessages(threadId: string): Promise<void> {
+  if (!isTauriRuntime) {
+    state.selectedSessionId = threadId;
+    state.sessionMessages = [
+      { role: "user", text: "我想给 app新增一个功能，就是 codex 会话管理，有什么建议没有" },
+      { role: "assistant", text: "这是一个非常好的想法！Codex 的会话非常多，如果能提供会话列表、归档和物理删除功能，对管理磁盘空间 and 历史记录非常有帮助。以下是我的建议：\n\n1. 双栏布局：左侧是会话列表，可以按更新时间或工作空间目录分组；右侧是消息预览。\n2. 重命名：可以调用 SQLite 和 `session_index.jsonl` 同步更新会话标题。\n3. 归档与删除：归档移动到 `archived_sessions/` 目录，删除则物理删除 rollout 文件并从 SQLite 中删除。" },
+    ];
+    refreshSessionDetailPane();
+    return;
+  }
+
+  state.messagesLoading = true;
+  refreshSessionDetailPane();
+  try {
+    const messages = await desktopInvoke<CodexMessage[]>("get_codex_session_messages", { threadId });
+    state.selectedSessionId = threadId;
+    state.sessionMessages = messages;
+  } catch (error) {
+    setFlash("error", `获取会话消息失败: ${formatErrorMessage(error)}`);
+  } finally {
+    state.messagesLoading = false;
+    refreshSessionDetailPane();
+  }
+}
+
+async function renameCodexSession(threadId: string, title: string): Promise<void> {
+  if (!isTauriRuntime) {
+    const session = state.sessions.find(s => s.id === threadId);
+    if (session) session.title = title;
+    setFlash("success", "会话重命名成功");
+    refreshSessionsListView();
+    refreshSessionDetailPane();
+    return;
+  }
+
+  setBusy(true);
+  try {
+    await desktopInvoke("rename_codex_session", { threadId, newTitle: title });
+    const session = state.sessions.find(s => s.id === threadId);
+    if (session) session.title = title;
+    setFlash("success", "会话重命名成功");
+  } catch (error) {
+    setFlash("error", `重命名失败: ${formatErrorMessage(error)}`);
+  } finally {
+    setBusy(false);
+    refreshSessionsListView();
+    refreshSessionDetailPane();
+  }
+}
+
+async function archiveCodexSession(threadId: string, archive: boolean): Promise<void> {
+  if (!isTauriRuntime) {
+    const session = state.sessions.find(s => s.id === threadId);
+    if (session) {
+      session.archived = archive;
+      session.rolloutPath = archive
+        ? "/Users/example/.codex/archived_sessions/rollout-mock.jsonl"
+        : "/Users/example/.codex/sessions/2026/05/21/rollout-mock.jsonl";
+    }
+    setFlash("success", archive ? "会话归档成功" : "会话已取消归档");
+    refreshSessionsListView();
+    refreshSessionDetailPane();
+    return;
+  }
+
+  setBusy(true);
+  try {
+    await desktopInvoke("archive_codex_session", { threadId, archive });
+    const list = await desktopInvoke<CodexSessionInfo[]>("list_codex_sessions");
+    state.sessions = list;
+    const session = list.find(s => s.id === threadId);
+    if (session) {
+      const messages = await desktopInvoke<CodexMessage[]>("get_codex_session_messages", { threadId });
+      state.sessionMessages = messages;
+    } else {
+      state.selectedSessionId = null;
+      state.sessionMessages = [];
+    }
+    setFlash("success", archive ? "会话归档成功" : "会话已取消归档");
+  } catch (error) {
+    setFlash("error", `归档操作失败: ${formatErrorMessage(error)}`);
+  } finally {
+    setBusy(false);
+    refreshSessionsListView();
+    refreshSessionDetailPane();
+  }
+}
+
+async function deleteCodexSession(threadId: string): Promise<void> {
+  const confirmed = await nativeConfirm("您确定要物理删除该会话及其对话文件吗？此操作无法撤销，物理文件将被彻底删除以释放磁盘空间！", "确认物理删除", true);
+  if (!confirmed) return;
+
+  if (!isTauriRuntime) {
+    state.sessions = state.sessions.filter(s => s.id !== threadId);
+    if (state.selectedSessionId === threadId) {
+      state.selectedSessionId = null;
+      state.sessionMessages = [];
+    }
+    setFlash("success", "会话已物理删除");
+    refreshSessionsListView();
+    refreshSessionDetailPane();
+    return;
+  }
+
+  setBusy(true);
+  try {
+    await desktopInvoke("delete_codex_session", { threadId });
+    state.sessions = state.sessions.filter(s => s.id !== threadId);
+    if (state.selectedSessionId === threadId) {
+      state.selectedSessionId = null;
+      state.sessionMessages = [];
+    }
+    setFlash("success", "会话及文件已物理删除");
+  } catch (error) {
+    setFlash("error", `删除会话失败: ${formatErrorMessage(error)}`);
+  } finally {
+    setBusy(false);
+    refreshSessionsListView();
+    refreshSessionDetailPane();
+  }
+}
+
+async function deleteProjectSessions(cwd: string, sessionIds: string[]): Promise<void> {
+  const confirmed = await nativeConfirm(
+    `您确定要物理清空项目 "${cwd}" 的所有会话文件吗？共包含 ${sessionIds.length} 个会话。此操作无法撤销！`,
+    "确认清空项目会话",
+    true
+  );
+  if (!confirmed) return;
+
+  if (!isTauriRuntime) {
+    state.sessions = state.sessions.filter(s => !sessionIds.includes(s.id));
+    setFlash("success", "已成功清理该项目的所有会话");
+    render();
+    return;
+  }
+
+  setBusy(true);
+  try {
+    for (const id of sessionIds) {
+      await desktopInvoke("delete_codex_session", { threadId: id });
+    }
+    state.sessions = state.sessions.filter(s => !sessionIds.includes(s.id));
+    setFlash("success", "已成功物理清理该项目的所有会话文件");
+  } catch (error) {
+    setFlash("error", `清理项目会话失败: ${formatErrorMessage(error)}`);
+  } finally {
+    setBusy(false);
+    render();
+  }
+}
+
+async function batchDeleteSessions(sessionIds: string[]): Promise<void> {
+  const confirmed = await nativeConfirm(
+    `您确定要批量物理删除选中的 ${sessionIds.length} 个会话及其文件吗？此操作无法撤销！`,
+    "确认批量删除",
+    true
+  );
+  if (!confirmed) return;
+
+  if (!isTauriRuntime) {
+    state.sessions = state.sessions.filter(s => !sessionIds.includes(s.id));
+    setFlash("success", "已成功删除选中的会话");
+    render();
+    return;
+  }
+
+  setBusy(true);
+  try {
+    for (const id of sessionIds) {
+      await desktopInvoke("delete_codex_session", { threadId: id });
+    }
+    state.sessions = state.sessions.filter(s => !sessionIds.includes(s.id));
+    setFlash("success", "已成功批量物理删除选中的会话文件");
+  } catch (error) {
+    setFlash("error", `批量删除会话失败: ${formatErrorMessage(error)}`);
+  } finally {
+    setBusy(false);
+    render();
+  }
+}
+
+function exportCodexSessionToMarkdown(session: CodexSessionInfo, messages: CodexMessage[]) {
+  let md = `# Codex Session: ${session.title || "Untitled Session"}\n`;
+  md += `- **Session ID**: \`${session.id}\`\n`;
+  md += `- **Directory**: \`${session.cwd || "N/A"}\`\n`;
+  md += `- **Date**: ${new Date(session.updatedAtMs).toLocaleString()}\n`;
+  md += `- **Model Provider**: \`${session.modelProvider || "unknown"}\`\n\n`;
+  md += `---\n\n`;
+
+  for (const msg of messages) {
+    const roleName = msg.role === "user" ? "User" : "Codex";
+    md += `### 👤 ${roleName}\n\n${msg.text}\n\n`;
+  }
+
+  const blob = new Blob([md], { type: "text/markdown;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.setAttribute("href", url);
+  link.setAttribute("download", `codex-session-${session.id}.md`);
+  link.style.visibility = "hidden";
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+}
 
 function bindEvents(): void {
   const editorNameInput = document.querySelector<HTMLInputElement>("#editor-name");
   editorNameInput?.addEventListener("input", (event) => {
-    state.editor.name = (event.currentTarget as HTMLInputElement).value;
+    const val = (event.currentTarget as HTMLInputElement).value;
+    state.editor.name = val;
+    const readOnly = state.editor.readOnly;
+    const existing = state.editor.mode === "existing";
+    if (readOnly || existing) {
+      const titleEl = document.querySelector(".editor-header h1");
+      if (titleEl) {
+        titleEl.textContent = val || (readOnly ? "查看网络共享配置" : "查看和编辑 Profile");
+      }
+    }
   });
 
   const editorNotesInput = document.querySelector<HTMLTextAreaElement>("#editor-notes");
@@ -2968,6 +4344,13 @@ function bindEvents(): void {
   });
   bindInputValue("#third-party-model", (value) => {
     state.editor.thirdParty.model = value;
+  });
+  bindInputValue("#network-profiles-api", (value) => {
+    state.networkSharing.profilesApi = value;
+  });
+  bindInputValue("#network-profile-token", (value) => {
+    state.networkSharing.token = value;
+    state.networkAuthRequired = !value.trim();
   });
 
   document.querySelectorAll<HTMLInputElement>('input[name="profile-template"]').forEach((input) => {
@@ -2998,16 +4381,51 @@ function bindEvents(): void {
       }
 
       if (action === "refresh") {
-        
+
           await refreshSnapshot();
-        
+
       } else if (action === "nav-profiles") {
-        state.view = "cards";
-        render();
+        if (state.view !== "cards") {
+          state.view = "cards";
+          render();
+        }
       } else if (action === "nav-settings") {
-        state.view = "settings";
+        if (state.view !== "settings") {
+          state.view = "settings";
+          render();
+        }
+      } else if (action === "save-network-sharing-settings") {
+        saveNetworkSharingSettings(state.networkSharing);
+        state.networkAuthRequired = !state.networkSharing.token.trim();
+        state.networkProfiles = [];
+        setFlash("success", "已保存企业共享库设置。");
         render();
-} else if (action === "tab-local") {
+      } else if (action === "open-network-sso-login") {
+        await openNetworkSsoLogin();
+      } else if (action === "refresh-network-after-settings") {
+        saveNetworkSharingSettings(state.networkSharing);
+        state.networkAuthRequired = !state.networkSharing.token.trim();
+        state.networkProfiles = [];
+        state.activeTab = "network";
+        state.view = "cards";
+        await fetchNetworkProfiles();
+      } else if (action === "nav-sessions") {
+        if (state.view !== "sessions") {
+          state.view = "sessions";
+          render();
+          await fetchCodexSessions();
+        }
+      } else if (action === "nav-session-cleanup") {
+        if (state.view !== "session-cleanup") {
+          state.view = "session-cleanup";
+          render();
+          await fetchCodexSessions();
+        }
+      } else if (action === "back-to-sessions") {
+        state.view = "sessions";
+        render();
+        await fetchCodexSessions();
+      } else if (action === "tab-local") {
         state.activeTab = "local";
         render();
       } else if (action === "tab-network") {
@@ -3051,6 +4469,8 @@ function bindEvents(): void {
         button.dataset.name
       ) {
         await refreshProfileThirdPartyUsage(button.dataset.id, button.dataset.name);
+      } else if (action === "generate-symbiotic" && button.dataset.id) {
+        await generateSymbioticFromExisting(button.dataset.id);
       } else if (action === "new-profile") {
         await openEditorForNewProfile();
       } else if (action === "view-profile-details" && button.dataset.id) {
@@ -3061,6 +4481,60 @@ function bindEvents(): void {
         await deleteProfile(button.dataset.id, button.dataset.name);
       } else if (action === "back-to-cards") {
         state.view = "cards";
+        render();
+      } else if (action === "editor-tab-delta") {
+        state.editor.newTab = "manual-delta";
+        render();
+      } else if (action === "editor-tab-full") {
+        const defaultState = createEditorState();
+        const isAuthDefault = state.editor.authJson === defaultState.authJson;
+        const isConfigDefault = state.editor.configToml === defaultState.configToml;
+
+        if (isAuthDefault && isConfigDefault) {
+          const hasDeltaInput = state.editor.thirdParty.baseUrl.trim() || state.editor.thirdParty.apiKey.trim();
+          if (hasDeltaInput) {
+            try {
+              let generated;
+              if (state.editor.thirdParty.template === "symbioticThirdParty") {
+                generated = await symbioticThirdPartyConfigInputFromDraft(state.editor, false);
+              } else {
+                generated = standaloneThirdPartyConfigInputFromDraft(state.editor, false);
+              }
+              state.editor.authJson = generated.authJson;
+              state.editor.configToml = generated.configToml;
+            } catch (e) {
+              // Ignore generation errors during tab switching
+            }
+          }
+        }
+        state.editor.newTab = "manual-full";
+        render();
+      } else if (action === "editor-tab-network") {
+        state.editor.newTab = "network";
+        if (!state.networkSharing.token.trim()) {
+          state.networkAuthRequired = true;
+          render();
+        } else if (state.networkProfiles.length === 0) {
+          await fetchNetworkProfiles();
+        } else {
+          render();
+        }
+      } else if (action === "refresh-network-in-editor") {
+        if (!state.networkSharing.token.trim()) {
+          state.networkAuthRequired = true;
+          render();
+        } else {
+          await fetchNetworkProfiles();
+        }
+      } else if (action === "import-network-profile-to-editor" && button.dataset.id) {
+        await importNetworkProfileToEditor(button.dataset.id);
+      } else if (action === "import-current-network-profile") {
+        state.editor.mode = "new";
+        state.editor.newTab = "manual-full";
+        state.editor.source = "local";
+        state.editor.readOnly = false;
+        clearFlash();
+        setFlash("success", `已将共享配置「${state.editor.name}」载入编辑器，您可以修改参数并创建新配置。`);
         render();
       } else if (action === "save-editor") {
         await saveEditorProfile(false);
@@ -3082,8 +4556,207 @@ function bindEvents(): void {
       }
     });
   });
+
+  // --- Codex Session Management Event Listeners (Delegated) ---
+  const sessionsContainer = document.querySelector<HTMLDivElement>(".sessions-page-container");
+  if (sessionsContainer) {
+    // 1. Session list and action delegation
+    sessionsContainer.addEventListener("click", async (event) => {
+      const target = event.target as HTMLElement;
+
+      // Card selection
+      const card = target.closest<HTMLDivElement>(".session-item-card");
+      if (card) {
+        const id = card.dataset.id;
+        if (id) {
+          sessionsContainer.querySelectorAll(".session-item-card").forEach(c => c.classList.remove("selected"));
+          card.classList.add("selected");
+          await fetchCodexSessionMessages(id);
+        }
+        return;
+      }
+
+      // Filter tabs
+      const tab = target.closest<HTMLButtonElement>(".filter-tab");
+      if (tab) {
+        const filter = tab.dataset.filter;
+        if (filter === "all" || filter === "active" || filter === "archived") {
+          state.sessionFilter = filter;
+          sessionsContainer.querySelectorAll(".filter-tab").forEach(t => t.classList.remove("active"));
+          tab.classList.add("active");
+          refreshSessionsListView();
+        }
+        return;
+      }
+
+      // Sort button
+      const sortBtn = target.closest<HTMLButtonElement>(".sort-btn");
+      if (sortBtn) {
+        const sort = sortBtn.dataset.sort;
+        if (sort === "time" || sort === "cwd") {
+          state.sessionSortOrder = sort;
+          sessionsContainer.querySelectorAll(".sort-btn").forEach(b => b.classList.remove("active"));
+          sortBtn.classList.add("active");
+          refreshSessionsListView();
+        }
+        return;
+      }
+
+      // Search clear button
+      const clearBtn = target.closest<HTMLButtonElement>("#session-search-clear");
+      if (clearBtn) {
+        state.sessionSearchQuery = "";
+        const searchInput = sessionsContainer.querySelector<HTMLInputElement>("#session-search");
+        if (searchInput) {
+          searchInput.value = "";
+          searchInput.focus();
+        }
+        const clearContainer = sessionsContainer.querySelector("#search-clear-container");
+        if (clearContainer) {
+          clearContainer.innerHTML = "";
+        }
+        refreshSessionsListView();
+        return;
+      }
+
+      // Rename session button
+      const renameBtn = target.closest<HTMLButtonElement>('[data-action="rename-session"]');
+      if (renameBtn) {
+        const threadId = renameBtn.dataset.id;
+        if (threadId) {
+          const currentSession = state.sessions.find(s => s.id === threadId);
+          const oldTitle = currentSession?.title || "";
+          const newTitle = prompt("请输入会话的新标题:", oldTitle);
+          if (newTitle !== null) {
+            const trimmed = newTitle.trim();
+            if (trimmed) {
+              await renameCodexSession(threadId, trimmed);
+            }
+          }
+        }
+        return;
+      }
+
+      // Archive session button
+      const archiveBtn = target.closest<HTMLButtonElement>('[data-action="toggle-archive-session"]');
+      if (archiveBtn) {
+        const threadId = archiveBtn.dataset.id;
+        const isArchived = archiveBtn.dataset.archived === "true";
+        if (threadId) {
+          await archiveCodexSession(threadId, !isArchived);
+        }
+        return;
+      }
+
+      // Export session button
+      const exportBtn = target.closest<HTMLButtonElement>('[data-action="export-session"]');
+      if (exportBtn) {
+        const threadId = exportBtn.dataset.id;
+        if (threadId) {
+          const session = state.sessions.find(s => s.id === threadId);
+          if (session) {
+            exportCodexSessionToMarkdown(session, state.sessionMessages);
+          }
+        }
+        return;
+      }
+
+      // Delete session button
+      const deleteBtn = target.closest<HTMLButtonElement>('[data-action="delete-session"]');
+      if (deleteBtn) {
+        const threadId = deleteBtn.dataset.id;
+        if (threadId) {
+          await deleteCodexSession(threadId);
+        }
+        return;
+      }
+    });
+
+    // 2. Search Input events
+    const searchInput = sessionsContainer.querySelector<HTMLInputElement>("#session-search");
+    searchInput?.addEventListener("input", (event) => {
+      const val = (event.currentTarget as HTMLInputElement).value;
+      state.sessionSearchQuery = val;
+      const clearContainer = sessionsContainer.querySelector("#search-clear-container");
+      if (clearContainer) {
+        clearContainer.innerHTML = val ? `<button class="search-clear-btn" id="session-search-clear">×</button>` : "";
+      }
+      refreshSessionsListView();
+    });
+  }
+
+  // --- Session Cleanup Page Event Listeners ---
+  document.querySelectorAll<HTMLButtonElement>(".btn-clean-project").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const cwd = btn.dataset.cwd;
+      const idsJson = btn.dataset.ids;
+      if (cwd && idsJson) {
+        try {
+          const ids = JSON.parse(idsJson) as string[];
+          await deleteProjectSessions(cwd, ids);
+        } catch (e) {
+          console.error("Failed to parse session IDs for project cleanup", e);
+        }
+      }
+    });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>(".btn-clean-single-session").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.id;
+      if (id) {
+        await batchDeleteSessions([id]);
+      }
+    });
+  });
+
+  const selectAllCheckbox = document.querySelector<HTMLInputElement>("#cleanup-select-all");
+  const itemCheckboxes = document.querySelectorAll<HTMLInputElement>(".cleanup-item-checkbox");
+
+  function updateBatchDeleteButtonState() {
+    const checkedCheckboxes = document.querySelectorAll<HTMLInputElement>(".cleanup-item-checkbox:checked");
+    const batchBtn = document.querySelector<HTMLButtonElement>("#cleanup-batch-delete-btn");
+    const countSpan = document.querySelector<HTMLSpanElement>("#cleanup-selected-count");
+
+    if (countSpan) {
+      countSpan.textContent = checkedCheckboxes.length.toString();
+    }
+    if (batchBtn) {
+      batchBtn.disabled = checkedCheckboxes.length === 0;
+    }
+  }
+
+  selectAllCheckbox?.addEventListener("change", (event) => {
+    const checked = (event.currentTarget as HTMLInputElement).checked;
+    itemCheckboxes.forEach(cb => {
+      cb.checked = checked;
+    });
+    updateBatchDeleteButtonState();
+  });
+
+  itemCheckboxes.forEach(cb => {
+    cb.addEventListener("change", () => {
+      const allChecked = Array.from(itemCheckboxes).every(c => c.checked);
+      const someChecked = Array.from(itemCheckboxes).some(c => c.checked);
+      if (selectAllCheckbox) {
+        selectAllCheckbox.checked = allChecked;
+        selectAllCheckbox.indeterminate = someChecked && !allChecked;
+      }
+      updateBatchDeleteButtonState();
+    });
+  });
+
+  const batchDeleteBtn = document.querySelector<HTMLButtonElement>("#cleanup-batch-delete-btn");
+  batchDeleteBtn?.addEventListener("click", async () => {
+    const checkedCheckboxes = document.querySelectorAll<HTMLInputElement>(".cleanup-item-checkbox:checked");
+    const ids = Array.from(checkedCheckboxes).map(cb => cb.dataset.id).filter(Boolean) as string[];
+    if (ids.length > 0) {
+      await batchDeleteSessions(ids);
+    }
+  });
 }
 
 render();
 void loadAppVersion();
 void refreshSnapshot();
+startAutoUpdateChecker();

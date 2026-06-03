@@ -3,47 +3,76 @@
 import { useEffect, useState, use } from "react";
 import Link from "next/link";
 import { withBasePath } from "@/lib/base-path";
+import { formatSharedProfileConfig } from "@/lib/shared-profile-config";
 
 interface Profile {
   id: string;
   name: string;
   description: string;
   createdAt: string;
+  updatedAt?: string;
   files: string[];
+  ownerDingUserId?: string;
+  ownerName?: string | null;
+  ownerMobile?: string | null;
+  sharedWith?: string[];
+}
+
+interface CurrentUser {
+  dingUserId: string;
+  name?: string | null;
+  mobile?: string | null;
+  jobNumber?: string | null;
 }
 
 export default function ProfileDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const [profile, setProfile] = useState<Profile | null>(null);
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [fileContents, setFileContents] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
-  const [copied, setCopied] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [error, setError] = useState("");
 
   // Edit states
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState("");
   const [editDesc, setEditDesc] = useState("");
+  const [editSharedWith, setEditSharedWith] = useState("");
   const [saving, setSaving] = useState(false);
 
-  // File edit states
-  const [editingFile, setEditingFile] = useState<string | null>(null);
-  const [editFileContent, setEditFileContent] = useState<string>("");
-  const [savingFile, setSavingFile] = useState(false);
-
   useEffect(() => {
-    fetch(withBasePath(`/api/profiles/${id}`))
+    fetch(withBasePath("/api/auth/me"))
       .then((res) => res.json())
+      .then((data) => setCurrentUser(data.user))
+      .catch(() => setCurrentUser(null));
+
+    fetch(withBasePath(`/api/profiles/${id}`))
+      .then((res) => {
+        if (res.status === 401) {
+          setError("需要先使用钉钉 SSO 登录");
+          setLoading(false);
+          return null;
+        }
+        if (!res.ok) {
+          setLoading(false);
+          return null;
+        }
+        return res.json();
+      })
       .then(async (data) => {
+        if (!data) return;
         setProfile(data);
         setEditName(data.name);
         setEditDesc(data.description);
+        setEditSharedWith((data.sharedWith || []).join("\n"));
         
         if (data.files && data.files.length > 0) {
           const contents: Record<string, string> = {};
           for (const file of data.files) {
             try {
               const fileRes = await fetch(withBasePath(`/api/profiles/${id}/${file}`));
-              contents[file] = await fileRes.text();
+              contents[file] = fileRes.ok ? await fileRes.text() : "无法读取文件内容";
             } catch (err) {
               contents[file] = "无法读取文件内容";
             }
@@ -54,15 +83,15 @@ export default function ProfileDetailPage({ params }: { params: Promise<{ id: st
       });
   }, [id]);
 
-  const handleCopy = (fileName: string, content: string) => {
+  const handleCopy = (content: string) => {
     // navigator.clipboard requires HTTPS; fallback for HTTP/Mac
     if (navigator.clipboard && window.isSecureContext) {
       navigator.clipboard.writeText(content).catch(() => fallbackCopy(content));
     } else {
       fallbackCopy(content);
     }
-    setCopied(fileName);
-    setTimeout(() => setCopied(null), 2000);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
   const fallbackCopy = (content: string) => {
@@ -84,38 +113,18 @@ export default function ProfileDetailPage({ params }: { params: Promise<{ id: st
       const res = await fetch(withBasePath(`/api/profiles/${id}`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: editName, description: editDesc }),
+        body: JSON.stringify({ name: editName, description: editDesc, sharedWith: editSharedWith }),
       });
       if (res.ok) {
         const updated = await res.json();
         setProfile(updated);
+        setEditSharedWith((updated.sharedWith || []).join("\n"));
         setIsEditing(false);
       }
     } catch (err) {
       console.error(err);
     } finally {
       setSaving(false);
-    }
-  };
-
-  const handleSaveFile = async (fileName: string) => {
-    setSavingFile(true);
-    try {
-      const res = await fetch(withBasePath(`/api/profiles/${id}/${fileName}`), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content: editFileContent }),
-      });
-      if (res.ok) {
-        setFileContents((prev) => ({ ...prev, [fileName]: editFileContent }));
-        setEditingFile(null);
-      } else {
-        console.error("Failed to save file");
-      }
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setSavingFile(false);
     }
   };
 
@@ -126,11 +135,19 @@ export default function ProfileDetailPage({ params }: { params: Promise<{ id: st
   if (!profile) {
     return (
       <div className="max-w-4xl mx-auto px-6 py-20 text-center transition-colors">
-        <h1 className="text-2xl text-neutral-900 dark:text-white mb-4">找不到 Profile</h1>
+        <h1 className="text-2xl text-neutral-900 dark:text-white mb-4">{error || "找不到 Profile"}</h1>
+        {!currentUser && (
+          <a href={withBasePath(`/api/auth/login?returnTo=/profiles/${id}`)} className="inline-flex rounded-xl bg-indigo-600 px-5 py-3 text-sm font-semibold text-white hover:bg-indigo-500 transition-colors mr-3">
+            钉钉 SSO 登录
+          </a>
+        )}
         <Link href="/profiles" className="text-indigo-600 dark:text-indigo-400 font-medium">返回列表</Link>
       </div>
     );
   }
+
+  const isOwner = !profile.ownerDingUserId || currentUser?.dingUserId === profile.ownerDingUserId;
+  const sharedConfig = formatSharedProfileConfig(fileContents);
 
   return (
     <div className="max-w-4xl mx-auto px-6 py-16 space-y-10 relative z-10 transition-colors">
@@ -157,11 +174,19 @@ export default function ProfileDetailPage({ params }: { params: Promise<{ id: st
                   placeholder="Profile 描述"
                   rows={2}
                 />
+                <textarea
+                  value={editSharedWith}
+                  onChange={(e) => setEditSharedWith(e.target.value)}
+                  className="w-full rounded-lg bg-neutral-50 border border-neutral-300 px-4 py-2 text-neutral-600 focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:bg-neutral-950 dark:border-neutral-800 dark:text-neutral-400 transition-colors resize-none"
+                  placeholder="共享给指定员工：手机号、dingUserId 或工号，多个用逗号/空格/换行分隔"
+                  rows={3}
+                />
                 <div className="flex gap-3">
                   <button
                     onClick={() => {
                       setEditName(profile.name);
                       setEditDesc(profile.description);
+                      setEditSharedWith((profile.sharedWith || []).join("\n"));
                       setIsEditing(false);
                     }}
                     className="px-4 py-2 text-sm font-medium rounded-lg text-neutral-700 bg-neutral-100 hover:bg-neutral-200 dark:text-white dark:bg-neutral-800 dark:hover:bg-neutral-700 transition-colors"
@@ -183,12 +208,14 @@ export default function ProfileDetailPage({ params }: { params: Promise<{ id: st
                   <h1 className="text-4xl font-bold text-neutral-900 dark:text-white tracking-tight transition-colors">
                     {profile.name}
                   </h1>
-                  <button
-                    onClick={() => setIsEditing(true)}
-                    className="opacity-0 group-hover:opacity-100 px-3 py-1.5 text-xs text-indigo-700 bg-indigo-100 hover:bg-indigo-200 dark:text-indigo-300 dark:bg-indigo-500/20 dark:hover:bg-indigo-500/30 rounded-md transition-all active:scale-95"
-                  >
-                    修改资料
-                  </button>
+                  {isOwner && (
+                    <button
+                      onClick={() => setIsEditing(true)}
+                      className="opacity-0 group-hover:opacity-100 px-3 py-1.5 text-xs text-indigo-700 bg-indigo-100 hover:bg-indigo-200 dark:text-indigo-300 dark:bg-indigo-500/20 dark:hover:bg-indigo-500/30 rounded-md transition-all active:scale-95"
+                    >
+                      修改资料
+                    </button>
+                  )}
                 </div>
                 <p className="text-neutral-600 dark:text-neutral-400 text-lg leading-relaxed transition-colors mt-4">
                   {profile.description || "无描述信息"}
@@ -203,75 +230,46 @@ export default function ProfileDetailPage({ params }: { params: Promise<{ id: st
             创建时间: {new Date(profile.createdAt).toLocaleString()}
           </div>
         </div>
+        <div className="grid gap-3 sm:grid-cols-3 rounded-2xl border border-neutral-200 bg-white/60 p-4 text-sm dark:border-white/10 dark:bg-white/[0.03]">
+          <div>
+            <div className="text-neutral-400">创建人</div>
+            <div className="mt-1 text-neutral-800 dark:text-neutral-200">{profile.ownerName || "历史共享配置"}</div>
+          </div>
+          <div>
+            <div className="text-neutral-400">共享范围</div>
+            <div className="mt-1 text-neutral-800 dark:text-neutral-200">
+              {profile.sharedWith && profile.sharedWith.length > 0 ? `指定 ${profile.sharedWith.length} 人` : "仅创建人"}
+            </div>
+          </div>
+          <div>
+            <div className="text-neutral-400">您的权限</div>
+            <div className="mt-1 text-neutral-800 dark:text-neutral-200">{isOwner ? "可编辑" : "只读"}</div>
+          </div>
+        </div>
       </header>
 
       <div className="space-y-8">
-        <h2 className="text-2xl font-semibold text-neutral-900 dark:text-white pt-4 border-t border-neutral-200 dark:border-white/10 transition-colors">授权文件对</h2>
+        <h2 className="text-2xl font-semibold text-neutral-900 dark:text-white pt-4 border-t border-neutral-200 dark:border-white/10 transition-colors">共享配置</h2>
         
-        {profile.files?.map((fileName) => (
-          <div key={fileName} className="rounded-2xl border border-neutral-200 bg-white/80 dark:border-white/10 dark:bg-white/[0.02] shadow-sm overflow-hidden transition-colors">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-neutral-200 bg-neutral-100 dark:bg-black/40 dark:border-white/10 transition-colors">
-              <span className="font-mono text-sm text-neutral-700 dark:text-neutral-300 transition-colors">{fileName}</span>
-              <div className="flex items-center gap-3">
-                {editingFile === fileName ? (
-                  <>
-                    <button
-                      onClick={() => setEditingFile(null)}
-                      className="px-3 py-1.5 text-xs font-medium rounded-md bg-neutral-200 hover:bg-neutral-300 text-neutral-800 dark:bg-white/5 dark:hover:bg-white/10 dark:text-white transition-colors text-center active:scale-95"
-                    >
-                      取消
-                    </button>
-                    <button
-                      onClick={() => handleSaveFile(fileName)}
-                      disabled={savingFile}
-                      className="px-3 py-1.5 text-xs font-medium rounded-md bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors text-center active:scale-95"
-                    >
-                      {savingFile ? "保存中..." : "保存修改"}
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <button
-                      onClick={() => {
-                        setEditingFile(fileName);
-                        setEditFileContent(fileContents[fileName] || "");
-                      }}
-                      className="px-3 py-1.5 text-xs font-medium rounded-md bg-neutral-200 hover:bg-neutral-300 text-neutral-800 dark:bg-white/5 dark:hover:bg-white/10 dark:text-white transition-colors text-center active:scale-95"
-                    >
-                      修改
-                    </button>
-                    <button
-                      onClick={() => handleCopy(fileName, fileContents[fileName] || "")}
-                      className="px-3 py-1.5 text-xs font-medium rounded-md bg-neutral-200 hover:bg-neutral-300 text-neutral-800 dark:bg-white/5 dark:hover:bg-white/10 dark:text-white transition-colors text-center min-w-[70px] active:scale-95"
-                    >
-                      {copied === fileName ? "已复制!" : "复制"}
-                    </button>
-                    <a
-                      href={withBasePath(`/api/profiles/${profile.id}/${fileName}`)}
-                      download={fileName}
-                      className="px-3 py-1.5 text-xs font-medium rounded-md bg-indigo-100 text-indigo-700 hover:bg-indigo-200 dark:bg-indigo-500/20 dark:text-indigo-300 dark:hover:bg-indigo-500/30 transition-colors text-center active:scale-95"
-                    >
-                      下载
-                    </a>
-                  </>
-                )}
-              </div>
-            </div>
-            <div className="p-6 overflow-x-auto max-h-[400px] overflow-y-auto custom-scrollbar">
-              {editingFile === fileName ? (
-                <textarea
-                  value={editFileContent}
-                  onChange={(e) => setEditFileContent(e.target.value)}
-                  className="w-full min-h-[300px] p-4 text-sm font-mono text-neutral-800 bg-neutral-50 border border-neutral-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:bg-neutral-900 dark:border-neutral-700 dark:text-neutral-200 transition-colors resize-y custom-scrollbar"
-                />
-              ) : (
-                <pre className="text-xs font-mono text-neutral-600 dark:text-neutral-400 whitespace-pre-wrap break-words transition-colors">
-                  {fileContents[fileName] || "加载内容中..."}
-                </pre>
-              )}
+        <div className="rounded-2xl border border-neutral-200 bg-white/80 dark:border-white/10 dark:bg-white/[0.02] shadow-sm overflow-hidden transition-colors">
+          <div className="flex items-center justify-between px-6 py-4 border-b border-neutral-200 bg-neutral-100 dark:bg-black/40 dark:border-white/10 transition-colors">
+            <span className="font-mono text-sm text-neutral-700 dark:text-neutral-300 transition-colors">OPENAI API</span>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => handleCopy(sharedConfig)}
+                disabled={!sharedConfig}
+                className="px-3 py-1.5 text-xs font-medium rounded-md bg-neutral-200 hover:bg-neutral-300 text-neutral-800 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-white/5 dark:hover:bg-white/10 dark:text-white transition-colors text-center min-w-[70px] active:scale-95"
+              >
+                {copied ? "已复制!" : "复制"}
+              </button>
             </div>
           </div>
-        ))}
+          <div className="p-6 overflow-x-auto custom-scrollbar">
+            <pre className="text-xs font-mono text-neutral-600 dark:text-neutral-400 whitespace-pre-wrap break-words transition-colors">
+              {sharedConfig || "加载内容中..."}
+            </pre>
+          </div>
+        </div>
       </div>
     </div>
   );

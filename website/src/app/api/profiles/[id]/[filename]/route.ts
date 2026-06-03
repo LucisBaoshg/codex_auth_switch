@@ -1,20 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { promises as fs } from "fs";
 import path from "path";
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
-};
-
-const noStoreHeaders = {
-  ...corsHeaders,
-  "Cache-Control": "private, no-cache, no-store, max-age=0, must-revalidate",
-};
+import { noStoreHeaders, optionsResponse } from "@/lib/api-response";
+import { principalFromRequest, verifySessionCookieValue, sessionCookieName } from "@/lib/auth";
+import { getDataDir } from "@/lib/data-paths";
+import { getVisibleProfile } from "@/lib/profile-store";
 
 export async function OPTIONS() {
-  return new NextResponse(null, { headers: noStoreHeaders });
+  return optionsResponse();
 }
 
 export async function GET(
@@ -24,8 +17,17 @@ export async function GET(
   const p = await params;
   const id = p.id;
   const filename = p.filename;
+  const principal = await principalFromRequest(request);
+  if (!principal) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers: noStoreHeaders });
+  }
 
-  const dataDir = path.join(process.cwd(), "data");
+  const profile = await getVisibleProfile(id, principal);
+  if (!profile || !profile.files.includes(filename)) {
+    return NextResponse.json({ error: "File not found" }, { status: 404, headers: noStoreHeaders });
+  }
+
+  const dataDir = getDataDir();
   const filePath = path.join(dataDir, "files", id, filename);
 
   try {
@@ -56,8 +58,17 @@ export async function POST(
   const p = await params;
   const id = p.id;
   const filename = p.filename;
+  const principal = verifySessionCookieValue(request.cookies.get(sessionCookieName)?.value);
+  if (!principal) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers: noStoreHeaders });
+  }
 
-  const dataDir = path.join(process.cwd(), "data");
+  const profile = await getVisibleProfile(id, principal);
+  if (!profile || !profile.files.includes(filename) || profile.ownerDingUserId !== principal.dingUserId) {
+    return NextResponse.json({ error: "File not found" }, { status: 404, headers: noStoreHeaders });
+  }
+
+  const dataDir = getDataDir();
   const filePath = path.join(dataDir, "files", id, filename);
 
   try {

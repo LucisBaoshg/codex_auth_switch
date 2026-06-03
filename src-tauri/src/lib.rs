@@ -9,9 +9,9 @@ use crate::antigravity::models::{
 use crate::core::{
     check_for_update, check_install_location as resolve_install_location,
     install_update as perform_install_update, restart_codex_app, AppSnapshot,
-    InstallLocationStatus, LegacyThirdPartyMigrationResult, ModelProviderSummary, ProfileDocument,
-    ProfileInput, ProfileManager, SessionRecoveryReport, SessionRepairResult,
-    ThirdPartyWebsocketsDefaultResult, UpdateCheckResult, UpdateInstallRequest,
+    CodexMessage, CodexSessionInfo, InstallLocationStatus, LegacyThirdPartyMigrationResult,
+    ModelProviderSummary, ProfileDocument, ProfileInput, ProfileManager, SessionRecoveryReport,
+    SessionRepairResult, ThirdPartyWebsocketsDefaultResult, UpdateCheckResult, UpdateInstallRequest,
 };
 use crate::menu_bar::{
     install_menu_bar, menu_bar_refresh_target, sync_menu_bar_usage, MenuBarRefreshKind,
@@ -333,6 +333,37 @@ fn restart_codex() -> Result<(), String> {
 }
 
 #[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let parsed = url::Url::parse(&url).map_err(|error| error.to_string())?;
+    match parsed.scheme() {
+        "http" | "https" => (),
+        scheme => return Err(format!("unsupported URL scheme: {scheme}")),
+    }
+
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(target_os = "macos")]
+    command.arg(parsed.as_str());
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = std::process::Command::new("rundll32");
+        command.args(["url.dll,FileProtocolHandler", parsed.as_str()]);
+        command
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(parsed.as_str());
+        command
+    };
+
+    command.spawn().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 fn fix_session_database(app: tauri::AppHandle) -> Result<(), String> {
     let manager = manager_from_app(&app)?;
     manager
@@ -376,6 +407,67 @@ fn install_update(payload: UpdateInstallRequest) -> Result<(), String> {
 #[tauri::command]
 fn check_install_location() -> Result<InstallLocationStatus, String> {
     resolve_install_location().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn list_codex_sessions(app: AppHandle) -> Result<Vec<CodexSessionInfo>, String> {
+    run_blocking_manager_task(app, move |manager| {
+        manager
+            .list_codex_sessions()
+            .map_err(|error| error.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn get_codex_session_messages(
+    app: AppHandle,
+    thread_id: String,
+) -> Result<Vec<CodexMessage>, String> {
+    run_blocking_manager_task(app, move |manager| {
+        manager
+            .get_codex_session_messages(&thread_id)
+            .map_err(|error| error.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn archive_codex_session(
+    app: AppHandle,
+    thread_id: String,
+    archive: bool,
+) -> Result<(), String> {
+    run_blocking_manager_task(app, move |manager| {
+        manager
+            .archive_codex_session(&thread_id, archive)
+            .map_err(|error| error.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn delete_codex_session(app: AppHandle, thread_id: String) -> Result<(), String> {
+    run_blocking_manager_task(app, move |manager| {
+        manager
+            .delete_codex_session(&thread_id)
+            .map_err(|error| error.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn rename_codex_session(
+    app: AppHandle,
+    thread_id: String,
+    new_title: String,
+) -> Result<(), String> {
+    run_blocking_manager_task(app, move |manager| {
+        manager
+            .rename_codex_session(&thread_id, &new_title)
+            .map_err(|error| error.to_string())
+    })
+    .await
 }
 
 fn snapshot_and_sync(app: &AppHandle, manager: &ProfileManager) -> Result<AppSnapshot, String> {
@@ -445,13 +537,19 @@ pub fn run() {
             refresh_all_codex_usage,
             open_target_dir,
             restart_codex,
+            open_external_url,
             fix_session_database,
             diagnose_codex_sessions,
             repair_codex_sessions,
             check_update,
             install_update,
-            check_install_location
+            check_install_location,
+            list_codex_sessions,
+            get_codex_session_messages,
+            archive_codex_session,
+            delete_codex_session,
+            rename_codex_session
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Codex Auth Switch");
+        .expect("error while running Codex 助手");
 }

@@ -1,4 +1,4 @@
-# Codex Auth Switch
+# Codex 助手
 
 > 多账号、多平台、支持共生配置的 Codex 桌面控制台。<br>
 > A desktop control center for Codex profiles, Antigravity accounts, and symbiotic third-party API workflows.
@@ -8,7 +8,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Release](https://img.shields.io/github/v/release/LucisBaoshg/codex_auth_switch?label=release)](https://github.com/LucisBaoshg/codex_auth_switch/releases)
 
-Codex Auth Switch 是一个跨平台桌面工具，用来管理多套 Codex（Codex）账号配置、第三方 API（Third-party API）配置、共生配置（Symbiotic Config），以及 Google Antigravity（Antigravity）的本地登录状态。共生配置复用官方 OAuth（OAuth）登录状态，同时把模型请求转到第三方 API，不再需要单独的增强启动（Enhanced Launch）流程。
+Codex 助手是一个跨平台桌面工具，用来管理多套 Codex（Codex）账号配置、第三方 API（Third-party API）配置、共生配置（Symbiotic Config），以及 Google Antigravity（Antigravity）的本地登录状态。共生配置复用官方 OAuth（OAuth）登录状态，同时把模型请求转到第三方 API，不再需要单独的增强启动（Enhanced Launch）流程。
 
 ## Highlights
 
@@ -49,7 +49,7 @@ Codex Auth Switch 是一个跨平台桌面工具，用来管理多套 Codex（Co
 
 ### Desktop App
 
-1. 打开 Codex Auth Switch
+1. 打开 Codex 助手
 2. 在 Codex 页签中点击“加配置”，或从当前 `~/.codex` 导入现有配置
 3. 选择一个 profile，点击“应用”
 4. 需要第三方 API 同时保留官方 OAuth 能力时，创建“共生配置”
@@ -230,9 +230,9 @@ website/                Profile sharing web surface
 
 ## 中文 / English Summary
 
-**中文**：Codex Auth Switch 是一个面向重度 Codex 用户的本地控制台，解决多账号配置切换、第三方 API 与共生配置管理，以及 Antigravity 登录状态切换的问题。
+**中文**：Codex 助手是一个面向重度 Codex 用户的本地控制台，解决多账号配置切换、第三方 API 与共生配置管理，以及 Antigravity 登录状态切换的问题。
 
-**English**: Codex Auth Switch is a local desktop control center for power Codex users. It manages multiple Codex profiles, third-party API and symbiotic API setups, plus Antigravity account snapshots.
+**English**: Codex 助手 is a local desktop control center for power Codex users. It manages multiple Codex profiles, third-party API and symbiotic API setups, plus Antigravity account snapshots.
 
 ## License
 

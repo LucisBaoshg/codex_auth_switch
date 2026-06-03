@@ -511,6 +511,98 @@ struct SessionRecoveryThread {
     model_provider: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexSessionInfo {
+    pub id: String,
+    pub rollout_path: Option<String>,
+    pub updated_at_ms: i64,
+    pub cwd: Option<String>,
+    pub title: Option<String>,
+    pub has_user_event: bool,
+    pub archived: bool,
+    pub model_provider: Option<String>,
+    pub file_size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexMessage {
+    pub role: String,
+    pub text: String,
+}
+
+fn extract_message_text(content: &serde_json::Value) -> String {
+    match content {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(arr) => {
+            let mut parts = Vec::new();
+            for item in arr {
+                if let Some(text_val) = item.get("text").and_then(|v| v.as_str()) {
+                    parts.push(text_val.to_string());
+                } else if let Some(text_val) = item.as_str() {
+                    parts.push(text_val.to_string());
+                }
+            }
+            parts.join("\n")
+        }
+        serde_json::Value::Object(obj) => {
+            if let Some(text_val) = obj.get("text").and_then(|v| v.as_str()) {
+                text_val.to_string()
+            } else {
+                String::new()
+            }
+        }
+        _ => String::new(),
+    }
+}
+
+fn parse_rollout_date_parts(filename: &str) -> Option<(&str, &str, &str)> {
+    if filename.starts_with("rollout-") && filename.len() >= 18 {
+        let year = &filename[8..12];
+        let month = &filename[13..15];
+        let day = &filename[16..18];
+        if year.chars().all(|c| c.is_ascii_digit())
+            && month.chars().all(|c| c.is_ascii_digit())
+            && day.chars().all(|c| c.is_ascii_digit())
+        {
+            return Some((year, month, day));
+        }
+    }
+    None
+}
+
+fn update_session_index_title(session_index_path: &Path, thread_id: &str, new_title: &str) -> Result<(), AppError> {
+    if !session_index_path.exists() {
+        return Ok(());
+    }
+    let file = fs::File::open(session_index_path)?;
+    let temp_path = session_index_path.with_extension("tmp");
+    let mut temp_file = fs::File::create(&temp_path)?;
+
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(mut entry) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if entry.get("id").and_then(|v| v.as_str()) == Some(thread_id) {
+                if let Some(obj) = entry.as_object_mut() {
+                    obj.insert("thread_name".to_string(), serde_json::Value::String(new_title.to_string()));
+                }
+            }
+            let serialized = serde_json::to_string(&entry)?;
+            writeln!(temp_file, "{}", serialized)?;
+        } else {
+            writeln!(temp_file, "{}", line)?;
+        }
+    }
+    fs::rename(&temp_path, session_index_path)?;
+    Ok(())
+}
+
+
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SessionRepairAudit {
@@ -582,6 +674,8 @@ pub enum AppError {
     ProfileNotFound(String),
     #[error("{0}")]
     Message(String),
+    #[error("Database error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
 }
 
 const SESSION_RECOVERY_RECENT_LIMIT: usize = 50;
@@ -1151,6 +1245,232 @@ impl ProfileManager {
                 )
             })
     }
+
+    pub fn list_codex_sessions(&self) -> Result<Vec<CodexSessionInfo>, AppError> {
+        let Some(db_path) = primary_state_database_path(&self.target_dir) else {
+            return Ok(Vec::new());
+        };
+        let conn = match open_valid_state_database(&db_path) {
+            Some(c) => c,
+            None => return Ok(Vec::new()),
+        };
+        let threads = read_session_recovery_threads(&conn)
+            .map_err(|error| AppError::Message(format!("Failed to read threads from session database: {error}")))?;
+
+        let num_items = threads.len();
+        let mut list = Vec::with_capacity(num_items);
+
+        if num_items > 0 {
+            let num_workers = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .min(num_items);
+
+            let mut file_sizes = vec![None; num_items];
+
+            std::thread::scope(|s| {
+                let chunk_size = (num_items + num_workers - 1) / num_workers;
+                let t_chunks = threads.chunks(chunk_size);
+                let s_chunks = file_sizes.chunks_mut(chunk_size);
+
+                for (t_chunk, s_chunk) in t_chunks.zip(s_chunks) {
+                    s.spawn(move || {
+                        for (t, s_val) in t_chunk.iter().zip(s_chunk.iter_mut()) {
+                            if let Some(ref p) = t.rollout_path {
+                                if let Ok(m) = fs::metadata(p) {
+                                    *s_val = Some(m.len());
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+
+            for (t, file_size) in threads.into_iter().zip(file_sizes.into_iter()) {
+                list.push(CodexSessionInfo {
+                    id: t.id,
+                    rollout_path: t.rollout_path.map(|p| p.to_string_lossy().to_string()),
+                    updated_at_ms: t.updated_at_ms,
+                    cwd: t.cwd,
+                    title: t.title,
+                    has_user_event: t.has_user_event,
+                    archived: t.archived,
+                    model_provider: t.model_provider,
+                    file_size,
+                });
+            }
+        }
+
+        Ok(list)
+    }
+
+    pub fn get_codex_session_messages(&self, thread_id: &str) -> Result<Vec<CodexMessage>, AppError> {
+        let Some(db_path) = primary_state_database_path(&self.target_dir) else {
+            return Err(AppError::Message("No session database found.".into()));
+        };
+        let conn = open_valid_state_database(&db_path)
+            .ok_or_else(|| AppError::Message("Invalid state database.".into()))?;
+
+        let mut stmt = conn.prepare("SELECT rollout_path FROM threads WHERE id = ?1")?;
+        let rollout_path_str: Option<String> = match stmt.query_row([thread_id], |row| row.get(0)) {
+            Ok(val) => val,
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(AppError::Message(format!("Failed to query thread rollout path: {e}"))),
+        };
+
+        let Some(path_str) = rollout_path_str else {
+            return Err(AppError::Message(format!("No rollout path stored for thread {thread_id}")));
+        };
+
+        let path = PathBuf::from(&path_str);
+        if !path.exists() {
+            return Err(AppError::Message(format!("Rollout file does not exist at {path_str}")));
+        }
+
+        let file = fs::File::open(path)?;
+        let mut messages = Vec::new();
+
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                continue;
+            };
+
+            if value.get("type").and_then(|v| v.as_str()) == Some("message") {
+                if let Some(role) = value.get("role").and_then(|v| v.as_str()) {
+                    let text = value.get("content")
+                        .map(extract_message_text)
+                        .unwrap_or_default();
+                    if !text.is_empty() {
+                        messages.push(CodexMessage {
+                            role: role.to_string(),
+                            text,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(messages)
+    }
+
+    pub fn archive_codex_session(&self, thread_id: &str, archive: bool) -> Result<(), AppError> {
+        let Some(db_path) = primary_state_database_path(&self.target_dir) else {
+            return Err(AppError::Message("No session database found.".into()));
+        };
+        let conn = open_valid_state_database(&db_path)
+            .ok_or_else(|| AppError::Message("Invalid state database.".into()))?;
+
+        // Query current state
+        let mut stmt = conn.prepare("SELECT rollout_path, archived FROM threads WHERE id = ?1")?;
+        let result: Option<(Option<String>, i64)> = match stmt.query_row([thread_id], |row| {
+            Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?))
+        }) {
+            Ok(val) => Some(val),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(AppError::Message(format!("Failed to query thread: {e}"))),
+        };
+
+        let Some((rollout_path_str, current_archived_int)) = result else {
+            return Err(AppError::ProfileNotFound(thread_id.to_string())); // thread not found
+        };
+
+        let current_archived = current_archived_int == 1;
+        if current_archived == archive {
+            return Ok(()); // Already in desired state
+        }
+
+        let mut next_rollout_path_str = rollout_path_str.clone();
+
+        // Handle file move if rollout_path is present and exists
+        if let Some(src_path_str) = rollout_path_str {
+            let src_path = PathBuf::from(&src_path_str);
+            if src_path.exists() {
+                let filename = src_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                let target_path = if archive {
+                    // Archive: move to archived_sessions/
+                    let dest_dir = self.target_dir.join("archived_sessions");
+                    fs::create_dir_all(&dest_dir)?;
+                    dest_dir.join(filename)
+                } else {
+                    // Unarchive: move to sessions/YYYY/MM/DD/
+                    let (year, month, day) = parse_rollout_date_parts(filename)
+                        .unwrap_or(("2026", "01", "01"));
+                    let dest_dir = self.target_dir.join("sessions").join(year).join(month).join(day);
+                    fs::create_dir_all(&dest_dir)?;
+                    dest_dir.join(filename)
+                };
+
+                // Move file
+                fs::rename(&src_path, &target_path)?;
+                next_rollout_path_str = Some(target_path.to_string_lossy().to_string());
+            }
+        }
+
+        // Update database
+        let archive_val = if archive { 1 } else { 0 };
+        conn.execute(
+            "UPDATE threads SET archived = ?1, rollout_path = ?2 WHERE id = ?3",
+            rusqlite::params![archive_val, next_rollout_path_str, thread_id],
+        ).map_err(|e| AppError::Message(format!("Failed to update thread archive state: {e}")))?;
+
+        Ok(())
+    }
+
+    pub fn delete_codex_session(&self, thread_id: &str) -> Result<(), AppError> {
+        let Some(db_path) = primary_state_database_path(&self.target_dir) else {
+            return Err(AppError::Message("No session database found.".into()));
+        };
+        let conn = open_valid_state_database(&db_path)
+            .ok_or_else(|| AppError::Message("Invalid state database.".into()))?;
+
+        // Query rollout path first
+        let mut stmt = conn.prepare("SELECT rollout_path FROM threads WHERE id = ?1")?;
+        let rollout_path_str: Option<String> = match stmt.query_row([thread_id], |row| row.get(0)) {
+            Ok(val) => val,
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(AppError::Message(format!("Failed to query thread rollout path: {e}"))),
+        };
+
+        // Delete from database
+        conn.execute("DELETE FROM threads WHERE id = ?1", [thread_id])
+            .map_err(|e| AppError::Message(format!("Failed to delete thread from database: {e}")))?;
+
+        // Delete rollout file
+        if let Some(path_str) = rollout_path_str {
+            let path = PathBuf::from(&path_str);
+            if path.exists() {
+                let _ = fs::remove_file(&path);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn rename_codex_session(&self, thread_id: &str, new_title: &str) -> Result<(), AppError> {
+        let Some(db_path) = primary_state_database_path(&self.target_dir) else {
+            return Err(AppError::Message("No session database found.".into()));
+        };
+        let conn = open_valid_state_database(&db_path)
+            .ok_or_else(|| AppError::Message("Invalid state database.".into()))?;
+
+        // Update database
+        conn.execute(
+            "UPDATE threads SET title = ?1 WHERE id = ?2",
+            rusqlite::params![new_title, thread_id],
+        ).map_err(|e| AppError::Message(format!("Failed to update thread title in database: {e}")))?;
+
+        // Update session_index.jsonl
+        let session_index_path = self.target_dir.join("session_index.jsonl");
+        if session_index_path.exists() {
+            let _ = update_session_index_title(&session_index_path, thread_id, new_title);
+        }
+
+        Ok(())
+    }
+
 
     fn repair_configs_and_resolve_session_provider(&self) -> Result<String, AppError> {
         let target_config = self.target_dir.join("config.toml");
@@ -2930,7 +3250,7 @@ fn install_location_status_for_path(path: &Path) -> InstallLocationStatus {
             requires_applications_install: true,
             install_path: install_root.display().to_string(),
             message: Some(
-                "当前应用不在 Applications 文件夹中。请先将 Codex Auth Switch 拖到 Applications 后再重新打开，然后再执行更新。".into(),
+                "当前应用不在 Applications 文件夹中。请先将 Codex 助手拖到 Applications 后再重新打开，然后再执行更新。".into(),
             ),
         };
     }
@@ -3073,7 +3393,7 @@ fn replace_macos_app_bundle(source_app: &Path, target_app: &Path) -> Result<(), 
         target_app
             .file_name()
             .and_then(|value| value.to_str())
-            .unwrap_or("Codex Auth Switch.app"),
+            .unwrap_or("Codex 助手.app"),
         Uuid::new_v4()
     ));
 
@@ -4130,7 +4450,7 @@ mod tests {
     #[test]
     fn install_location_check_accepts_system_applications_bundle() {
         let status = install_location_status_for_path(Path::new(
-            "/Applications/Codex Auth Switch.app/Contents/MacOS/Codex Auth Switch",
+            "/Applications/Codex 助手.app/Contents/MacOS/Codex 助手",
         ));
 
         assert!(status.update_safe);
@@ -4140,7 +4460,7 @@ mod tests {
     #[test]
     fn install_location_check_flags_non_applications_bundle() {
         let status = install_location_status_for_path(Path::new(
-            "/Users/lucifer/Downloads/Codex Auth Switch.app/Contents/MacOS/Codex Auth Switch",
+            "/Users/lucifer/Downloads/Codex 助手.app/Contents/MacOS/Codex 助手",
         ));
 
         assert!(!status.update_safe);

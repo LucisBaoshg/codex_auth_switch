@@ -1,52 +1,38 @@
 import { NextRequest, NextResponse } from "next/server";
-import { promises as fs } from "fs";
-import path from "path";
-
-const dataDir = path.join(process.cwd(), "data");
-const profilesFile = path.join(dataDir, "profiles.json");
-const filesDir = path.join(dataDir, "files");
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
-};
-
-const noStoreHeaders = {
-  ...corsHeaders,
-  "Cache-Control": "private, no-cache, no-store, max-age=0, must-revalidate",
-};
+import { noStoreHeaders, optionsResponse } from "@/lib/api-response";
+import { principalFromRequest, verifySessionCookieValue, sessionCookieName } from "@/lib/auth";
+import {
+  createProfile,
+  filterProfilesForPrincipal,
+  publicProfile,
+  readProfiles,
+} from "@/lib/profile-store";
 
 export async function OPTIONS() {
-  return NextResponse.json({}, { headers: noStoreHeaders });
+  return optionsResponse();
 }
 
-// 确保目录和文件存在
-async function ensureDataFiles() {
-  try {
-    await fs.mkdir(filesDir, { recursive: true });
-    try {
-      await fs.access(profilesFile);
-    } catch {
-      await fs.writeFile(profilesFile, JSON.stringify([]));
-    }
-  } catch (error) {
-    console.error("Data dir init error:", error);
+export async function GET(req: NextRequest) {
+  const principal = await principalFromRequest(req);
+  if (!principal) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers: noStoreHeaders });
   }
-}
 
-export async function GET() {
-  await ensureDataFiles();
-  const data = await fs.readFile(profilesFile, "utf-8");
-  return NextResponse.json(JSON.parse(data), { headers: noStoreHeaders });
+  const profiles = filterProfilesForPrincipal(await readProfiles(), principal).map(publicProfile);
+  return NextResponse.json(profiles, { headers: noStoreHeaders });
 }
 
 export async function POST(req: NextRequest) {
-  await ensureDataFiles();
+  const principal = verifySessionCookieValue(req.cookies.get(sessionCookieName)?.value);
+  if (!principal) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers: noStoreHeaders });
+  }
+
   try {
     const formData = await req.formData();
     const name = formData.get("name") as string;
     const description = formData.get("description") as string;
+    const sharedWith = formData.get("sharedWith") as string;
     const file1 = formData.get("file1") as File | null;
     const file2 = formData.get("file2") as File | null;
 
@@ -54,31 +40,15 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Missing required fields or files" }, { status: 400, headers: noStoreHeaders });
     }
 
-    const id = Date.now().toString();
-    const profileFolder = path.join(filesDir, id);
-    await fs.mkdir(profileFolder, { recursive: true });
-
-    // 保存文件
-    const buffer1 = Buffer.from(await file1.arrayBuffer());
-    await fs.writeFile(path.join(profileFolder, file1.name), buffer1);
-
-    const buffer2 = Buffer.from(await file2.arrayBuffer());
-    await fs.writeFile(path.join(profileFolder, file2.name), buffer2);
-
-    const newProfile = {
-      id,
+    const newProfile = await createProfile({
       name,
-      description: description || "",
-      createdAt: new Date().toISOString(),
-      files: [file1.name, file2.name]
-    };
+      description,
+      sharedWith,
+      authContent: await file1.text(),
+      configContent: await file2.text(),
+    }, principal);
 
-    const existingProfiles = JSON.parse(await fs.readFile(profilesFile, "utf-8"));
-    existingProfiles.unshift(newProfile);
-    
-    await fs.writeFile(profilesFile, JSON.stringify(existingProfiles, null, 2));
-
-    return NextResponse.json(newProfile, { status: 201, headers: noStoreHeaders });
+    return NextResponse.json(publicProfile(newProfile), { status: 201, headers: noStoreHeaders });
   } catch (error) {
     console.error("Upload Error:", error);
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500, headers: noStoreHeaders });

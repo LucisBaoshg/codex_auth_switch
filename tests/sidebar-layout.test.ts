@@ -49,7 +49,7 @@ test("renders the default profile list without a left sidebar", async () => {
   expect(document.body.textContent).not.toContain("唤起宠物");
   expect(document.querySelector('[data-role="global-refresh"]')).not.toBeNull();
   expect(document.querySelector('[data-role="update-entry"]')).not.toBeNull();
-  expect(document.querySelector('[data-role="update-entry"]')?.textContent).toContain("检查更新");
+  expect(document.querySelector('[data-role="update-entry"]')?.textContent).toContain("最新版");
   expect(document.querySelector('[data-role="add-card"]')).not.toBeNull();
   expect(document.querySelector(".page-header")).toBeNull();
   expect(document.querySelector('[data-role="current-config-card"]')).toBeNull();
@@ -522,7 +522,7 @@ test("shows the latest version in the update entry after update is detected", as
       return {
         updateSafe: true,
         requiresApplicationsInstall: false,
-        installPath: "/Applications/Codex Auth Switch.app",
+        installPath: "/Applications/Codex 助手.app",
         message: null,
       };
     }
@@ -570,7 +570,7 @@ test("shows the latest version in the update entry after update is detected", as
   await flushUi();
 
   expect(invokeMock).toHaveBeenCalledWith("check_update", undefined);
-  expect(document.querySelector('[data-role="update-entry"]')?.textContent).toContain("发现新版本");
+  expect(document.querySelector('[data-role="update-entry"]')?.textContent).toContain("有新版本");
   expect(document.querySelector('[data-role="update-entry"]')?.textContent).toContain("v1.3.2");
 });
 
@@ -609,7 +609,7 @@ test("opens the mirror download link when only an installer package is available
       return {
         updateSafe: true,
         requiresApplicationsInstall: false,
-        installPath: "C:/Program Files/Codex Auth Switch",
+        installPath: "C:/Program Files/Codex 助手",
         message: null,
       };
     }
@@ -1789,10 +1789,11 @@ test("opens the detail editor when clicking view-details on a profile card", asy
 });
 
 test("opens network shared profile details in readonly mode without browser cache", async () => {
+  localStorage.setItem("codex-auth-switch.networkProfileToken", "cas_test_token");
   const fetchMock = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
     const url = input.toString();
 
-    if (url === "http://sub2api.ite.tapcash.com/codex/api/profiles") {
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles") {
       return {
         ok: true,
         json: async () => [
@@ -1807,7 +1808,7 @@ test("opens network shared profile details in readonly mode without browser cach
       };
     }
 
-    if (url === "http://sub2api.ite.tapcash.com/codex/api/profiles/remote-1") {
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-1") {
       return {
         ok: true,
         json: async () => ({
@@ -1820,14 +1821,14 @@ test("opens network shared profile details in readonly mode without browser cach
       };
     }
 
-    if (url === "http://sub2api.ite.tapcash.com/codex/api/profiles/remote-1/auth.json") {
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-1/auth.json") {
       return {
         ok: true,
         text: async () => '{"token":"remote-token"}',
       };
     }
 
-    if (url === "http://sub2api.ite.tapcash.com/codex/api/profiles/remote-1/config.toml") {
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-1/config.toml") {
       return {
         ok: true,
         text: async () => 'model = "gpt-5.4"\n',
@@ -1843,7 +1844,13 @@ test("opens network shared profile details in readonly mode without browser cach
   await flushUi();
 
   document
-    .querySelector<HTMLButtonElement>('[data-action="tab-network"]')
+    .querySelector<HTMLButtonElement>('[data-action="new-profile"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="editor-tab-network"]')
     ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
   await flushUi();
@@ -1870,20 +1877,20 @@ test("opens network shared profile details in readonly mode without browser cach
   expect(document.querySelector('[data-action="save-editor"]')).toBeNull();
   expect(document.querySelector('[data-action="save-and-switch"]')).toBeNull();
   expect(fetchMock).toHaveBeenCalledWith(
-    "http://sub2api.ite.tapcash.com/codex/api/profiles",
-    { cache: "no-store" },
+    "https://codex-helper.ite.tool4seller.com/codex/api/profiles",
+    { cache: "no-store", headers: { Authorization: "Bearer cas_test_token" } },
   );
   expect(fetchMock).toHaveBeenCalledWith(
-    "http://sub2api.ite.tapcash.com/codex/api/profiles/remote-1",
-    { cache: "no-store" },
+    "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-1",
+    { cache: "no-store", headers: { Authorization: "Bearer cas_test_token" } },
   );
   expect(fetchMock).toHaveBeenCalledWith(
-    "http://sub2api.ite.tapcash.com/codex/api/profiles/remote-1/auth.json",
-    { cache: "no-store" },
+    "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-1/auth.json",
+    { cache: "no-store", headers: { Authorization: "Bearer cas_test_token" } },
   );
   expect(fetchMock).toHaveBeenCalledWith(
-    "http://sub2api.ite.tapcash.com/codex/api/profiles/remote-1/config.toml",
-    { cache: "no-store" },
+    "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-1/config.toml",
+    { cache: "no-store", headers: { Authorization: "Bearer cas_test_token" } },
   );
 });
 
@@ -2020,9 +2027,9 @@ test("shows Applications install guidance before checking for update on macOS", 
       return {
         updateSafe: false,
         requiresApplicationsInstall: true,
-        installPath: "/Users/example/Downloads/Codex Auth Switch.app",
+        installPath: "/Users/example/Downloads/Codex 助手.app",
         message:
-          "当前应用不在 Applications 文件夹中。请先将 Codex Auth Switch 拖到 Applications 后再重新打开，然后再执行更新。",
+          "当前应用不在 Applications 文件夹中。请先将 Codex 助手拖到 Applications 后再重新打开，然后再执行更新。",
       };
     }
     throw new Error(`unexpected command: ${command}`);

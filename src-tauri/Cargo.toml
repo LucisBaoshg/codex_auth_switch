@@ -28,6 +28,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 semver = "1"
 ureq = { version = "2", features = ["json"] }
 uuid = { version = "1", features = ["serde", "v4"] }
+url = "2"
 
 [dev-dependencies]
 tempfile = "3"
