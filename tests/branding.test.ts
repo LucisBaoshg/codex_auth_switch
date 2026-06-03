@@ -4,19 +4,26 @@ import { expect, test } from "vitest";
 
 const root = join(import.meta.dirname, "..");
 const displayName = "Codex 助手";
-const previousDisplayName = "Codex Auth Switch";
+const packagingProductName = "Codex Auth Switch";
 
 function readProjectFile(path: string): string {
   return readFileSync(join(root, path), "utf8");
 }
 
-test("uses Codex assistant as the public app display name", () => {
+test("keeps packaging product name stable for release artifacts", () => {
   const tauriConfig = JSON.parse(readProjectFile("src-tauri/tauri.conf.json")) as {
     productName: string;
     app: { windows: Array<{ title: string }> };
   };
 
-  expect(tauriConfig.productName).toBe(displayName);
+  expect(tauriConfig.productName).toBe(packagingProductName);
+});
+
+test("uses Codex assistant as the public app display name", () => {
+  const tauriConfig = JSON.parse(readProjectFile("src-tauri/tauri.conf.json")) as {
+    app: { windows: Array<{ title: string }> };
+  };
+
   expect(tauriConfig.app.windows[0]?.title).toBe(displayName);
 
   const publicFiles = [
@@ -31,6 +38,5 @@ test("uses Codex assistant as the public app display name", () => {
   for (const file of publicFiles) {
     const content = readProjectFile(file);
     expect(content, file).toContain(displayName);
-    expect(content, file).not.toContain(previousDisplayName);
   }
 });
