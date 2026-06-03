@@ -1945,7 +1945,6 @@ impl ProfileManager {
             return Ok(ResolvedCodexUsageAuthSource {
                 auth_json: saved_auth_json,
                 config_toml: saved_config_toml,
-                using_runtime_auth: false,
                 should_sync_runtime_state: false,
             });
         }
@@ -1954,7 +1953,6 @@ impl ProfileManager {
             return Ok(ResolvedCodexUsageAuthSource {
                 auth_json: saved_auth_json,
                 config_toml: saved_config_toml,
-                using_runtime_auth: false,
                 should_sync_runtime_state: false,
             });
         };
@@ -1962,7 +1960,6 @@ impl ProfileManager {
             return Ok(ResolvedCodexUsageAuthSource {
                 auth_json: saved_auth_json,
                 config_toml: saved_config_toml,
-                using_runtime_auth: false,
                 should_sync_runtime_state: false,
             });
         }
@@ -1972,7 +1969,6 @@ impl ProfileManager {
             return Ok(ResolvedCodexUsageAuthSource {
                 auth_json: saved_auth_json,
                 config_toml: saved_config_toml,
-                using_runtime_auth: false,
                 should_sync_runtime_state: false,
             });
         }
@@ -1984,7 +1980,6 @@ impl ProfileManager {
         Ok(ResolvedCodexUsageAuthSource {
             auth_json: runtime_auth_json,
             config_toml: runtime_config_toml,
-            using_runtime_auth: true,
             should_sync_runtime_state,
         })
     }
@@ -2021,45 +2016,12 @@ impl ProfileManager {
             ));
         }
 
-        // Try querying the usage directly with the current access token first
-        let (refreshed_auth_json, usage) = match fetch_codex_usage_snapshot(&source.auth_json) {
-            Ok(usage) => (source.auth_json.clone(), usage),
-            Err(fetch_error) => {
-                // If it fails, check if we have a refresh token to try refreshing
-                if oauth_refresh_token(&source.auth_json).is_some() {
-                    match refresh_oauth_auth_json(&source.auth_json) {
-                        Ok(refreshed) => {
-                            // If refresh succeeds, try querying again with the new token
-                            match fetch_codex_usage_snapshot(&refreshed) {
-                                Ok(usage) => (refreshed, usage),
-                                Err(err) => return Err(err),
-                            }
-                        }
-                        Err(refresh_error) => {
-                            // If refreshing fails with 401 or 400, format a user-friendly message
-                            let err_msg = refresh_error.to_string();
-                            if err_msg.contains("401") || err_msg.contains("400") {
-                                return Err(AppError::Message(
-                                    "官方 OAuth 登录已过期或已被撤销，请重新导入/登录您的 ChatGPT 账号。".into()
-                                ));
-                            }
-                            return Err(refresh_error);
-                        }
-                    }
-                } else {
-                    return Err(fetch_error);
-                }
-            }
-        };
+        let usage = fetch_codex_usage_snapshot(&source.auth_json)?;
 
-        if source.using_runtime_auth && refreshed_auth_json != source.auth_json {
-            fs::write(self.target_auth_path(), &refreshed_auth_json)?;
-        }
-
-        if source.should_sync_runtime_state || refreshed_auth_json != source.auth_json {
+        if source.should_sync_runtime_state {
             self.sync_runtime_state_to_profile(
                 profile_id,
-                &refreshed_auth_json,
+                &source.auth_json,
                 &source.config_toml,
             )?;
         }
@@ -4256,7 +4218,6 @@ struct OAuthRefreshResponse {
 struct ResolvedCodexUsageAuthSource {
     auth_json: String,
     config_toml: String,
-    using_runtime_auth: bool,
     should_sync_runtime_state: bool,
 }
 

@@ -645,7 +645,7 @@ fn refresh_all_codex_usage_continues_and_marks_failed_profiles() {
 }
 
 #[test]
-fn refresh_profile_codex_usage_refreshes_token_before_requesting_usage_api() {
+fn refresh_profile_codex_usage_does_not_refresh_oauth_token_on_usage_failure() {
     let _guard = env_lock().lock().expect("lock env");
     let server = TestServer::start();
     server.set_json(
@@ -704,24 +704,26 @@ fn refresh_profile_codex_usage_refreshes_token_before_requesting_usage_api() {
         .set_codex_usage_api_enabled(true)
         .expect("enable usage api");
 
-    manager
+    let error = manager
         .refresh_profile_codex_usage(&profile.id)
-        .expect("refresh usage should refresh auth first");
+        .expect_err("usage refresh should not refresh oauth tokens");
+    assert!(error.to_string().contains("Failed to fetch Codex usage"));
 
     let requests = server.requests();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 1);
     assert!(requests[0].contains("GET /backend-api/wham/usage HTTP/1.1"));
     assert!(requests[0].contains("Authorization: Bearer access-token-stale"));
-    assert!(requests[1].contains("POST /oauth/token HTTP/1.1"));
-    assert!(requests[1].contains("refresh_token=refresh-token-stale"));
-    assert!(requests[2].contains("GET /backend-api/wham/usage HTTP/1.1"));
-    assert!(requests[2].contains("Authorization: Bearer access-token-fresh"));
+    assert!(!requests
+        .iter()
+        .any(|request| request.contains("POST /oauth/token HTTP/1.1")));
 
     let saved = manager
         .get_profile_document(&profile.id)
-        .expect("load synced profile");
-    assert!(saved.auth_json.contains("access-token-fresh"));
-    assert!(saved.auth_json.contains("refresh-token-fresh"));
+        .expect("load unchanged profile");
+    assert!(saved.auth_json.contains("access-token-stale"));
+    assert!(saved.auth_json.contains("refresh-token-stale"));
+    assert!(!saved.auth_json.contains("access-token-fresh"));
+    assert!(!saved.auth_json.contains("refresh-token-fresh"));
 
     std::env::remove_var("CODEX_AUTH_SWITCH_CODEX_USAGE_ENDPOINT");
     std::env::remove_var("CODEX_REFRESH_TOKEN_URL_OVERRIDE");
