@@ -100,7 +100,7 @@ dependencies = [
 
 [[package]]
 name = "codex-auth-switch-cli"
-version = "1.4.29"
+version = "1.4.30"
 dependencies = [
  "base64",
  "chrono",

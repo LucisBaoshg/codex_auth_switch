@@ -88,6 +88,75 @@ test("uses saved desktop bearer token when refreshing the network shared library
   });
 });
 
+test("shows DingTalk login prompt in the sidebar before network login", async () => {
+  await import("../src/main");
+  await flushUi();
+
+  const status = document.querySelector('[data-role="sidebar-login-status"]');
+  expect(status).not.toBeNull();
+  expect(status?.textContent).toContain("未登录");
+  expect(status?.textContent).toContain("钉钉 SSO 登录");
+  expect(status?.querySelector('[data-action="open-network-sso-login"]')).not.toBeNull();
+});
+
+test("shows the logged in user in the sidebar and logs out from settings", async () => {
+  localStorage.setItem("codex-auth-switch.networkProfileToken", "cas_desktop_token");
+  fetchMock.mockImplementation(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = input.toString();
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/auth/me") {
+      expect(init).toEqual({
+        cache: "no-store",
+        headers: {
+          Authorization: "Bearer cas_desktop_token",
+        },
+      });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          user: {
+            dingUserId: "Ding-A",
+            name: "Alice",
+            mobile: "13900000001",
+            jobNumber: "A001",
+          },
+        }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => [],
+    };
+  });
+
+  await import("../src/main");
+  await flushUi();
+  await flushUi();
+
+  const status = document.querySelector('[data-role="sidebar-login-status"]');
+  expect(status?.textContent).toContain("Alice");
+  expect(status?.textContent).toContain("13900000001");
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="nav-settings"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+
+  const accountCard = document.querySelector('[data-role="network-account-settings"]');
+  expect(accountCard?.textContent).toContain("Alice");
+  expect(accountCard?.textContent).toContain("13900000001");
+
+  accountCard
+    ?.querySelector<HTMLButtonElement>('[data-action="logout-network-user"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+
+  expect(localStorage.getItem("codex-auth-switch.networkProfileToken")).toBe("");
+  expect(document.querySelector('[data-role="sidebar-login-status"]')?.textContent).toContain("未登录");
+  expect(document.querySelector<HTMLInputElement>("#network-profile-token")?.value).toBe("");
+});
+
 test("starts DingTalk SSO login from the cloud sharing settings", async () => {
   Object.defineProperty(window, "__TAURI_INTERNALS__", {
     configurable: true,
@@ -221,7 +290,7 @@ test("migrates the saved Tapcash cloud sharing URL before starting SSO login", a
   });
 });
 
-test("shows DingTalk SSO login inside the cloud import panel", async () => {
+test("shows DingTalk SSO login inside the sharing center", async () => {
   Object.defineProperty(window, "__TAURI_INTERNALS__", {
     configurable: true,
     value: {},
@@ -240,13 +309,9 @@ test("shows DingTalk SSO login inside the cloud import panel", async () => {
   await flushUi();
 
   document
-    .querySelector<HTMLButtonElement>('[data-action="new-profile"]')
+    .querySelector<HTMLButtonElement>('[data-action="nav-sharing"]')
     ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   await flushUi();
-
-  document
-    .querySelector<HTMLButtonElement>('[data-action="editor-tab-network"]')
-    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   await flushUi();
   await flushUi();
 

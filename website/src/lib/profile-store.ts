@@ -26,12 +26,16 @@ export type StoredProfile = {
   ownerDingUserId?: string;
   ownerName?: string | null;
   ownerMobile?: string | null;
+  visibility?: ProfileVisibility;
   sharedWith?: string[];
 };
+
+export type ProfileVisibility = "private" | "selected" | "public";
 
 export type ProfileInput = {
   name: string;
   description?: string;
+  visibility?: ProfileVisibility;
   sharedWith?: string | string[];
   authContent: string;
   configContent: string;
@@ -40,7 +44,7 @@ export type ProfileInput = {
 const profilesFileName = "profiles.json";
 
 export function normalizeSharedWith(input: string | string[] | null | undefined): string[] {
-  const raw = Array.isArray(input) ? input : String(input ?? "").split(/[\s,，;；]+/);
+  const raw = Array.isArray(input) ? input : parseSharedWithString(input);
   const seen = new Set<string>();
   const normalized: string[] = [];
 
@@ -56,6 +60,37 @@ export function normalizeSharedWith(input: string | string[] | null | undefined)
   }
 
   return normalized;
+}
+
+function parseSharedWithString(input: string | null | undefined): string[] {
+  const trimmed = String(input ?? "").trim();
+  if (!trimmed) return [];
+  if (trimmed.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        return parsed.map((value) => String(value));
+      }
+    } catch {
+      return [trimmed];
+    }
+  }
+  return trimmed.split(/[\s,，;；]+/);
+}
+
+export function normalizeProfileVisibility(
+  visibility: string | null | undefined,
+  sharedWith: string | string[] | null | undefined,
+): ProfileVisibility {
+  if (visibility === "public" || visibility === "selected" || visibility === "private") {
+    return visibility;
+  }
+  return normalizeSharedWith(sharedWith).length > 0 ? "selected" : "private";
+}
+
+export function profileVisibility(profile: StoredProfile): ProfileVisibility {
+  if (!profile.ownerDingUserId) return "public";
+  return normalizeProfileVisibility(profile.visibility, profile.sharedWith);
 }
 
 function principalIdentifiers(principal: ProfilePrincipal): Set<string> {
@@ -75,6 +110,7 @@ function principalIdentifiers(principal: ProfilePrincipal): Set<string> {
 export function canAccessProfile(profile: StoredProfile, principal: ProfilePrincipal | null): boolean {
   if (!principal) return false;
   if (!profile.ownerDingUserId) return true;
+  if (profileVisibility(profile) === "public") return true;
 
   const identifiers = principalIdentifiers(principal);
   if (identifiers.has(profile.ownerDingUserId.trim().toLowerCase())) return true;
@@ -82,6 +118,11 @@ export function canAccessProfile(profile: StoredProfile, principal: ProfilePrinc
   return normalizeSharedWith(profile.sharedWith).some((recipient) =>
     identifiers.has(recipient.toLowerCase()),
   );
+}
+
+export function canEditProfile(profile: StoredProfile, principal: ProfilePrincipal | null): boolean {
+  if (!principal || !profile.ownerDingUserId) return false;
+  return profile.ownerDingUserId.trim().toLowerCase() === principal.dingUserId.trim().toLowerCase();
 }
 
 export function filterProfilesForPrincipal(
@@ -94,6 +135,7 @@ export function filterProfilesForPrincipal(
 export function publicProfile(profile: StoredProfile): StoredProfile {
   return {
     ...profile,
+    visibility: profileVisibility(profile),
     sharedWith: normalizeSharedWith(profile.sharedWith),
   };
 }
@@ -153,6 +195,7 @@ export async function createProfile(input: ProfileInput, principal: ProfilePrinc
     ownerDingUserId: principal.dingUserId,
     ownerName: principal.name,
     ownerMobile: principal.mobile,
+    visibility: normalizeProfileVisibility(input.visibility, input.sharedWith),
     sharedWith: normalizeSharedWith(input.sharedWith),
   };
 
@@ -165,14 +208,12 @@ export async function createProfile(input: ProfileInput, principal: ProfilePrinc
 export async function updateProfileMetadata(
   id: string,
   principal: ProfilePrincipal,
-  updates: { name?: string; description?: string; sharedWith?: string | string[] },
+  updates: { name?: string; description?: string; visibility?: ProfileVisibility; sharedWith?: string | string[] },
 ) {
   const profiles = await readProfiles();
   const index = profiles.findIndex((profile) => profile.id === id);
   if (index === -1 || !canAccessProfile(profiles[index], principal)) return null;
-  if (profiles[index].ownerDingUserId && profiles[index].ownerDingUserId !== principal.dingUserId) {
-    return null;
-  }
+  if (!canEditProfile(profiles[index], principal)) return null;
 
   if (updates.name !== undefined && updates.name.trim()) {
     profiles[index].name = updates.name.trim();
@@ -182,6 +223,14 @@ export async function updateProfileMetadata(
   }
   if (updates.sharedWith !== undefined) {
     profiles[index].sharedWith = normalizeSharedWith(updates.sharedWith);
+  }
+  if (updates.visibility !== undefined) {
+    profiles[index].visibility = normalizeProfileVisibility(updates.visibility, profiles[index].sharedWith);
+  } else if (updates.sharedWith !== undefined) {
+    profiles[index].visibility = normalizeProfileVisibility(profiles[index].visibility, profiles[index].sharedWith);
+  }
+  if (profiles[index].visibility === "public" || profiles[index].visibility === "private") {
+    profiles[index].sharedWith = [];
   }
   profiles[index].updatedAt = new Date().toISOString();
 

@@ -15,11 +15,22 @@ interface Profile {
   ownerDingUserId?: string;
   ownerName?: string;
   ownerMobile?: string;
+  visibility?: ShareVisibility;
   sharedWith?: string[];
 }
 
+type ShareVisibility = "private" | "selected" | "public";
+
 interface CurrentUser {
   dingUserId: string;
+  name?: string | null;
+  mobile?: string | null;
+  jobNumber?: string | null;
+}
+
+interface ShareUserOption {
+  dingUserId: string;
+  label: string;
   name?: string | null;
   mobile?: string | null;
   jobNumber?: string | null;
@@ -30,6 +41,7 @@ export default function ProfilesPage() {
   const [showModal, setShowModal] = useState(false);
   const [loading, setLoading] = useState(true);
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
+  const [shareUsers, setShareUsers] = useState<ShareUserOption[]>([]);
   const [authChecked, setAuthChecked] = useState(false);
   const [desktopToken, setDesktopToken] = useState("");
   const [tokenLoading, setTokenLoading] = useState(false);
@@ -39,7 +51,8 @@ export default function ProfilesPage() {
   const [uploading, setUploading] = useState(false);
   const [name, setName] = useState("");
   const [desc, setDesc] = useState("");
-  const [sharedWith, setSharedWith] = useState("");
+  const [visibility, setVisibility] = useState<ShareVisibility>("private");
+  const [selectedShareUsers, setSelectedShareUsers] = useState<string[]>([]);
   const [openAiApiKey, setOpenAiApiKey] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
 
@@ -62,14 +75,21 @@ export default function ProfilesPage() {
     setLoading(false);
   };
 
+  const loadShareUsers = async () => {
+    const res = await fetch(withBasePath("/api/users"));
+    if (!res.ok) return;
+    const data = await res.json();
+    setShareUsers(data.users || []);
+  };
+
   useEffect(() => {
     fetch(withBasePath("/api/auth/me"))
       .then((res) => res.json())
       .then(async (data) => {
         setCurrentUser(data.user);
-        setAuthChecked(true);
+	        setAuthChecked(true);
         if (data.user) {
-          await loadProfiles();
+          await Promise.all([loadProfiles(), loadShareUsers()]);
         } else {
           setLoading(false);
         }
@@ -88,7 +108,8 @@ export default function ProfilesPage() {
     const formData = new FormData();
     formData.append("name", name);
     formData.append("description", desc);
-    formData.append("sharedWith", sharedWith);
+    formData.append("visibility", visibility);
+    formData.append("sharedWith", JSON.stringify(visibility === "selected" ? selectedShareUsers : []));
     
     const { authContent, configContent } = buildLegacyProfileFiles({
       openAiApiKey,
@@ -113,7 +134,8 @@ export default function ProfilesPage() {
         setShowModal(false);
         setName("");
         setDesc("");
-        setSharedWith("");
+        setVisibility("private");
+        setSelectedShareUsers([]);
         setOpenAiApiKey("");
         setBaseUrl("");
       } else if (res.status === 401) {
@@ -153,6 +175,16 @@ export default function ProfilesPage() {
     setProfiles([]);
     setDesktopToken("");
   };
+
+  const toggleSelectedShareUser = (dingUserId: string) => {
+    setSelectedShareUsers((current) =>
+      current.includes(dingUserId)
+        ? current.filter((id) => id !== dingUserId)
+        : [...current, dingUserId],
+    );
+  };
+
+  const shareTargetDisabled = visibility === "selected" && selectedShareUsers.length === 0;
 
   return (
     <div className="max-w-6xl mx-auto px-6 py-16 space-y-12 relative z-10 transition-colors">
@@ -273,6 +305,11 @@ export default function ProfilesPage() {
                     已指定分享给 {p.sharedWith.length} 人
                   </div>
                 )}
+                {p.visibility === "public" && (
+                  <div className="mt-3 text-xs text-emerald-600 dark:text-emerald-300">
+                    全部已登录员工可见
+                  </div>
+                )}
               </div>
             </Link>
           ))}
@@ -309,18 +346,50 @@ export default function ProfilesPage() {
                 </div>
               </div>
 
-              <div>
+              <fieldset className="space-y-3">
                 <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-2 transition-colors">
-                  共享给指定员工
+                  共享范围
                 </label>
-                <textarea
-                  placeholder="填写手机号、dingUserId 或工号，多个用逗号/空格/换行分隔。留空则仅自己可见。"
-                  className="w-full rounded-lg bg-neutral-50 border border-neutral-300 px-4 py-3 text-neutral-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:bg-neutral-950 dark:border-neutral-800 dark:text-neutral-100 transition-colors resize-none"
-                  rows={2}
-                  value={sharedWith}
-                  onChange={(e) => setSharedWith(e.target.value)}
-                />
-              </div>
+                <div className="grid gap-2 sm:grid-cols-3">
+                  {([
+                    ["private", "仅自己可见"],
+                    ["selected", "指定员工"],
+                    ["public", "全部员工"],
+                  ] as const).map(([value, label]) => (
+                    <label key={value} className="flex items-center gap-2 rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2 text-sm text-neutral-700 dark:border-white/10 dark:bg-neutral-950 dark:text-neutral-200">
+                      <input
+                        type="radio"
+                        name="visibility"
+                        value={value}
+                        checked={visibility === value}
+                        onChange={() => setVisibility(value)}
+                      />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+                {visibility === "selected" && (
+                  <div className="max-h-36 overflow-auto rounded-lg border border-neutral-200 bg-white p-2 dark:border-white/10 dark:bg-neutral-950">
+                    {shareUsers.length === 0 ? (
+                      <div className="px-2 py-3 text-sm text-neutral-500">还没有可选择的登录用户</div>
+                    ) : (
+                      shareUsers.map((user) => (
+                        <label key={user.dingUserId} className="flex items-center justify-between gap-3 rounded-md px-2 py-2 text-sm hover:bg-neutral-50 dark:hover:bg-white/[0.05]">
+                          <span>
+                            <span className="font-medium text-neutral-800 dark:text-neutral-100">{user.label}</span>
+                            <span className="ml-2 text-xs text-neutral-400">{user.mobile || user.jobNumber || user.dingUserId}</span>
+                          </span>
+                          <input
+                            type="checkbox"
+                            checked={selectedShareUsers.includes(user.dingUserId)}
+                            onChange={() => toggleSelectedShareUser(user.dingUserId)}
+                          />
+                        </label>
+                      ))
+                    )}
+                  </div>
+                )}
+              </fieldset>
 
               <div className="grid md:grid-cols-2 gap-4">
                 <div>
@@ -356,8 +425,8 @@ export default function ProfilesPage() {
                   取消
                 </button>
                 <button
-                  type="submit"
-                  disabled={uploading || !name || !openAiApiKey.trim() || !baseUrl.trim()}
+	                  type="submit"
+                  disabled={uploading || !name || !openAiApiKey.trim() || !baseUrl.trim() || shareTargetDisabled}
                   className="flex-1 rounded-lg bg-indigo-600 px-4 py-3 text-sm font-semibold text-white hover:bg-indigo-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {uploading ? "正在保存..." : "确认分享"}

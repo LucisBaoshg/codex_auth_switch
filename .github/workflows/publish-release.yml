@@ -76,10 +76,16 @@ jobs:
         include:
           - name: Windows
             platform: windows-latest
+            rust_target: ""
             args: --bundles nsis
           - name: macOS Apple Silicon
             platform: macos-latest
+            rust_target: aarch64-apple-darwin
             args: --target aarch64-apple-darwin --bundles app,dmg
+          - name: macOS Intel
+            platform: macos-latest
+            rust_target: x86_64-apple-darwin
+            args: --target x86_64-apple-darwin --bundles app,dmg
 
     steps:
       - name: Checkout repository
@@ -114,6 +120,10 @@ jobs:
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust build target
+        if: matrix.rust_target != ''
+        run: rustup target add ${{ matrix.rust_target }}
 
       - name: Install frontend dependencies
         run: npm ci

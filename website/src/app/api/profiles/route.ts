@@ -4,9 +4,11 @@ import { principalFromRequest, verifySessionCookieValue, sessionCookieName } fro
 import {
   createProfile,
   filterProfilesForPrincipal,
+  normalizeProfileVisibility,
   publicProfile,
   readProfiles,
 } from "@/lib/profile-store";
+import { readKnownUsers, resolveSharedWithForVisibility } from "@/lib/user-store";
 
 export async function OPTIONS() {
   return optionsResponse();
@@ -32,6 +34,7 @@ export async function POST(req: NextRequest) {
     const formData = await req.formData();
     const name = formData.get("name") as string;
     const description = formData.get("description") as string;
+    const visibility = normalizeProfileVisibility(formData.get("visibility") as string | null, formData.get("sharedWith") as string | null);
     const sharedWith = formData.get("sharedWith") as string;
     const file1 = formData.get("file1") as File | null;
     const file2 = formData.get("file2") as File | null;
@@ -40,10 +43,21 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Missing required fields or files" }, { status: 400, headers: noStoreHeaders });
     }
 
+    let resolvedSharedWith: string[];
+    try {
+      resolvedSharedWith = resolveSharedWithForVisibility(visibility, sharedWith, await readKnownUsers());
+    } catch (error) {
+      return NextResponse.json(
+        { error: error instanceof Error ? error.message : "Invalid share targets" },
+        { status: 400, headers: noStoreHeaders },
+      );
+    }
+
     const newProfile = await createProfile({
       name,
       description,
-      sharedWith,
+      visibility,
+      sharedWith: resolvedSharedWith,
       authContent: await file1.text(),
       configContent: await file2.text(),
     }, principal);

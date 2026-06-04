@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  canEditProfile,
   canAccessProfile,
   filterProfilesForPrincipal,
   normalizeSharedWith,
@@ -56,6 +57,14 @@ describe("profile sharing permissions", () => {
 
   test("legacy profiles without an owner remain visible to authenticated employees", () => {
     expect(canAccessProfile(profile({ ownerDingUserId: undefined, sharedWith: undefined }), userB)).toBe(true);
+  });
+
+  test("legacy profiles without an owner are visible but not editable by ordinary users", () => {
+    expect(canEditProfile(profile({ ownerDingUserId: undefined, sharedWith: undefined }), userB)).toBe(false);
+  });
+
+  test("profiles explicitly shared with everyone are visible to any authenticated employee", () => {
+    expect(canAccessProfile(profile({ visibility: "public", sharedWith: [] }), userB)).toBe(true);
   });
 
   test("filters profile lists to only visible records", () => {

@@ -3,10 +3,11 @@ import { getVersion } from "@tauri-apps/api/app";
 import "./styles.css";
 
 type FlashKind = "info" | "success" | "error";
-type ViewMode = "cards" | "editor" | "settings" | "sessions" | "session-cleanup";
+type ViewMode = "cards" | "editor" | "sharing" | "settings" | "sessions" | "session-cleanup";
 type EditorMode = "new" | "fromCurrent" | "existing";
 type PlatformMode = "codex";
 type ProfileLayoutMode = "list" | "grid";
+type ShareVisibility = "selected" | "public";
 
 type CodexSessionInfo = {
   id: string;
@@ -293,7 +294,7 @@ type EditorState = {
   hasTargetChanges: boolean;
   readOnly: boolean;
   source: "local" | "network";
-  newTab?: "manual-delta" | "manual-full" | "network";
+  newTab?: "manual-delta" | "manual-full";
 };
 
 type NetworkProfile = {
@@ -306,6 +307,27 @@ type NetworkProfile = {
   ownerName?: string;
   ownerMobile?: string;
   sharedWith?: string[];
+};
+
+type ShareUserOption = {
+  dingUserId: string;
+  label: string;
+  name?: string | null;
+  mobile?: string | null;
+  jobNumber?: string | null;
+};
+
+type NetworkUserPrincipal = {
+  dingUserId: string;
+  name?: string | null;
+  mobile?: string | null;
+  jobNumber?: string | null;
+};
+
+type LocalShareDraft = {
+  profileId: string | null;
+  visibility: ShareVisibility;
+  selectedUserIds: string[];
 };
 
 type NetworkSharingSettings = {
@@ -383,14 +405,28 @@ function networkDesktopLoginApiUrl(): string {
   return `${networkPortalBaseUrl()}/api/auth/desktop-login`;
 }
 
-function networkFetchOptions(): RequestInit {
+function networkMeApiUrl(): string {
+  return `${networkPortalBaseUrl()}/api/auth/me`;
+}
+
+function networkUsersApiUrl(): string {
+  return `${networkPortalBaseUrl()}/api/users`;
+}
+
+function networkAuthHeaders(): HeadersInit | undefined {
   const token = state.networkSharing.token.trim();
-  if (token) {
+  if (!token) return undefined;
+  return {
+    Authorization: `Bearer ${token}`,
+  };
+}
+
+function networkFetchOptions(): RequestInit {
+  const headers = networkAuthHeaders();
+  if (headers) {
     return {
       cache: "no-store",
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
+      headers,
     };
   }
 
@@ -429,6 +465,14 @@ theme = "system"
     readOnly: false,
     source: "local",
     newTab: "manual-delta",
+  };
+}
+
+function createLocalShareDraft(): LocalShareDraft {
+  return {
+    profileId: null,
+    visibility: "selected",
+    selectedUserIds: [],
   };
 }
 
@@ -515,6 +559,11 @@ const state: {
   networkLoading: boolean;
   networkAuthRequired: boolean;
   networkSharing: NetworkSharingSettings;
+  networkUser: NetworkUserPrincipal | null;
+  networkUserLoading: boolean;
+  shareUsers: ShareUserOption[];
+  shareUsersLoading: boolean;
+  shareDraft: LocalShareDraft;
   appVersion: string | null;
   update: {
     checking: boolean;
@@ -544,6 +593,11 @@ const state: {
   networkLoading: false,
   networkAuthRequired: !loadNetworkSharingSettings().token,
   networkSharing: loadNetworkSharingSettings(),
+  networkUser: null,
+  networkUserLoading: false,
+  shareUsers: [],
+  shareUsersLoading: false,
+  shareDraft: createLocalShareDraft(),
   appVersion: null,
   update: {
     checking: false,
@@ -641,6 +695,9 @@ function setSnapshot(snapshot: AppSnapshot): void {
       snapshot.lastSelectedProfileId ??
       snapshot.profiles[0]?.id ??
       null;
+  }
+  if (!snapshot.profiles.some((profile) => profile.id === state.shareDraft.profileId)) {
+    state.shareDraft.profileId = snapshot.activeProfileId ?? snapshot.profiles[0]?.id ?? null;
   }
   render();
 }
@@ -910,7 +967,7 @@ async function symbioticThirdPartyConfigInputFromDraft(
 
 async function buildEditorProfileInput(): Promise<ProfileInput> {
   if (state.editor.mode === "new") {
-    if (state.editor.newTab === "manual-full" || state.editor.newTab === "network") {
+    if (state.editor.newTab === "manual-full") {
       return {
         name: state.editor.name.trim(),
         notes: state.editor.notes.trim(),
@@ -1363,6 +1420,90 @@ async function fetchNetworkProfiles(): Promise<void> {
   }
 }
 
+async function fetchNetworkCurrentUser(options: { silent?: boolean } = {}): Promise<void> {
+  if (!state.networkSharing.token.trim()) {
+    state.networkUser = null;
+    state.networkUserLoading = false;
+    state.networkAuthRequired = true;
+    render();
+    return;
+  }
+
+  state.networkUserLoading = true;
+  render();
+  try {
+    const res = await fetch(networkMeApiUrl(), networkFetchOptions());
+    if (res.status === 401) {
+      state.networkAuthRequired = true;
+      state.networkUser = null;
+      return;
+    }
+    if (!res.ok) throw new Error("加载登录用户失败");
+    const data = (await res.json()) as { user?: NetworkUserPrincipal | null };
+    state.networkUser = data.user ?? null;
+    state.networkAuthRequired = !state.networkUser;
+  } catch (error) {
+    state.networkUser = null;
+    if (!options.silent) {
+      setFlash("error", error instanceof Error ? error.message : String(error));
+    }
+  } finally {
+    state.networkUserLoading = false;
+    render();
+  }
+}
+
+function logoutNetworkUser(): void {
+  state.networkSharing.token = "";
+  saveNetworkSharingSettings(state.networkSharing);
+  state.networkAuthRequired = true;
+  state.networkUser = null;
+  state.networkUserLoading = false;
+  state.networkProfiles = [];
+  state.shareUsers = [];
+  setFlash("success", "已退出企业共享库登录。");
+  render();
+}
+
+async function fetchShareUsers(): Promise<void> {
+  if (!state.networkSharing.token.trim()) {
+    state.networkAuthRequired = true;
+    state.shareUsers = [];
+    render();
+    return;
+  }
+
+  state.shareUsersLoading = true;
+  render();
+  try {
+    const res = await fetch(networkUsersApiUrl(), networkFetchOptions());
+    if (res.status === 401) {
+      state.networkAuthRequired = true;
+      throw new Error("企业共享中心需要桌面访问令牌。请先使用钉钉 SSO 登录。");
+    }
+    if (!res.ok) throw new Error("加载可分享用户失败");
+    const data = (await res.json()) as { users?: ShareUserOption[] };
+    state.shareUsers = data.users ?? [];
+    state.networkAuthRequired = false;
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    state.shareUsersLoading = false;
+    render();
+  }
+}
+
+async function loadSharingCenterData(): Promise<void> {
+  saveNetworkSharingSettings(state.networkSharing);
+  if (!state.networkSharing.token.trim()) {
+    state.networkAuthRequired = true;
+    render();
+    return;
+  }
+
+  await Promise.all([fetchShareUsers(), fetchNetworkProfiles()]);
+}
+
 async function openNetworkSsoLogin(): Promise<void> {
   saveNetworkSharingSettings(state.networkSharing);
   try {
@@ -1416,6 +1557,7 @@ async function pollNetworkDesktopLogin(sessionId: string, pollToken: string): Pr
     state.networkAuthRequired = false;
     saveNetworkSharingSettings(state.networkSharing);
     setFlash("success", "已完成钉钉 SSO 登录，并自动连接企业共享库。");
+    await fetchNetworkCurrentUser({ silent: true });
     await fetchNetworkProfiles();
     return;
   }
@@ -1525,6 +1667,70 @@ async function openEditorForNetworkProfile(networkProfileId: string): Promise<vo
   } finally {
     state.busy = false;
     render();
+  }
+}
+
+async function shareLocalProfileToNetwork(): Promise<void> {
+  const profileId = state.shareDraft.profileId;
+  if (!profileId) {
+    setFlash("error", "请选择要共享的本地配置。");
+    return;
+  }
+  if (!state.networkSharing.token.trim()) {
+    state.networkAuthRequired = true;
+    setFlash("error", "请先使用钉钉 SSO 登录企业共享中心。");
+    return;
+  }
+  if (state.shareDraft.visibility === "selected" && state.shareDraft.selectedUserIds.length === 0) {
+    setFlash("error", "请选择至少一位共享对象，或切换为全部员工可见。");
+    return;
+  }
+
+  const summary = state.snapshot?.profiles.find((profile) => profile.id === profileId);
+  if (!summary) {
+    setFlash("error", "找不到要共享的本地配置。");
+    return;
+  }
+
+  setBusy(true);
+  try {
+    const document = isTauriRuntime
+      ? await desktopInvoke<ProfileDocument>("get_profile_document", { profileId })
+      : createMockDocument(summary);
+    const formData = new FormData();
+    formData.append("name", document.name);
+    formData.append("description", document.notes || "");
+    formData.append("visibility", state.shareDraft.visibility);
+    formData.append(
+      "sharedWith",
+      JSON.stringify(state.shareDraft.visibility === "selected" ? state.shareDraft.selectedUserIds : []),
+    );
+    formData.append("file1", new File([document.authJson], "auth.json", { type: "application/json" }));
+    formData.append("file2", new File([document.configToml], "config.toml", { type: "text/plain" }));
+
+    const headers = networkAuthHeaders();
+    const response = await fetch(networkProfilesApiUrl(), {
+      method: "POST",
+      cache: "no-store",
+      ...(headers ? { headers } : {}),
+      body: formData,
+    });
+
+    if (response.status === 401) {
+      state.networkAuthRequired = true;
+      throw new Error("企业共享中心登录已失效，请重新登录。");
+    }
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      throw new Error(body.error || "共享配置失败");
+    }
+
+    setFlash("success", `已共享「${document.name}」到企业共享中心。`);
+    await fetchNetworkProfiles();
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    setBusy(false);
   }
 }
 
@@ -2911,10 +3117,6 @@ function renderNewProfileTabSelector(): string {
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
         空白完整配置
       </button>
-      <button class="tab-btn ${currentTab === "network" ? "active" : ""}" data-action="editor-tab-network">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"></path></svg>
-        从云端共享库导入
-      </button>
     </div>
   `;
 }
@@ -3151,6 +3353,160 @@ function renderCardsPage(snapshot: AppSnapshot): string {
   `;
 }
 
+function renderShareUserPicker(): string {
+  if (state.shareDraft.visibility !== "selected") {
+    return "";
+  }
+
+  if (state.shareUsersLoading) {
+    return `
+      <div class="empty-state" style="padding: 18px;">
+        <div class="busy-dialog-spinner" style="margin: 0 auto 10px auto; width: 22px; height: 22px;"></div>
+        <p>正在加载可分享用户...</p>
+      </div>
+    `;
+  }
+
+  if (state.shareUsers.length === 0) {
+    return `
+      <div class="empty-state" style="padding: 18px;">
+        <h3>暂无可选用户</h3>
+        <p>只有登录过企业共享中心的用户会出现在这里。</p>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="share-user-list" data-role="share-user-list" style="display:grid; gap:8px; max-height:220px; overflow:auto; border:1px solid var(--border-light); border-radius:10px; padding:8px;">
+      ${state.shareUsers.map((user) => `
+        <label class="share-user-row" style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 10px; border-radius:8px; background:var(--bg-page);">
+          <span style="display:flex; flex-direction:column; min-width:0;">
+            <strong style="font-size:0.9rem; color:var(--text-main);">${escapeHtml(user.label)}</strong>
+            <span style="font-size:0.76rem; color:var(--text-muted);">${escapeHtml(user.mobile || user.jobNumber || user.dingUserId)}</span>
+          </span>
+          <input
+            class="share-user-checkbox"
+            type="checkbox"
+            value="${escapeHtml(user.dingUserId)}"
+            ${state.shareDraft.selectedUserIds.includes(user.dingUserId) ? "checked" : ""}
+          />
+        </label>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderSharingCenterPage(snapshot: AppSnapshot): string {
+  const profiles = snapshot.profiles;
+  const selectedProfileId = state.shareDraft.profileId ?? profiles[0]?.id ?? null;
+  const selectedProfile = profiles.find((profile) => profile.id === selectedProfileId) ?? profiles[0] ?? null;
+  if (selectedProfile && state.shareDraft.profileId !== selectedProfile.id) {
+    state.shareDraft.profileId = selectedProfile.id;
+  }
+  const authRequired = state.networkAuthRequired || !state.networkSharing.token.trim();
+  const selectedShareDisabled =
+    state.shareDraft.visibility === "selected" && state.shareDraft.selectedUserIds.length === 0;
+
+  return `
+    <section class="cards-page" data-page="sharing-center">
+      <header class="content-header" data-tauri-drag-region>
+        <div class="header-title">
+          <h2>配置共享中心</h2>
+          <span class="header-subtitle">共享本地配置，也从企业共享库导入可用配置</span>
+        </div>
+        <div class="content-actions">
+          <button class="button button-secondary" data-action="refresh-sharing-center" ${state.busy ? "disabled" : ""}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+            刷新共享中心
+          </button>
+        </div>
+      </header>
+
+      <div class="grid-container" style="grid-template-columns:minmax(320px, 420px) minmax(0, 1fr); align-items:start;">
+        <section class="card" data-role="local-share-form">
+          <div class="card-head">
+            <h3>共享我的本地配置</h3>
+          </div>
+          <p class="card-note">选择一套已保存的本地配置，发布到企业共享库。</p>
+
+          ${authRequired ? `
+            <div class="empty-state" style="padding:20px;margin-top:16px;">
+              <h3>需要登录企业共享中心</h3>
+              <p>完成钉钉 SSO 登录后，才能共享配置并选择共享对象。</p>
+              <button class="button button-primary" data-action="open-network-sso-login" style="margin-top:12px;">钉钉 SSO 登录</button>
+            </div>
+          ` : `
+            <div style="display:grid; gap:16px; margin-top:16px;">
+              <label class="field">
+                <span>本地配置</span>
+                <select id="share-profile-select" ${state.busy || profiles.length === 0 ? "disabled" : ""}>
+                  ${profiles.map((profile) => `
+                    <option value="${escapeHtml(profile.id)}" ${profile.id === selectedProfile?.id ? "selected" : ""}>
+                      ${escapeHtml(profile.name)}
+                    </option>
+                  `).join("")}
+                </select>
+              </label>
+
+              <fieldset class="field" style="border:0;padding:0;margin:0;">
+                <span>共享范围</span>
+                <div class="profile-template-options" style="grid-template-columns:1fr 1fr;">
+                  <label class="template-card-option">
+                    <input
+                      id="share-visibility-selected"
+                      name="share-visibility"
+                      type="radio"
+                      value="selected"
+                      ${state.shareDraft.visibility === "selected" ? "checked" : ""}
+                    />
+                    <div class="option-content">
+                      <span class="option-title">指定用户</span>
+                      <span class="option-desc">只共享给登录过系统的员工。</span>
+                    </div>
+                  </label>
+                  <label class="template-card-option">
+                    <input
+                      id="share-visibility-public"
+                      name="share-visibility"
+                      type="radio"
+                      value="public"
+                      ${state.shareDraft.visibility === "public" ? "checked" : ""}
+                    />
+                    <div class="option-content">
+                      <span class="option-title">全部员工</span>
+                      <span class="option-desc">所有已登录员工都能看到。</span>
+                    </div>
+                  </label>
+                </div>
+              </fieldset>
+
+              ${renderShareUserPicker()}
+
+              <button
+                class="button button-primary button-full"
+                data-action="share-local-profile"
+                ${state.busy || profiles.length === 0 || selectedShareDisabled ? "disabled" : ""}
+              >
+                共享到企业共享库
+              </button>
+            </div>
+          `}
+        </section>
+
+        <section class="card" data-role="network-profile-library" style="min-height:360px;">
+          <div class="card-head">
+            <h3>企业共享库</h3>
+          </div>
+          <p class="card-note">这里展示您有权限查看和导入的云端共享配置。</p>
+          <div style="margin-top:16px;">
+            ${renderNewPageNetworkSection()}
+          </div>
+        </section>
+      </div>
+    </section>
+  `;
+}
+
 function renderEditorPage(): string {
   const snapshot = state.snapshot;
   if (!snapshot) {
@@ -3171,8 +3527,6 @@ function renderEditorPage(): string {
       ? "保存当前 Codex 配置为新 Profile"
       : existing
         ? (state.editor.name || "查看和编辑 Profile")
-        : currentTab === "network"
-        ? "从云端共享库导入"
         : "手动创建新 Profile";
 
   const subtitle =
@@ -3182,18 +3536,10 @@ function renderEditorPage(): string {
       ? "把当前 `.codex` 里的内容复制成一套新的 profile。"
       : existing
         ? "查看和编辑此 Profile 的配置文本。"
-        : currentTab === "network"
-        ? "选择一个可用的云端共享配置模板并导入到编辑器。"
         : "直接手工填写名称、备注以及配置内容。";
 
   let bodyContent = "";
-  if (showTabs && currentTab === "network") {
-    bodyContent = `
-      <section class="new-profile-network-section">
-        ${renderNewPageNetworkSection()}
-      </section>
-    `;
-  } else {
+  {
     const configFields = (showTabs && currentTab === "manual-delta")
       ? renderThirdPartyConfigFields(readOnly)
       : `
@@ -3268,11 +3614,9 @@ function renderEditorPage(): string {
                       导入并编辑配置
                     </button>
                   </div>
-                `
-                : "")
-              : (showTabs && currentTab === "network")
-                ? ""
-                : `
+	                `
+	                : "")
+              : `
                   <div class="sidebar-actions">
                     <button class="button button-primary button-full" data-action="save-and-switch" ${saveDisabled ? "disabled" : ""}>
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
@@ -3381,12 +3725,96 @@ function bindInputValue(selector: string, onInput: (value: string) => void): voi
   });
 }
 
+function networkUserDisplayName(user: NetworkUserPrincipal | null): string {
+  return user?.name?.trim() || user?.mobile?.trim() || user?.jobNumber?.trim() || user?.dingUserId || "企业账号";
+}
+
+function networkUserMeta(user: NetworkUserPrincipal | null): string {
+  if (!user) return "";
+  return user.mobile?.trim() || user.jobNumber?.trim() || user.dingUserId;
+}
+
+function renderSidebarLoginStatus(): string {
+  const hasToken = Boolean(state.networkSharing.token.trim());
+  if (!hasToken || state.networkAuthRequired) {
+    return `
+      <section class="sidebar-login-card sidebar-login-card-guest" data-role="sidebar-login-status">
+        <div class="sidebar-login-main">
+          <span class="sidebar-login-dot sidebar-login-dot-muted"></span>
+          <div class="sidebar-login-copy">
+            <strong>未登录</strong>
+            <span>登录后同步企业共享库</span>
+          </div>
+        </div>
+        <button class="sidebar-login-button" data-action="open-network-sso-login">钉钉 SSO 登录</button>
+      </section>
+    `;
+  }
+
+  if (state.networkUserLoading && !state.networkUser) {
+    return `
+      <section class="sidebar-login-card" data-role="sidebar-login-status">
+        <div class="sidebar-login-main">
+          <span class="sidebar-login-dot sidebar-login-dot-loading"></span>
+          <div class="sidebar-login-copy">
+            <strong>检查登录中</strong>
+            <span>正在连接企业共享库</span>
+          </div>
+        </div>
+      </section>
+    `;
+  }
+
+  const userName = networkUserDisplayName(state.networkUser);
+  const userMeta = networkUserMeta(state.networkUser);
+  return `
+    <section class="sidebar-login-card sidebar-login-card-signed-in" data-role="sidebar-login-status">
+      <div class="sidebar-login-main">
+        <span class="sidebar-login-avatar">${escapeHtml(userName.slice(0, 1).toUpperCase())}</span>
+        <div class="sidebar-login-copy">
+          <strong>${escapeHtml(userName)}</strong>
+          <span>${escapeHtml(userMeta || "已登录企业共享库")}</span>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function renderNetworkAccountSettings(): string {
+  const hasToken = Boolean(state.networkSharing.token.trim());
+  const userName = networkUserDisplayName(state.networkUser);
+  const userMeta = networkUserMeta(state.networkUser);
+
+  return `
+    <div class="network-account-settings" data-role="network-account-settings">
+      <div>
+        <span class="field-hint">当前登录</span>
+        <strong>${hasToken && !state.networkAuthRequired ? escapeHtml(userName) : "未登录"}</strong>
+        <p class="card-note" style="margin-top: 4px;">${
+          hasToken && !state.networkAuthRequired
+            ? escapeHtml(userMeta || "已连接企业共享库")
+            : "请先使用钉钉 SSO 登录企业共享库。"
+        }</p>
+      </div>
+      <button
+        class="button button-secondary"
+        data-action="logout-network-user"
+        ${hasToken ? "" : "disabled"}
+      >
+        退出登录
+      </button>
+    </div>
+  `;
+}
+
 function render(): void {
   const snapshot = state.snapshot;
 
   let content = "";
   if (state.view === "cards" && snapshot) {
     content = renderCardsPage(snapshot);
+  } else if (state.view === "sharing" && snapshot) {
+    content = renderSharingCenterPage(snapshot);
   } else if (state.view === "settings") {
     content = renderSettingsPage();
   } else if (state.view === "sessions") {
@@ -3423,13 +3851,17 @@ function render(): void {
           </div>
         </div>
         <nav class="sidebar-nav">
-          <button class="nav-item ${state.view === 'cards' || state.view === 'editor' ? 'active' : ''}" data-action="nav-profiles">
-            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
-            配置管理
-          </button>
-          <button class="nav-item ${state.view === 'sessions' ? 'active' : ''}" data-action="nav-sessions">
-            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
-            会话管理
+	          <button class="nav-item ${state.view === 'cards' || state.view === 'editor' ? 'active' : ''}" data-action="nav-profiles">
+	            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+	            配置管理
+	          </button>
+	          <button class="nav-item ${state.view === 'sharing' ? 'active' : ''}" data-action="nav-sharing">
+	            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><path d="M8.59 13.51 15.42 17.49"></path><path d="M15.41 6.51 8.59 10.49"></path></svg>
+	            配置共享
+	          </button>
+	          <button class="nav-item ${state.view === 'sessions' ? 'active' : ''}" data-action="nav-sessions">
+	            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+	            会话管理
           </button>
           <button class="nav-item ${state.view === 'settings' ? 'active' : ''}" data-action="nav-settings">
             <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
@@ -3437,6 +3869,7 @@ function render(): void {
           </button>
         </nav>
         <div class="sidebar-footer">
+          ${renderSidebarLoginStatus()}
           <div class="version-status ${state.update.checking ? 'version-status-checking' : hasPendingUpdate ? 'version-status-update' : 'version-status-latest'}" data-role="update-entry" data-action="check-update" style="display: flex; align-items: center; gap: 8px; cursor: pointer;" title="${hasPendingUpdate ? '有新版本，点击下载并安装' : '最新版本，点击重新检查'}">
             <span class="version-status-dot"></span>
             <span>${
@@ -3498,6 +3931,7 @@ function renderSettingsPage(): string {
                 autocomplete="off"
               />
             </label>
+            ${renderNetworkAccountSettings()}
             <div class="content-actions">
               <button class="button button-primary" data-action="open-network-sso-login">
                 钉钉 SSO 登录
@@ -4351,6 +4785,31 @@ function bindEvents(): void {
   bindInputValue("#network-profile-token", (value) => {
     state.networkSharing.token = value;
     state.networkAuthRequired = !value.trim();
+    state.networkUser = null;
+  });
+  document
+    .querySelector<HTMLSelectElement>("#share-profile-select")
+    ?.addEventListener("change", (event) => {
+      state.shareDraft.profileId = (event.currentTarget as HTMLSelectElement).value;
+    });
+  document.querySelectorAll<HTMLInputElement>('input[name="share-visibility"]').forEach((input) => {
+    input.addEventListener("change", (event) => {
+      state.shareDraft.visibility = (event.currentTarget as HTMLInputElement).value as ShareVisibility;
+      render();
+    });
+  });
+  document.querySelectorAll<HTMLInputElement>(".share-user-checkbox").forEach((input) => {
+    input.addEventListener("change", (event) => {
+      const checkbox = event.currentTarget as HTMLInputElement;
+      const current = new Set(state.shareDraft.selectedUserIds);
+      if (checkbox.checked) {
+        current.add(checkbox.value);
+      } else {
+        current.delete(checkbox.value);
+      }
+      state.shareDraft.selectedUserIds = Array.from(current);
+      render();
+    });
   });
 
   document.querySelectorAll<HTMLInputElement>('input[name="profile-template"]').forEach((input) => {
@@ -4389,6 +4848,12 @@ function bindEvents(): void {
           state.view = "cards";
           render();
         }
+      } else if (action === "nav-sharing") {
+        if (state.view !== "sharing") {
+          state.view = "sharing";
+          render();
+        }
+        await loadSharingCenterData();
       } else if (action === "nav-settings") {
         if (state.view !== "settings") {
           state.view = "settings";
@@ -4399,16 +4864,24 @@ function bindEvents(): void {
         state.networkAuthRequired = !state.networkSharing.token.trim();
         state.networkProfiles = [];
         setFlash("success", "已保存企业共享库设置。");
+        if (state.networkSharing.token.trim()) {
+          await fetchNetworkCurrentUser({ silent: true });
+        }
         render();
       } else if (action === "open-network-sso-login") {
         await openNetworkSsoLogin();
+      } else if (action === "logout-network-user") {
+        logoutNetworkUser();
       } else if (action === "refresh-network-after-settings") {
         saveNetworkSharingSettings(state.networkSharing);
         state.networkAuthRequired = !state.networkSharing.token.trim();
         state.networkProfiles = [];
-        state.activeTab = "network";
-        state.view = "cards";
-        await fetchNetworkProfiles();
+        state.view = "sharing";
+        await loadSharingCenterData();
+      } else if (action === "refresh-sharing-center") {
+        await loadSharingCenterData();
+      } else if (action === "share-local-profile") {
+        await shareLocalProfileToNetwork();
       } else if (action === "nav-sessions") {
         if (state.view !== "sessions") {
           state.view = "sessions";
@@ -4509,16 +4982,6 @@ function bindEvents(): void {
         }
         state.editor.newTab = "manual-full";
         render();
-      } else if (action === "editor-tab-network") {
-        state.editor.newTab = "network";
-        if (!state.networkSharing.token.trim()) {
-          state.networkAuthRequired = true;
-          render();
-        } else if (state.networkProfiles.length === 0) {
-          await fetchNetworkProfiles();
-        } else {
-          render();
-        }
       } else if (action === "refresh-network-in-editor") {
         if (!state.networkSharing.token.trim()) {
           state.networkAuthRequired = true;
@@ -4757,6 +5220,9 @@ function bindEvents(): void {
 }
 
 render();
+if (state.networkSharing.token.trim()) {
+  void fetchNetworkCurrentUser({ silent: true });
+}
 void loadAppVersion();
 void refreshSnapshot();
 startAutoUpdateChecker();

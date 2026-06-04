@@ -1788,6 +1788,222 @@ test("opens the detail editor when clicking view-details on a profile card", asy
   expect(document.querySelector("#editor-config-toml")).not.toBeNull();
 });
 
+test("moves cloud sharing out of the new profile editor into a dedicated sharing center", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => [],
+  })));
+
+  await import("../src/main");
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="new-profile"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+
+  expect(document.querySelector('[data-action="editor-tab-network"]')).toBeNull();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="nav-sharing"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  await flushUi();
+
+  expect(document.querySelector('[data-page="sharing-center"]')).not.toBeNull();
+  expect(document.querySelector('[data-role="local-share-form"]')).not.toBeNull();
+  expect(document.querySelector('[data-role="network-profile-library"]')).not.toBeNull();
+});
+
+test("shares a selected local profile to the enterprise sharing center for everyone", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+  localStorage.setItem("codex-auth-switch.networkProfileToken", "cas_test_token");
+
+  const snapshot = {
+    targetDir: "/Users/example/.codex",
+    usingDefaultTargetDir: true,
+    targetExists: true,
+    targetAuthExists: true,
+    targetConfigExists: true,
+    targetUpdatedAt: "2026-03-25T00:00:00Z",
+    targetAuthTypeLabel: "第三方 API",
+    activeProfileId: "profile-2",
+    lastSelectedProfileId: "profile-2",
+    lastSwitchProfileId: "profile-2",
+    lastSwitchedAt: "2026-03-25T00:00:00Z",
+    codexUsageApiEnabled: false,
+    profiles: [
+      {
+        id: "profile-2",
+        name: "Unified API",
+        notes: "provider registry",
+        authTypeLabel: "第三方 API",
+        modelProviderKey: "ylscode",
+        createdAt: "2026-03-24T00:00:00Z",
+        updatedAt: "2026-03-24T13:24:00Z",
+        authHash: "auth-2",
+        configHash: "config-2",
+        codexUsage: null,
+        thirdPartyLatency: null,
+        thirdPartyUsage: null,
+      },
+    ],
+  };
+
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "load_snapshot") return snapshot;
+    if (command === "get_profile_document") {
+      return {
+        id: "profile-2",
+        name: "Unified API",
+        notes: "provider registry",
+        authTypeLabel: "第三方 API",
+        createdAt: "2026-03-24T00:00:00Z",
+        updatedAt: "2026-03-24T13:24:00Z",
+        authJson: '{"OPENAI_API_KEY":"sk-test"}',
+        configToml: 'model = "gpt-5.4"\n',
+        loadedFromTarget: false,
+        hasTargetChanges: false,
+      };
+    }
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  const profilePostBodies: FormData[] = [];
+  const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = input.toString();
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/users") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          users: [
+            { dingUserId: "Ding-A", label: "Alice", mobile: "13900000001" },
+            { dingUserId: "Ding-B", label: "Bob", mobile: "13900000002" },
+          ],
+        }),
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles" && init?.method === "POST") {
+      profilePostBodies.push(init.body as FormData);
+      return {
+        ok: true,
+        status: 201,
+        json: async () => ({ id: "remote-1" }),
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => [],
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  await import("../src/main");
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="nav-sharing"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  await flushUi();
+
+  document.querySelector<HTMLInputElement>("#share-visibility-public")!.checked = true;
+  document
+    .querySelector<HTMLInputElement>("#share-visibility-public")
+    ?.dispatchEvent(new Event("change", { bubbles: true }));
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="share-local-profile"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  await flushUi();
+  await flushUi();
+
+  expect(fetchMock).toHaveBeenCalledWith(
+    "https://codex-helper.ite.tool4seller.com/codex/api/users",
+    { cache: "no-store", headers: { Authorization: "Bearer cas_test_token" } },
+  );
+  expect(profilePostBodies).toHaveLength(1);
+  expect(profilePostBodies[0].get("name")).toBe("Unified API");
+  expect(profilePostBodies[0].get("description")).toBe("provider registry");
+  expect(profilePostBodies[0].get("visibility")).toBe("public");
+  expect(profilePostBodies[0].get("sharedWith")).toBe("[]");
+  expect(await (profilePostBodies[0].get("file1") as File).text()).toContain("sk-test");
+});
+
+test("shares a local profile to selected known SSO users from the sharing center", async () => {
+  localStorage.setItem("codex-auth-switch.networkProfileToken", "cas_test_token");
+
+  const profilePostBodies: FormData[] = [];
+  const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = input.toString();
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/users") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          users: [
+            { dingUserId: "Ding-A", label: "Alice", mobile: "13900000001" },
+            { dingUserId: "Ding-B", label: "Bob", mobile: "13900000002" },
+          ],
+        }),
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles" && init?.method === "POST") {
+      profilePostBodies.push(init.body as FormData);
+      return {
+        ok: true,
+        status: 201,
+        json: async () => ({ id: "remote-2" }),
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => [],
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  await import("../src/main");
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="nav-sharing"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  await flushUi();
+  await flushUi();
+
+  const bobCheckbox = document.querySelector<HTMLInputElement>('.share-user-checkbox[value="Ding-B"]');
+  expect(bobCheckbox).not.toBeNull();
+  bobCheckbox!.checked = true;
+  bobCheckbox!.dispatchEvent(new Event("change", { bubbles: true }));
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="share-local-profile"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  await flushUi();
+
+  expect(profilePostBodies).toHaveLength(1);
+  expect(profilePostBodies[0].get("visibility")).toBe("selected");
+  expect(profilePostBodies[0].get("sharedWith")).toBe(JSON.stringify(["Ding-B"]));
+});
+
 test("opens network shared profile details in readonly mode without browser cache", async () => {
   localStorage.setItem("codex-auth-switch.networkProfileToken", "cas_test_token");
   const fetchMock = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
@@ -1844,13 +2060,7 @@ test("opens network shared profile details in readonly mode without browser cach
   await flushUi();
 
   document
-    .querySelector<HTMLButtonElement>('[data-action="new-profile"]')
-    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-
-  await flushUi();
-
-  document
-    .querySelector<HTMLButtonElement>('[data-action="editor-tab-network"]')
+    .querySelector<HTMLButtonElement>('[data-action="nav-sharing"]')
     ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
   await flushUi();

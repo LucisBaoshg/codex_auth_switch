@@ -8,6 +8,7 @@ import {
 } from "@/lib/auth";
 import { withBasePath } from "@/lib/base-path";
 import type { ProfilePrincipal } from "@/lib/profile-store";
+import { recordKnownUser } from "@/lib/user-store";
 
 function decodeReturnTo(state: string) {
   try {
@@ -64,6 +65,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "SSO user is not allowed" }, { status: 403 });
   }
 
+  await recordKnownUser(principal);
   await completeDesktopLoginSession(decodeDesktopLoginId(state), principal);
 
   const response = NextResponse.redirect(new URL(withBasePath(decodeReturnTo(state)), redirectUri));
