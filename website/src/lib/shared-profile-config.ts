@@ -21,8 +21,111 @@ type SharedProfileFields = {
   baseUrl: string;
 };
 
+const sharedConfigRootKeys = new Set([
+  "model",
+  "review_model",
+  "model_provider",
+  "openai_base_url",
+  "base_url",
+  "model_reasoning_effort",
+  "plan_mode_reasoning_effort",
+  "supports_websockets",
+  "network_access",
+  "disable_response_storage",
+]);
+
 function quoteTomlString(value: string): string {
   return JSON.stringify(value);
+}
+
+function tomlBracketDelta(line: string): number {
+  let delta = 0;
+  let quote: string | null = null;
+  let escaped = false;
+
+  for (const char of line) {
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "\"" || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (char === "[") delta += 1;
+    if (char === "]") delta -= 1;
+  }
+
+  return delta;
+}
+
+function isSharedModelProviderTable(tableHeader: string): boolean {
+  return /^\s*\[\s*model_providers(?:\.[^\]]+)?\s*\]\s*(?:#.*)?$/.test(tableHeader);
+}
+
+export function sanitizeSharedConfigToml(configToml: string): string {
+  const kept: string[] = [];
+  let includeCurrentTable = false;
+  let skippingDisallowedValue = false;
+  let disallowedBracketDepth = 0;
+
+  for (const line of configToml.split(/\r?\n/)) {
+    const trimmed = line.trim();
+
+    if (skippingDisallowedValue) {
+      disallowedBracketDepth += tomlBracketDelta(line);
+      if (disallowedBracketDepth <= 0) {
+        skippingDisallowedValue = false;
+        disallowedBracketDepth = 0;
+      }
+      continue;
+    }
+
+    if (!trimmed || trimmed.startsWith("#")) {
+      if (includeCurrentTable && kept.length > 0 && kept[kept.length - 1] !== "") {
+        kept.push("");
+      }
+      continue;
+    }
+
+    if (/^\s*\[/.test(line)) {
+      includeCurrentTable = isSharedModelProviderTable(line);
+      if (includeCurrentTable) {
+        if (kept.length > 0 && kept[kept.length - 1] !== "") kept.push("");
+        kept.push(line);
+      }
+      continue;
+    }
+
+    if (includeCurrentTable) {
+      kept.push(line);
+      continue;
+    }
+
+    const assignment = line.match(/^\s*([A-Za-z0-9_-]+)\s*=/);
+    if (!assignment) continue;
+
+    if (sharedConfigRootKeys.has(assignment[1])) {
+      kept.push(line);
+      continue;
+    }
+
+    const delta = tomlBracketDelta(line);
+    if (delta > 0) {
+      skippingDisallowedValue = true;
+      disallowedBracketDepth = delta;
+    }
+  }
+
+  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 export function buildLegacyProfileFiles(fields: SharedProfileFields) {

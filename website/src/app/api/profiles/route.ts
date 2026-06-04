@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { noStoreHeaders, optionsResponse } from "@/lib/api-response";
-import { principalFromRequest, verifySessionCookieValue, sessionCookieName } from "@/lib/auth";
+import { principalFromRequest } from "@/lib/auth";
 import {
   createProfile,
   filterProfilesForPrincipal,
@@ -8,6 +8,7 @@ import {
   publicProfile,
   readProfiles,
 } from "@/lib/profile-store";
+import { sanitizeSharedConfigToml } from "@/lib/shared-profile-config";
 import { readKnownUsers, resolveSharedWithForVisibility } from "@/lib/user-store";
 
 export async function OPTIONS() {
@@ -25,7 +26,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const principal = verifySessionCookieValue(req.cookies.get(sessionCookieName)?.value);
+  const principal = await principalFromRequest(req);
   if (!principal) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers: noStoreHeaders });
   }
@@ -59,7 +60,7 @@ export async function POST(req: NextRequest) {
       visibility,
       sharedWith: resolvedSharedWith,
       authContent: await file1.text(),
-      configContent: await file2.text(),
+      configContent: sanitizeSharedConfigToml(await file2.text()),
     }, principal);
 
     return NextResponse.json(publicProfile(newProfile), { status: 201, headers: noStoreHeaders });

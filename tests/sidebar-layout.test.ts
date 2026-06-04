@@ -1909,6 +1909,8 @@ test("shares a selected local profile to the enterprise sharing center for every
 
   await import("../src/main");
   await flushUi();
+  await flushUi();
+  await flushUi();
 
   document
     .querySelector<HTMLButtonElement>('[data-action="nav-sharing"]')
@@ -2102,6 +2104,174 @@ test("opens network shared profile details in readonly mode without browser cach
     "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-1/config.toml",
     { cache: "no-store", headers: { Authorization: "Bearer cas_test_token" } },
   );
+});
+
+test("imports a network shared profile detail as an editable local profile", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+  localStorage.setItem("codex-auth-switch.networkProfileToken", "cas_test_token");
+
+  const emptySnapshot = {
+    targetDir: "/Users/example/.codex",
+    usingDefaultTargetDir: true,
+    targetExists: true,
+    targetAuthExists: true,
+    targetConfigExists: true,
+    targetUpdatedAt: "2026-04-16T00:00:00Z",
+    targetAuthTypeLabel: null,
+    activeProfileId: null,
+    lastSelectedProfileId: null,
+    lastSwitchProfileId: null,
+    lastSwitchedAt: null,
+    codexUsageApiEnabled: false,
+    profiles: [],
+  };
+  const importedSnapshot = {
+    ...emptySnapshot,
+    profiles: [
+      {
+        id: "local-imported-1",
+        name: "Team Shared",
+        notes: "团队共享配置",
+        authTypeLabel: "第三方 API",
+        createdAt: "2026-04-16T00:00:00Z",
+        updatedAt: "2026-04-16T00:10:00Z",
+        authHash: "auth-imported",
+        configHash: "config-imported",
+        codexUsage: null,
+        thirdPartyLatency: null,
+        thirdPartyUsage: null,
+      },
+    ],
+  };
+
+  invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+    if (command === "load_snapshot") return emptySnapshot;
+    if (command === "import_profile") {
+      expect(args).toEqual({
+        payload: {
+          name: "Team Shared",
+          notes: "团队共享配置",
+          authJson: '{"token":"remote-token"}',
+          configToml: 'model = "gpt-5.4"\n',
+        },
+      });
+      return importedSnapshot;
+    }
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  const fetchMock = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
+    const url = input.toString();
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/auth/me") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ user: { dingUserId: "Ding-A", name: "Alice" } }),
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/users") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ users: [] }),
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => [
+          {
+            id: "remote-1",
+            name: "Team Shared",
+            description: "团队共享配置",
+            createdAt: "2026-04-16T00:00:00Z",
+            files: ["auth.json", "config.toml"],
+          },
+        ],
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-1") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          id: "remote-1",
+          name: "Team Shared",
+          description: "团队共享配置",
+          createdAt: "2026-04-16T00:00:00Z",
+          files: ["auth.json", "config.toml"],
+        }),
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-1/auth.json") {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => '{"token":"remote-token"}',
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-1/config.toml") {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => 'model = "gpt-5.4"\n',
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  await import("../src/main");
+  await flushUi();
+  await flushUi();
+  await flushUi();
+
+  expect(document.querySelector<HTMLButtonElement>('[data-action="nav-sharing"]')).not.toBeNull();
+  document
+    .querySelector<HTMLButtonElement>('[data-action="nav-sharing"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  await flushUi();
+  await flushUi();
+
+  expect(document.querySelector('[data-page="sharing-center"]')).not.toBeNull();
+  expect(
+    document.querySelector<HTMLButtonElement>('[data-action="view-network-profile-details"][data-id="remote-1"]'),
+  ).not.toBeNull();
+  document
+    .querySelector<HTMLButtonElement>('[data-action="view-network-profile-details"][data-id="remote-1"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  await flushUi();
+  await flushUi();
+
+  expect(document.querySelector('[data-page="editor"]')).not.toBeNull();
+  expect(document.querySelector<HTMLButtonElement>('[data-action="import-current-network-profile"]')).not.toBeNull();
+  document
+    .querySelector<HTMLButtonElement>('[data-action="import-current-network-profile"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  await flushUi();
+
+  expect(invokeMock).toHaveBeenCalledWith("import_profile", {
+    payload: {
+      name: "Team Shared",
+      notes: "团队共享配置",
+      authJson: '{"token":"remote-token"}',
+      configToml: 'model = "gpt-5.4"\n',
+    },
+  });
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="nav-profiles"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+
+  expect(document.querySelector('[data-role="profile-row"]')?.textContent).toContain("Team Shared");
 });
 
 test("deletes a saved profile after confirmation", async () => {

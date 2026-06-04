@@ -5,6 +5,7 @@ import { noStoreHeaders, optionsResponse } from "@/lib/api-response";
 import { principalFromRequest, verifySessionCookieValue, sessionCookieName } from "@/lib/auth";
 import { getDataDir } from "@/lib/data-paths";
 import { getVisibleProfile } from "@/lib/profile-store";
+import { sanitizeSharedConfigToml } from "@/lib/shared-profile-config";
 
 export async function OPTIONS() {
   return optionsResponse();
@@ -39,7 +40,11 @@ export async function GET(
     else if (filename.endsWith('.txt')) contentType = "text/plain";
     else contentType = "text/plain"; // default to text parsing for Codex config files
 
-    return new NextResponse(fileBuffer, {
+    const responseBody = filename === "config.toml"
+      ? sanitizeSharedConfigToml(fileBuffer.toString("utf-8"))
+      : fileBuffer;
+
+    return new NextResponse(responseBody, {
       headers: {
         "Content-Type": contentType,
         ...noStoreHeaders,
@@ -78,7 +83,11 @@ export async function POST(
       return NextResponse.json({ error: "Content is required" }, { status: 400, headers: noStoreHeaders });
     }
 
-    await fs.writeFile(filePath, content, "utf-8");
+    await fs.writeFile(
+      filePath,
+      filename === "config.toml" ? sanitizeSharedConfigToml(String(content)) : content,
+      "utf-8",
+    );
 
     return NextResponse.json({ success: true }, { headers: noStoreHeaders });
   } catch (error) {

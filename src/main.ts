@@ -1670,6 +1670,103 @@ async function openEditorForNetworkProfile(networkProfileId: string): Promise<vo
   }
 }
 
+function networkDocumentToProfileInput(document: ProfileDocument): ProfileInput {
+  return {
+    name: document.name,
+    notes: document.notes,
+    authJson: document.authJson,
+    configToml: document.configToml,
+  };
+}
+
+async function importNetworkProfileDocument(
+  document: ProfileDocument,
+  options: { openEditor: boolean },
+): Promise<void> {
+  const payload = networkDocumentToProfileInput(document);
+
+  if (!isTauriRuntime) {
+    state.editor = {
+      ...createEditorState("new"),
+      name: payload.name,
+      notes: payload.notes,
+      authJson: payload.authJson,
+      configToml: payload.configToml,
+      newTab: "manual-full",
+      source: "local",
+      readOnly: false,
+    };
+    state.view = "editor";
+    setFlash("info", "当前为浏览器预览模式，无法写入本地配置，已先载入编辑器。");
+    return;
+  }
+
+  const snapshot = await desktopInvoke<AppSnapshot>("import_profile", { payload });
+  const importedProfile = snapshot.profiles[0] ?? null;
+  state.selectedProfileId = importedProfile?.id ?? null;
+  setSnapshot(snapshot);
+
+  if (options.openEditor && importedProfile) {
+    applyEditorDocument({
+      ...document,
+      id: importedProfile.id,
+      name: importedProfile.name,
+      notes: importedProfile.notes,
+      authTypeLabel: importedProfile.authTypeLabel,
+      createdAt: importedProfile.createdAt,
+      updatedAt: importedProfile.updatedAt,
+      loadedFromTarget: false,
+      hasTargetChanges: false,
+      readOnly: false,
+      source: "local",
+    });
+    state.view = "editor";
+  } else {
+    state.activeTab = "local";
+    state.view = "cards";
+  }
+
+  setFlash("success", `已将共享配置「${document.name}」导入本地配置管理。`);
+}
+
+async function importNetworkProfileAsLocal(networkProfileId: string, options: { openEditor: boolean }): Promise<void> {
+  setBusy(true);
+  try {
+    const document = await fetchNetworkProfileDocument(networkProfileId);
+    await importNetworkProfileDocument(document, options);
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    setBusy(false);
+    render();
+  }
+}
+
+async function importCurrentNetworkProfileFromEditor(): Promise<void> {
+  setBusy(true);
+  try {
+    await importNetworkProfileDocument({
+      id: state.editor.profileId ?? "",
+      name: state.editor.name,
+      notes: state.editor.notes,
+      authTypeLabel: "远程资源",
+      createdAt: state.editor.createdAt ?? new Date().toISOString(),
+      updatedAt: state.editor.updatedAt ?? state.editor.createdAt ?? new Date().toISOString(),
+      authJson: state.editor.authJson,
+      configToml: state.editor.configToml,
+      loadedFromTarget: false,
+      hasTargetChanges: false,
+      readOnly: true,
+      source: "network",
+    }, { openEditor: true });
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    setBusy(false);
+    render();
+  }
+}
+
 async function shareLocalProfileToNetwork(): Promise<void> {
   const profileId = state.shareDraft.profileId;
   if (!profileId) {
@@ -3209,24 +3306,7 @@ function renderNewPageNetworkSection(): string {
 }
 
 async function importNetworkProfileToEditor(networkProfileId: string): Promise<void> {
-  setBusy(true);
-  try {
-    const document = await fetchNetworkProfileDocument(networkProfileId);
-    state.editor.name = document.name;
-    state.editor.notes = document.notes;
-    state.editor.authJson = document.authJson;
-    state.editor.configToml = document.configToml;
-    state.editor.newTab = "manual-full";
-    state.editor.source = "local";
-    state.editor.readOnly = false;
-    clearFlash();
-    setFlash("success", `已将共享配置「${document.name}」导入编辑器，您可以继续编辑并保存。`);
-  } catch (error) {
-    setFlash("error", error instanceof Error ? error.message : String(error));
-  } finally {
-    setBusy(false);
-    render();
-  }
+  await importNetworkProfileAsLocal(networkProfileId, { openEditor: false });
 }
 
 function escapeHtml(value: string): string {
@@ -4992,13 +5072,7 @@ function bindEvents(): void {
       } else if (action === "import-network-profile-to-editor" && button.dataset.id) {
         await importNetworkProfileToEditor(button.dataset.id);
       } else if (action === "import-current-network-profile") {
-        state.editor.mode = "new";
-        state.editor.newTab = "manual-full";
-        state.editor.source = "local";
-        state.editor.readOnly = false;
-        clearFlash();
-        setFlash("success", `已将共享配置「${state.editor.name}」载入编辑器，您可以修改参数并创建新配置。`);
-        render();
+        await importCurrentNetworkProfileFromEditor();
       } else if (action === "save-editor") {
         await saveEditorProfile(false);
       } else if (action === "save-and-switch") {
