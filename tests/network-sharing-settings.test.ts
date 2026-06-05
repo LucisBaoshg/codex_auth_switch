@@ -56,6 +56,29 @@ async function flushUi(): Promise<void> {
 }
 
 test("uses saved desktop bearer token when refreshing the network shared library", async () => {
+  fetchMock.mockImplementation(async (input: string | URL | Request) => {
+    const url = input.toString();
+    if (url === "https://share.example.com/codex/api/auth/me") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ user: { dingUserId: "Ding-A", name: "Alice" } }),
+      };
+    }
+    if (url === "https://share.example.com/codex/api/users") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ users: [] }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => [],
+    };
+  });
+
   await import("../src/main");
   await flushUi();
 
@@ -155,6 +178,35 @@ test("shows the logged in user in the sidebar and logs out from settings", async
   expect(localStorage.getItem("codex-auth-switch.networkProfileToken")).toBe("");
   expect(document.querySelector('[data-role="sidebar-login-status"]')?.textContent).toContain("未登录");
   expect(document.querySelector<HTMLInputElement>("#network-profile-token")?.value).toBe("");
+});
+
+test("keeps the desktop login state when the server cannot confirm the current user", async () => {
+  localStorage.setItem("codex-auth-switch.networkProfileToken", "cas_desktop_token");
+  fetchMock.mockImplementation(async (input: string | URL | Request) => {
+    const url = input.toString();
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/auth/me") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ user: null }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => [],
+    };
+  });
+
+  await import("../src/main");
+  await flushUi();
+  await flushUi();
+
+  const status = document.querySelector('[data-role="sidebar-login-status"]');
+  expect(status?.textContent).toContain("企业账号");
+  expect(status?.textContent).not.toContain("未登录");
+  expect(status?.querySelector('[data-action="open-network-sso-login"]')).toBeNull();
+  expect(localStorage.getItem("codex-auth-switch.networkProfileToken")).toBe("cas_desktop_token");
 });
 
 test("starts DingTalk SSO login from the cloud sharing settings", async () => {

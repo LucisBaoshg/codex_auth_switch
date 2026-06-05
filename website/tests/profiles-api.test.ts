@@ -2,6 +2,7 @@ import { expect, test } from "vitest";
 import { NextRequest } from "next/server";
 import { createDesktopToken } from "../src/lib/auth";
 import { POST as createSharedProfile } from "../src/app/api/profiles/route";
+import { DELETE as deleteSharedProfile, POST as updateSharedProfile } from "../src/app/api/profiles/[id]/route";
 import { GET as getSharedProfileFile } from "../src/app/api/profiles/[id]/[filename]/route";
 
 async function useTempDataDir(prefix: string) {
@@ -97,6 +98,117 @@ test("stores only share-safe config.toml content from desktop uploads", async ()
   expect(storedConfig).not.toContain("[desktop]");
   expect(storedConfig).not.toContain("[projects");
   expect(storedConfig).not.toContain("private");
+});
+
+test("updates shared profile recipients from a desktop bearer token", async () => {
+  const dataDir = await useTempDataDir("codex-profiles-update-test-");
+  const fs = await import("node:fs/promises");
+  const path = await import("node:path");
+  await fs.mkdir(path.join(dataDir, "files", "profile-1"), { recursive: true });
+  await fs.writeFile(path.join(dataDir, "known-users.json"), JSON.stringify([
+    {
+      dingUserId: "Ding-A",
+      name: "Alice",
+      active: true,
+      firstSeenAt: "2026-06-04T10:00:00.000Z",
+      lastSeenAt: "2026-06-04T10:00:00.000Z",
+    },
+    {
+      dingUserId: "Ding-B",
+      name: "Bob",
+      active: true,
+      firstSeenAt: "2026-06-04T10:00:00.000Z",
+      lastSeenAt: "2026-06-04T10:00:00.000Z",
+    },
+  ]));
+  await fs.writeFile(path.join(dataDir, "profiles.json"), JSON.stringify([
+    {
+      id: "profile-1",
+      name: "ChatGPT Pro",
+      description: "shared auth",
+      createdAt: "2026-06-04T10:00:00.000Z",
+      files: ["auth.json", "config.toml"],
+      ownerDingUserId: "Ding-A",
+      ownerName: "Alice",
+      visibility: "selected",
+      sharedWith: ["Ding-A"],
+    },
+  ]));
+  const { token } = await createDesktopToken({
+    dingUserId: "Ding-A",
+    name: "Alice",
+    active: true,
+  });
+
+  const response = await updateSharedProfile(
+    new NextRequest("http://localhost/codex/api/profiles/profile-1", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        name: "ChatGPT Pro",
+        description: "shared auth",
+        visibility: "selected",
+        sharedWith: ["Ding-B"],
+      }),
+    }),
+    { params: Promise.resolve({ id: "profile-1" }) },
+  );
+  const body = await response.json();
+  const storedProfiles = JSON.parse(await fs.readFile(path.join(dataDir, "profiles.json"), "utf-8"));
+
+  expect(response.status).toBe(200);
+  expect(body.sharedWith).toEqual(["Ding-B"]);
+  expect(body.visibility).toBe("selected");
+  expect(storedProfiles[0].sharedWith).toEqual(["Ding-B"]);
+});
+
+test("deletes an owned shared profile and removes its stored files", async () => {
+  const dataDir = await useTempDataDir("codex-profiles-delete-test-");
+  const fs = await import("node:fs/promises");
+  const path = await import("node:path");
+  await fs.mkdir(path.join(dataDir, "files", "profile-delete"), { recursive: true });
+  await fs.writeFile(path.join(dataDir, "files", "profile-delete", "auth.json"), "{}");
+  await fs.writeFile(path.join(dataDir, "files", "profile-delete", "config.toml"), 'model = "gpt-5.5"');
+  await fs.writeFile(path.join(dataDir, "profiles.json"), JSON.stringify([
+    {
+      id: "profile-delete",
+      name: "ChatGPT Pro",
+      description: "shared auth",
+      createdAt: "2026-06-04T10:00:00.000Z",
+      files: ["auth.json", "config.toml"],
+      ownerDingUserId: "Ding-A",
+      ownerName: "Alice",
+      visibility: "public",
+      sharedWith: [],
+    },
+  ]));
+  const { token } = await createDesktopToken({
+    dingUserId: "Ding-A",
+    name: "Alice",
+    active: true,
+  });
+
+  const response = await deleteSharedProfile(
+    new NextRequest("http://localhost/codex/api/profiles/profile-delete", {
+      method: "DELETE",
+      headers: {
+        authorization: `Bearer ${token}`,
+      },
+    }),
+    { params: Promise.resolve({ id: "profile-delete" }) },
+  );
+  const body = await response.json();
+  const storedProfiles = JSON.parse(await fs.readFile(path.join(dataDir, "profiles.json"), "utf-8"));
+  const fileFolderExists = await fs.access(path.join(dataDir, "files", "profile-delete"))
+    .then(() => true)
+    .catch(() => false);
+
+  expect(response.status).toBe(200);
+  expect(body).toEqual({ ok: true });
+  expect(storedProfiles).toEqual([]);
+  expect(fileFolderExists).toBe(false);
 });
 
 test("downloads legacy stored config.toml through the share-safe sanitizer", async () => {

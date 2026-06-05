@@ -237,3 +237,14 @@ export async function updateProfileMetadata(
   await writeProfiles(profiles);
   return profiles[index];
 }
+
+export async function deleteProfile(id: string, principal: ProfilePrincipal) {
+  const profiles = await readProfiles();
+  const index = profiles.findIndex((profile) => profile.id === id);
+  if (index === -1 || !canEditProfile(profiles[index], principal)) return false;
+
+  const [profile] = profiles.splice(index, 1);
+  await writeProfiles(profiles);
+  await fs.rm(path.join(profileFilesDir(), profile.id), { recursive: true, force: true });
+  return true;
+}

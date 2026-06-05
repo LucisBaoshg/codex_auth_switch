@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { noStoreHeaders, optionsResponse } from "@/lib/api-response";
-import { principalFromRequest, verifySessionCookieValue, sessionCookieName } from "@/lib/auth";
-import { getVisibleProfile, normalizeProfileVisibility, publicProfile, updateProfileMetadata } from "@/lib/profile-store";
+import { principalFromRequest } from "@/lib/auth";
+import { deleteProfile, getVisibleProfile, normalizeProfileVisibility, publicProfile, updateProfileMetadata } from "@/lib/profile-store";
 import { readKnownUsers, resolveSharedWithForVisibility } from "@/lib/user-store";
 
 export async function OPTIONS() {
@@ -32,13 +32,37 @@ export async function GET(
   }
 }
 
+export async function DELETE(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const p = await params;
+  const id = p.id;
+  const principal = await principalFromRequest(request);
+  if (!principal) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers: noStoreHeaders });
+  }
+
+  try {
+    const deleted = await deleteProfile(id, principal);
+    if (!deleted) {
+      return NextResponse.json({ error: "Profile not found" }, { status: 404, headers: noStoreHeaders });
+    }
+
+    return NextResponse.json({ ok: true }, { headers: noStoreHeaders });
+  } catch (error) {
+    console.error("Error deleting profile:", error);
+    return NextResponse.json({ error: "Internal Server Error" }, { status: 500, headers: noStoreHeaders });
+  }
+}
+
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const p = await params;
   const id = p.id;
-  const principal = verifySessionCookieValue(request.cookies.get(sessionCookieName)?.value);
+  const principal = await principalFromRequest(request);
   if (!principal) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers: noStoreHeaders });
   }
