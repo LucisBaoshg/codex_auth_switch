@@ -31,7 +31,7 @@ test("uses Codex assistant as the public app display name", () => {
     "README.md",
     "website/src/app/layout.tsx",
     "website/src/app/page.tsx",
-    "src-tauri/src/core/mod.rs",
+    "src-tauri/src/core/updates.rs",
     "src-tauri/src/lib.rs",
   ];
 

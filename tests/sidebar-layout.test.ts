@@ -117,7 +117,8 @@ test("keeps the default profile list concise with metric chips and quick probe a
   expect(liveRow?.textContent).not.toContain("更新");
   expect(liveRow?.querySelector('[data-action="refresh-third-party-usage"]')?.textContent).toContain("额度");
   expect(liveRow?.querySelector('[data-action="refresh-third-party-latency"]')?.textContent).toContain("测速");
-  expect(liveRow?.querySelector('[data-action="view-profile-details"]')?.textContent).toContain("详情");
+  expect(liveRow?.querySelector('[data-action="view-profile-details"]')?.textContent?.trim()).toBe("");
+  expect(liveRow?.querySelector('[data-action="view-profile-details"]')?.getAttribute("aria-label")).toContain("查看和编辑");
   expect(liveRow?.querySelector('[data-action="open-profile-drawer"]')).toBeNull();
   expect(liveRow?.querySelector('[data-action="delete-profile"]')).toBeNull();
 });
@@ -303,7 +304,7 @@ test("marks failed official usage refreshes in the list and detail page", async 
   expect(document.body.textContent).toContain("ChatGPT access token");
 });
 
-test("keeps list rows aligned with fixed metric and action slots", async () => {
+test("keeps list rows aligned with grouped metric and action slots", async () => {
   await import("../src/main");
   await flushUi();
 
@@ -314,6 +315,7 @@ test("keeps list rows aligned with fixed metric and action slots", async () => {
     expect(row.querySelectorAll('[data-role="profile-row-metric"]')).toHaveLength(3);
     expect(row.querySelector('[data-role="profile-row-actions"]')).not.toBeNull();
     expect(row.querySelector('[data-role="profile-row-primary-action"]')).not.toBeNull();
+    expect(row.querySelector('[data-role="profile-row-secondary-actions"]')).not.toBeNull();
     expect(row.querySelector('[data-role="profile-row-quota-action"]')).not.toBeNull();
     expect(row.querySelector('[data-role="profile-row-latency-action"]')).not.toBeNull();
     expect(row.querySelector('[data-role="profile-row-detail-action"]')).not.toBeNull();
@@ -1814,6 +1816,7 @@ test("moves cloud sharing out of the new profile editor into a dedicated sharing
   expect(document.querySelector('[data-page="sharing-center"]')).not.toBeNull();
   expect(document.querySelector('[data-role="sharing-center-tabs"]')).not.toBeNull();
   expect(document.querySelector('[data-role="local-share-form"]')).not.toBeNull();
+  expect(document.querySelector('[data-role="local-profile-tabs"]')).not.toBeNull();
 
   document
     .querySelector<HTMLButtonElement>('[data-action="sharing-tab-library"]')
@@ -1996,8 +1999,12 @@ test("shares a local profile to selected known SSO users from the sharing center
   await flushUi();
   await flushUi();
 
+  const initialChecked = document.querySelectorAll<HTMLInputElement>(".share-user-checkbox:checked");
+  expect(initialChecked).toHaveLength(0);
+
   const bobCheckbox = document.querySelector<HTMLInputElement>('.share-user-checkbox[value="Ding-B"]');
   expect(bobCheckbox).not.toBeNull();
+  expect(bobCheckbox!.type).toBe("checkbox");
   bobCheckbox!.checked = true;
   bobCheckbox!.dispatchEvent(new Event("change", { bubbles: true }));
   await flushUi();
@@ -2027,7 +2034,7 @@ test("edits recipients for an owned shared profile and shows its share count in 
       ownerDingUserId: "Ding-A",
       ownerName: "Alice",
       visibility: "selected",
-      sharedWith: ["Ding-A"],
+      sharedWith: ["Ding-A", "Ding-B"],
     },
     {
       id: "remote-other",
@@ -2106,22 +2113,22 @@ test("edits recipients for an owned shared profile and shows its share count in 
   await flushUi();
 
   expect(document.querySelector('[data-role="sharing-center-tabs"]')).not.toBeNull();
-  expect(document.querySelector('[data-role="owned-shared-profiles"]')?.textContent).toContain("ChatGPT Pro");
-  expect(document.querySelector('[data-role="owned-shared-profiles"]')?.textContent).toContain("指定 1 人");
+  expect(document.querySelector('[data-role="local-share-form"]')?.textContent).toContain("ChatGPT Pro");
+  expect(document.querySelector('[data-role="local-share-form"]')?.textContent).toContain("指定 1 人");
 
   document
-    .querySelector<HTMLButtonElement>('[data-action="edit-shared-profile-users"][data-id="remote-owned"]')
+    .querySelector<HTMLButtonElement>('[data-action="select-share-profile-tab"][data-owned-id="remote-owned"]')
     ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   await flushUi();
 
-  const aliceCheckbox = document.querySelector<HTMLInputElement>('.shared-profile-edit-user-checkbox[value="Ding-A"]');
-  expect(aliceCheckbox).not.toBeNull();
-  aliceCheckbox!.checked = false;
-  aliceCheckbox!.dispatchEvent(new Event("change", { bubbles: true }));
-  await flushUi();
+  const initialEditChecked = document.querySelectorAll<HTMLInputElement>(".shared-profile-edit-user-checkbox:checked");
+  expect(initialEditChecked).toHaveLength(1);
+  expect(initialEditChecked[0].value).toBe("Ding-B");
+  expect(document.querySelector<HTMLInputElement>('.shared-profile-edit-user-checkbox[value="Ding-A"]')).toBeNull();
 
   const bobCheckbox = document.querySelector<HTMLInputElement>('.shared-profile-edit-user-checkbox[value="Ding-B"]');
   expect(bobCheckbox).not.toBeNull();
+  expect(bobCheckbox!.type).toBe("checkbox");
   bobCheckbox!.checked = true;
   bobCheckbox!.dispatchEvent(new Event("change", { bubbles: true }));
   await flushUi();
@@ -2230,7 +2237,7 @@ test("keeps SSO signed in when editing shared recipients receives an unauthorize
   await flushUi();
 
   document
-    .querySelector<HTMLButtonElement>('[data-action="edit-shared-profile-users"][data-id="remote-owned"]')
+    .querySelector<HTMLButtonElement>('[data-action="select-share-profile-tab"][data-owned-id="remote-owned"]')
     ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   await flushUi();
 
@@ -2321,7 +2328,12 @@ test("deletes an owned shared profile from the sharing center management list", 
   await flushUi();
   await flushUi();
 
-  expect(document.querySelector('[data-role="owned-shared-profiles"]')?.textContent).toContain("ChatGPT Pro");
+  expect(document.querySelector('[data-role="local-share-form"]')?.textContent).toContain("ChatGPT Pro");
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="select-share-profile-tab"][data-owned-id="remote-owned"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
 
   document
     .querySelector<HTMLButtonElement>('[data-action="delete-shared-profile"][data-id="remote-owned"]')
@@ -2340,7 +2352,7 @@ test("deletes an owned shared profile from the sharing center management list", 
       },
     }),
   );
-  expect(document.querySelector('[data-role="owned-shared-profiles"]')?.textContent).not.toContain("ChatGPT Pro");
+  expect(document.querySelector('[data-role="local-share-form"]')?.textContent).toContain("未共享");
   expect(document.body.textContent).toContain("已删除共享配置");
 });
 

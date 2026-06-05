@@ -12,3 +12,4 @@ progress.md
 *.pfx
 *.cer
 *.mobileprovision
+*_local-test.dmg

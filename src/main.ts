@@ -1,356 +1,147 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
+import {
+  renderAppShell,
+} from "./app-chrome-renderers";
+import { nativeConfirm } from "./app-chrome-dialogs";
+import type { FlashKind } from "./html-utils";
+import {
+  profileInputFromDocument,
+  standaloneThirdPartyConfigInputFromDraft,
+  symbioticAuthJsonFromOfficial,
+  symbioticThirdPartyConfigTomlFromDraft,
+  type NewProfileTemplate,
+  type ProfileInput,
+} from "./profile-input-builders";
+import {
+  createEditorFromDocument,
+  createEditorFromInput,
+  createEditorState,
+  createMockCurrentInput,
+  createSymbioticEditorFromDocument,
+  type EditorMode,
+  type EditorState,
+} from "./profile-editor-state";
+import {
+  renderEditorPage,
+} from "./profile-editor-renderers";
+import {
+  getOfficialOauthProfiles,
+  removeProfileFromSnapshot,
+  resolveOfficialOauthProfileId,
+} from "./profile-selection";
+import {
+  currentRenderedPageKey,
+  restoreMainScrollIfSamePage,
+} from "./scroll-restoration";
+import {
+  codexUsageActionPrefix,
+  latencyProbeActionKey,
+  migrateLegacyThirdPartyActionKey,
+  refreshAllUsageActionKey,
+  thirdPartyUsageActionKey,
+  usageRefreshActionKey,
+  writeThirdPartyWebsocketsDefaultsActionKey,
+} from "./pending-action-keys";
+import {
+  hasPendingAction,
+  hasPendingActionPrefix,
+} from "./pending-actions";
+import {
+  isOwnNetworkProfile,
+  type NetworkProfile,
+  type NetworkUserPrincipal,
+  type ShareUserOption,
+  type ShareVisibility,
+} from "./network-profile-utils";
+import {
+  renderNetworkAccountSettings,
+  renderSidebarLoginStatus,
+} from "./network-account-renderers";
+import { renderSettingsPage } from "./settings-renderers";
+import {
+  DEFAULT_NETWORK_PROFILES_API,
+  hasNetworkAccessToken,
+  loadNetworkSharingSettings,
+  networkAuthHeaders,
+  networkDesktopLoginApiUrl,
+  networkFetchOptions,
+  networkMeApiUrl,
+  networkPortalBaseUrl,
+  networkProfilesApiUrl,
+  networkSsoLoginUrl,
+  networkUsersApiUrl,
+  saveNetworkSharingSettings,
+} from "./network-sharing";
+import {
+  type CodexMessage,
+  type CodexSessionInfo,
+} from "./session-utils";
+import { exportCodexSessionToMarkdown } from "./session-export";
+import {
+  formatSessionRecoveryFlash,
+  formatSessionRepairFlash,
+  totalSafeRepairCandidates,
+  totalTimeRepairCandidates,
+  type SessionRecoveryCandidates,
+  type SessionRecoveryCounts,
+  type SessionRecoveryReport,
+  type SessionRecoverySamples,
+  type SessionRepairResult,
+  type SessionRepairUpdateCounts,
+  type SavedRootOutsideRecentWindowSample,
+} from "./session-recovery-utils";
+import {
+  createPreviewCodexSessionMessages,
+  createPreviewCodexSessions,
+} from "./session-preview-data";
+import { createPreviewAppSnapshot } from "./app-preview-data";
+import type {
+  AppSnapshot,
+  InstallLocationStatus,
+  LegacyThirdPartyMigrationResult,
+  ProfileDocument,
+  ThirdPartyWebsocketsDefaultResult,
+  UpdateCheckResult,
+} from "./desktop-types";
+import {
+  createEmptyProfileDocument,
+  createMockProfileDocument,
+} from "./profile-documents";
+import {
+  renderCardsPage,
+} from "./profile-list-renderers";
+import {
+  isOfficialOauthProfile,
+  isThirdPartyBackedProfile,
+} from "./usage-formatters";
+import {
+  renderSessionDetailHtml,
+  renderSessionsListHtml,
+  renderSessionsPage,
+} from "./session-renderers";
+import { renderSessionCleanupPage } from "./session-cleanup-renderers";
+import {
+  renderEnterpriseLibraryTab,
+  renderOwnSharingTab,
+  renderSharingCenterPage,
+  renderSharedProfileEditUserPicker,
+  renderShareUserPicker,
+} from "./sharing-center-renderers";
+import {
+  createSharedProfileEditDraft,
+  resolveLocalShareFormState,
+} from "./sharing-center-state";
+import {
+  applySnapshotToDesktopState,
+  createDesktopState,
+  selectOwnNetworkProfiles,
+  selectSessionRenderState,
+} from "./desktop-state";
 import "./styles.css";
 
-type FlashKind = "info" | "success" | "error";
-type ViewMode = "cards" | "editor" | "sharing" | "settings" | "sessions" | "session-cleanup";
-type EditorMode = "new" | "fromCurrent" | "existing";
-type PlatformMode = "codex";
-type ProfileLayoutMode = "list" | "grid";
-type ShareVisibility = "private" | "selected" | "public";
-type SharingCenterTab = "own" | "library";
-
-type CodexSessionInfo = {
-  id: string;
-  rolloutPath?: string | null;
-  updatedAtMs: number;
-  cwd?: string | null;
-  title?: string | null;
-  hasUserEvent: boolean;
-  archived: boolean;
-  modelProvider?: string | null;
-  fileSize?: number | null;
-};
-
-type CodexMessage = {
-  role: string;
-  text: string;
-};
-type NewProfileTemplate = "standaloneThirdParty" | "symbioticThirdParty";
-type BusyDialogState = {
-  title: string;
-  message: string;
-} | null;
-
-type CodexUsageWindow = {
-  usedPercent: number;
-  windowMinutes: number | null;
-  resetsAt: string | null;
-};
-
-type CodexUsageCredits = {
-  hasCredits: boolean;
-  unlimited: boolean;
-  balance: string | null;
-};
-
-type CodexUsageSnapshot = {
-  source: string;
-  planType: string | null;
-  primary: CodexUsageWindow | null;
-  secondary: CodexUsageWindow | null;
-  credits: CodexUsageCredits | null;
-  updatedAt: string;
-  error?: string | null;
-};
-
-type ThirdPartyLatencySnapshot = {
-  wireApi: string | null;
-  model: string | null;
-  ttftMs: number | null;
-  totalMs: number | null;
-  statusCode: number | null;
-  updatedAt: string;
-  error: string | null;
-};
-
-type ThirdPartyUsageSnapshot = {
-  provider: string | null;
-  remaining: string | null;
-  unit: string | null;
-  daily?: ThirdPartyUsageQuotaSnapshot | null;
-  weekly?: ThirdPartyUsageQuotaSnapshot | null;
-  subscription?: ThirdPartySubscriptionSnapshot | null;
-  credit?: ThirdPartyCreditSnapshot | null;
-  updatedAt: string;
-  error: string | null;
-};
-
-type ThirdPartyUsageQuotaSnapshot = {
-  used: string | null;
-  total: string | null;
-  remaining: string | null;
-  usedPercent: number | null;
-};
-
-type ThirdPartySubscriptionSnapshot = {
-  dailyQuota: string | null;
-  weeklyQuota: string | null;
-  monthlyQuota: string | null;
-  expiresAt: string | null;
-  amount: string | null;
-  packageType: string | null;
-};
-
-type ThirdPartyCreditSnapshot = {
-  freeBalance: string | null;
-  paidBalance: string | null;
-  totalBalance: string | null;
-};
-
-type ProfileSummary = {
-  id: string;
-  name: string;
-  notes: string;
-  authTypeLabel: string;
-  modelProviderId?: string | null;
-  modelProviderApiKeyId?: string | null;
-  modelProviderKey?: string | null;
-  modelProviderName?: string | null;
-  modelProviderBaseUrl?: string | null;
-  modelProviderWireApi?: string | null;
-  createdAt: string;
-  updatedAt: string;
-  authHash: string;
-  configHash: string;
-  codexUsage: CodexUsageSnapshot | null;
-  thirdPartyLatency: ThirdPartyLatencySnapshot | null;
-  thirdPartyUsage?: ThirdPartyUsageSnapshot | null;
-};
-
-type ProfileInput = {
-  name: string;
-  notes: string;
-  authJson: string;
-  configToml: string;
-};
-
-type ThirdPartyConfigDraft = {
-  template: NewProfileTemplate;
-  oauthProfileId: string;
-  provider: string;
-  baseUrl: string;
-  apiKey: string;
-  model: string;
-};
-
-type ProfileDocument = {
-  id: string;
-  name: string;
-  notes: string;
-  authTypeLabel: string;
-  modelProviderId?: string | null;
-  modelProviderApiKeyId?: string | null;
-  modelProviderKey?: string | null;
-  modelProviderName?: string | null;
-  modelProviderBaseUrl?: string | null;
-  modelProviderWireApi?: string | null;
-  createdAt: string;
-  updatedAt: string;
-  authJson: string;
-  configToml: string;
-  loadedFromTarget: boolean;
-  hasTargetChanges: boolean;
-  readOnly?: boolean;
-  source?: "local" | "network";
-};
-
-type AppSnapshot = {
-  targetDir: string;
-  usingDefaultTargetDir: boolean;
-  targetExists: boolean;
-  targetAuthExists: boolean;
-  targetConfigExists: boolean;
-  targetUpdatedAt: string | null;
-  targetAuthTypeLabel: string | null;
-  activeProfileId: string | null;
-  lastSelectedProfileId: string | null;
-  lastSwitchProfileId: string | null;
-  lastSwitchedAt: string | null;
-  codexUsageApiEnabled: boolean;
-  profiles: ProfileSummary[];
-};
-
-type LegacyThirdPartyMigrationResult = {
-  migratedProfileIds: string[];
-  skippedProfileIds: string[];
-};
-
-type ThirdPartyWebsocketsDefaultResult = {
-  updatedProfileIds: string[];
-  skippedProfileIds: string[];
-};
-
-type UpdateCheckResult = {
-  hasUpdate: boolean;
-  currentVersion: string;
-  latestVersion: string;
-  downloadUrl: string;
-  publishedAt: string | null;
-  notes: string | null;
-  kind: string;
-  filename: string;
-  sha256: string;
-  size: number;
-  canInstall: boolean;
-};
-
-type InstallLocationStatus = {
-  updateSafe: boolean;
-  requiresApplicationsInstall: boolean;
-  installPath: string;
-  message: string | null;
-};
-
-type SessionRecoveryCounts = {
-  sessionIndexEntries: number;
-  dbThreads: number;
-  archived: number;
-  unarchived: number;
-  hasUserEventTrue: number;
-  hasUserEventFalse: number;
-  inferredCurrentModelProvider?: string | null;
-  modelProviderCounts?: Record<string, number>;
-};
-
-type SessionRecoveryCandidates = {
-  missingRolloutFiles: number;
-  hasUserEventFalseButRolloutHasUserMessage: number;
-  dbTimeMismatchWithSessionIndex: number;
-  rolloutMtimeMismatchWithSessionIndex: number;
-  dbThreadIdsMissingFromSessionIndex: number;
-  sessionIndexIdsMissingFromDb: number;
-  appDefaultModelProviderMismatch?: number;
-};
-
-type SavedRootOutsideRecentWindowSample = {
-  root: string;
-  latestThreadId: string;
-  latestTitle: string | null;
-  latestUpdatedAt: string;
-};
-
-type SessionRecoverySamples = {
-  missingRolloutFiles: Array<{ id: string; archived: boolean; rolloutPath: string | null }>;
-  hasUserEventFalseButRolloutHasUserMessage: Array<{
-    id: string;
-    archived: boolean;
-    cwd: string | null;
-    title: string | null;
-  }>;
-  dbTimeMismatchWithSessionIndex: Array<{
-    id: string;
-    cwd: string | null;
-    dbUpdatedAtMs: number;
-    indexedUpdatedAtMs: number;
-  }>;
-  rolloutMtimeMismatchWithSessionIndex: Array<{
-    id: string;
-    rolloutPath: string;
-    rolloutMtimeMs: number;
-    indexedUpdatedAtMs: number;
-  }>;
-  savedRootsWithChatsOutsideRecentWindow: SavedRootOutsideRecentWindowSample[];
-};
-
-type SessionRecoveryReport = {
-  codexHome: string;
-  dbPath: string;
-  sessionIndexPath: string;
-  recentLimit: number;
-  sqliteIntegrity: string;
-  counts: SessionRecoveryCounts;
-  repairCandidates: SessionRecoveryCandidates;
-  samples: SessionRecoverySamples;
-  notes: string[];
-};
-
-type SessionRepairUpdateCounts = {
-  hasUserEvent: number;
-  dbTime: number;
-  rolloutMtime: number;
-  timeMismatchesNotRepaired: number;
-  skippedMissingRolloutFiles: number;
-};
-
-type SessionRepairResult = {
-  repaired: boolean;
-  backupPath: string;
-  auditPath: string;
-  updates: SessionRepairUpdateCounts;
-  note: string;
-};
-
-type EditorState = {
-  mode: EditorMode;
-  profileId: string | null;
-  name: string;
-  notes: string;
-  authJson: string;
-  configToml: string;
-  thirdParty: ThirdPartyConfigDraft;
-  createdAt: string | null;
-  updatedAt: string | null;
-  loadedFromTarget: boolean;
-  hasTargetChanges: boolean;
-  readOnly: boolean;
-  source: "local" | "network";
-  newTab?: "manual-delta" | "manual-full";
-};
-
-type NetworkProfile = {
-  id: string;
-  name: string;
-  description: string;
-  createdAt: string;
-  updatedAt?: string;
-  files: string[];
-  ownerDingUserId?: string;
-  ownerName?: string;
-  ownerMobile?: string;
-  visibility?: ShareVisibility;
-  sharedWith?: string[];
-};
-
-type ShareUserOption = {
-  dingUserId: string;
-  label: string;
-  name?: string | null;
-  mobile?: string | null;
-  jobNumber?: string | null;
-};
-
-type NetworkUserPrincipal = {
-  dingUserId: string;
-  name?: string | null;
-  mobile?: string | null;
-  jobNumber?: string | null;
-};
-
-type LocalShareDraft = {
-  profileId: string | null;
-  visibility: ShareVisibility;
-  selectedUserIds: string[];
-};
-
-type SharedProfileEditDraft = {
-  profileId: string;
-  visibility: ShareVisibility;
-  selectedUserIds: string[];
-};
-
-type NetworkSharingSettings = {
-  profilesApi: string;
-  token: string;
-};
-
-const CANONICAL_NETWORK_PROFILES_HOST = "codex-helper.ite.tool4seller.com";
-const LEGACY_NETWORK_PROFILES_HOST = "sub2api.ite.tapcash.com";
-const DEFAULT_NETWORK_PROFILES_API = `https://${CANONICAL_NETWORK_PROFILES_HOST}/codex/api/profiles`;
 const desktopLoginPollIntervalMs =
   typeof process !== "undefined" && process.env.NODE_ENV === "test" ? 10 : 2000;
-const networkProfilesApiStorageKey = "codex-auth-switch.networkProfilesApi";
-const networkProfileTokenStorageKey = "codex-auth-switch.networkProfileToken";
 
 const isTauriRuntime = "__TAURI_INTERNALS__" in window;
 const appRoot = document.querySelector<HTMLDivElement>("#app");
@@ -361,95 +152,8 @@ if (!appRoot) {
 
 const app = appRoot;
 
-function loadNetworkSharingSettings(): NetworkSharingSettings {
-  return {
-    profilesApi: normalizeNetworkProfilesApiUrl(
-      window.localStorage.getItem(networkProfilesApiStorageKey)?.trim() ||
-        DEFAULT_NETWORK_PROFILES_API,
-    ),
-    token: window.localStorage.getItem(networkProfileTokenStorageKey)?.trim() || "",
-  };
-}
-
-function saveNetworkSharingSettings(settings: NetworkSharingSettings): void {
-  settings.profilesApi = normalizeNetworkProfilesApiUrl(settings.profilesApi);
-  window.localStorage.setItem(networkProfilesApiStorageKey, settings.profilesApi);
-  window.localStorage.setItem(networkProfileTokenStorageKey, settings.token.trim());
-}
-
-function normalizeNetworkProfilesApiUrl(value: string): string {
-  const trimmed = value.trim();
-  if (!trimmed) return DEFAULT_NETWORK_PROFILES_API;
-
-  try {
-    const url = new URL(trimmed);
-    if (url.hostname === LEGACY_NETWORK_PROFILES_HOST) {
-      url.hostname = CANONICAL_NETWORK_PROFILES_HOST;
-      url.protocol = "https:";
-      return url.toString().replace(/\/$/, "");
-    }
-  } catch {
-    return trimmed;
-  }
-
-  return trimmed;
-}
-
-function networkProfilesApiUrl(): string {
-  const trimmed = normalizeNetworkProfilesApiUrl(state.networkSharing.profilesApi).replace(/\/+$/, "");
-  return trimmed || DEFAULT_NETWORK_PROFILES_API;
-}
-
-function networkPortalBaseUrl(): string {
-  return networkProfilesApiUrl().replace(/\/api\/profiles\/?$/, "");
-}
-
-function networkSsoLoginUrl(): string {
-  const loginUrl = new URL(`${networkPortalBaseUrl()}/api/auth/login`);
-  loginUrl.searchParams.set("returnTo", "/profiles");
-  return loginUrl.toString();
-}
-
-function networkDesktopLoginApiUrl(): string {
-  return `${networkPortalBaseUrl()}/api/auth/desktop-login`;
-}
-
-function networkMeApiUrl(): string {
-  return `${networkPortalBaseUrl()}/api/auth/me`;
-}
-
-function networkUsersApiUrl(): string {
-  return `${networkPortalBaseUrl()}/api/users`;
-}
-
-function networkAuthHeaders(): Record<string, string> | undefined {
-  const token = state.networkSharing.token.trim();
-  if (!token) return undefined;
-  return {
-    Authorization: `Bearer ${token}`,
-  };
-}
-
-function networkFetchOptions(): RequestInit {
-  const headers = networkAuthHeaders();
-  if (headers) {
-    return {
-      cache: "no-store",
-      headers,
-    };
-  }
-
-  return {
-    cache: "no-store",
-  };
-}
-
-function hasNetworkAccessToken(): boolean {
-  return Boolean(state.networkSharing.token.trim());
-}
-
 function networkUnauthorizedError(actionLabel: string): Error {
-  if (!hasNetworkAccessToken()) {
+  if (!hasNetworkAccessToken(state.networkSharing)) {
     state.networkAuthRequired = true;
     return new Error("请先使用钉钉 SSO 登录企业共享中心。");
   }
@@ -458,187 +162,11 @@ function networkUnauthorizedError(actionLabel: string): Error {
   return new Error(`${actionLabel}未通过服务端权限校验，已保留当前登录状态。请刷新共享中心或重新登录后再试。`);
 }
 
-function createEditorState(mode: EditorMode = "new"): EditorState {
-  return {
-    mode,
-    profileId: null,
-    name: "",
-    notes: "",
-    authJson: `{
-  "user": {
-    "email": ""
-  },
-  "token": ""
-}`,
-    configToml: `default_model = "gpt-5"
-theme = "system"
-`,
-    thirdParty: {
-      template: "standaloneThirdParty",
-      oauthProfileId: "",
-      provider: "",
-      baseUrl: "",
-      apiKey: "",
-      model: "gpt-5.5",
-    },
-    createdAt: null,
-    updatedAt: null,
-    loadedFromTarget: false,
-    hasTargetChanges: false,
-    readOnly: false,
-    source: "local",
-    newTab: "manual-delta",
-  };
+function formatErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
-function createLocalShareDraft(): LocalShareDraft {
-  return {
-    profileId: null,
-    visibility: "selected",
-    selectedUserIds: [],
-  };
-}
-
-const mockSnapshot: AppSnapshot = {
-  targetDir: "/Users/example/.codex",
-  usingDefaultTargetDir: true,
-  targetExists: true,
-  targetAuthExists: true,
-  targetConfigExists: true,
-  targetUpdatedAt: new Date().toISOString(),
-  targetAuthTypeLabel: "第三方 API",
-  activeProfileId: "profile-2",
-  lastSelectedProfileId: "profile-2",
-  lastSwitchProfileId: "profile-2",
-  lastSwitchedAt: new Date().toISOString(),
-  codexUsageApiEnabled: true,
-  profiles: [
-    {
-      id: "profile-1",
-      name: "Work Team",
-      notes: "工作主账号，常驻使用。",
-      authTypeLabel: "官方 OAuth",
-      createdAt: "2026-03-16T01:00:00Z",
-      updatedAt: "2026-03-18T12:20:00Z",
-      authHash: "7da2e87f1bc3",
-      configHash: "92ca2d10aa51",
-      codexUsage: {
-        source: "api",
-        planType: "team",
-        primary: {
-          usedPercent: 24,
-          windowMinutes: 300,
-          resetsAt: "2026-03-25T18:26:00Z",
-        },
-        secondary: {
-          usedPercent: 7,
-          windowMinutes: 10080,
-          resetsAt: "2026-04-01T18:26:00Z",
-        },
-        credits: null,
-        updatedAt: new Date().toISOString(),
-      },
-      thirdPartyLatency: null,
-      thirdPartyUsage: null,
-    },
-    {
-      id: "profile-2",
-      name: "淘宝 1",
-      notes: "主工作账号，额度稳定。",
-      authTypeLabel: "第三方 API",
-      createdAt: "2026-03-17T01:00:00Z",
-      updatedAt: "2026-03-19T04:12:00Z",
-      authHash: "d18ff783cb10",
-      configHash: "c450c91961af",
-      codexUsage: null,
-      thirdPartyLatency: {
-        wireApi: "responses",
-        model: "gpt-5.4",
-        ttftMs: 1820,
-        totalMs: 4960,
-        statusCode: 200,
-        updatedAt: new Date().toISOString(),
-        error: null,
-      },
-      thirdPartyUsage: null,
-    },
-  ],
-};
-
-
-const state: {
-  platform: PlatformMode;
-  snapshot: AppSnapshot | null;
-  view: ViewMode;
-  selectedProfileId: string | null;
-  editor: EditorState;
-  busy: boolean;
-  busyDialog: BusyDialogState;
-  pendingActions: Set<string>;
-  flash: { kind: FlashKind; text: string } | null;
-  activeTab: "local" | "network";
-  sharingCenterTab: SharingCenterTab;
-  profileLayout: ProfileLayoutMode;
-  networkProfiles: NetworkProfile[];
-  networkLoading: boolean;
-  networkAuthRequired: boolean;
-  networkSharing: NetworkSharingSettings;
-  networkUser: NetworkUserPrincipal | null;
-  networkUserLoading: boolean;
-  shareUsers: ShareUserOption[];
-  shareUsersLoading: boolean;
-  shareDraft: LocalShareDraft;
-  sharedProfileEditDraft: SharedProfileEditDraft | null;
-  appVersion: string | null;
-  update: {
-    checking: boolean;
-    lastResult: UpdateCheckResult | null;
-  };
-  sessions: CodexSessionInfo[];
-  selectedSessionId: string | null;
-  sessionMessages: CodexMessage[];
-  sessionSearchQuery: string;
-  sessionFilter: "all" | "active" | "archived";
-  sessionSortOrder: "time" | "cwd";
-  sessionsLoading: boolean;
-  messagesLoading: boolean;
-} = {
-  platform: "codex",
-  snapshot: null,
-  view: "cards",
-  selectedProfileId: null,
-  editor: createEditorState(),
-  busy: false,
-  busyDialog: null,
-  pendingActions: new Set<string>(),
-  flash: null,
-  activeTab: "local",
-  sharingCenterTab: "own",
-  profileLayout: "list",
-  networkProfiles: [],
-  networkLoading: false,
-  networkAuthRequired: !loadNetworkSharingSettings().token,
-  networkSharing: loadNetworkSharingSettings(),
-  networkUser: null,
-  networkUserLoading: false,
-  shareUsers: [],
-  shareUsersLoading: false,
-  shareDraft: createLocalShareDraft(),
-  sharedProfileEditDraft: null,
-  appVersion: null,
-  update: {
-    checking: false,
-    lastResult: null,
-  },
-  sessions: [],
-  selectedSessionId: null,
-  sessionMessages: [],
-  sessionSearchQuery: "",
-  sessionFilter: "all",
-  sessionSortOrder: "time",
-  sessionsLoading: false,
-  messagesLoading: false,
-};
+const state = createDesktopState(loadNetworkSharingSettings());
 
 let flashTimeoutId: number | null = null;
 
@@ -654,10 +182,6 @@ function setFlash(kind: FlashKind, text: string): void {
     flashTimeoutId = null;
     render();
   }, 4000);
-}
-
-function formatErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function clearFlash(): void {
@@ -683,244 +207,19 @@ function endPendingAction(key: string): void {
   render();
 }
 
-function isPendingAction(key: string): boolean {
-  return state.pendingActions.has(key);
-}
-
-function isPendingActionPrefix(prefix: string): boolean {
-  for (const key of state.pendingActions) {
-    if (key === prefix || key.startsWith(`${prefix}:`)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function usageRefreshActionKey(profileId: string): string {
-  return `codex-usage:${profileId}`;
-}
-
-function latencyProbeActionKey(profileId: string): string {
-  return `latency-probe:${profileId}`;
-}
-
-function thirdPartyUsageActionKey(profileId: string): string {
-  return `third-party-usage:${profileId}`;
-}
-
-const refreshAllUsageActionKey = "codex-usage:all";
-const migrateLegacyThirdPartyActionKey = "third-party:migrate-legacy";
-const writeThirdPartyWebsocketsDefaultsActionKey = "third-party:websockets-defaults";
-
 function setSnapshot(snapshot: AppSnapshot): void {
-  state.snapshot = snapshot;
-
-
-  if (!snapshot.profiles.some((profile) => profile.id === state.selectedProfileId)) {
-    state.selectedProfileId =
-      snapshot.activeProfileId ??
-      snapshot.lastSelectedProfileId ??
-      snapshot.profiles[0]?.id ??
-      null;
-  }
-  if (!snapshot.profiles.some((profile) => profile.id === state.shareDraft.profileId)) {
-    state.shareDraft.profileId = snapshot.activeProfileId ?? snapshot.profiles[0]?.id ?? null;
-  }
+  applySnapshotToDesktopState(state, snapshot);
   render();
-}
-
-function getSelectedProfile(snapshot: AppSnapshot | null): ProfileSummary | null {
-  if (!snapshot || snapshot.profiles.length === 0) {
-    return null;
-  }
-
-  return (
-    snapshot.profiles.find((profile) => profile.id === state.selectedProfileId) ??
-    snapshot.profiles.find((profile) => profile.id === snapshot.activeProfileId) ??
-    snapshot.profiles[0]
-  );
-}
-
-function createMockCurrentInput(): ProfileInput {
-  return {
-    name: "",
-    notes: "来自当前 Codex 目录",
-    authJson: `{
-  "auth_mode": "chatgpt",
-  "tokens": {
-    "id_token": "mock-id-token",
-    "access_token": "mock-access-token"
-  }
-}`,
-    configToml: `model = "gpt-5.4"
-model_reasoning_effort = "medium"
-`,
-  };
-}
-
-function createEditorFromInput(mode: EditorMode, input: ProfileInput): EditorState {
-  const template = createEditorState();
-  return {
-    mode,
-    profileId: null,
-    name: input.name,
-    notes: input.notes,
-    authJson: input.authJson,
-    configToml: input.configToml,
-    thirdParty: template.thirdParty,
-    createdAt: null,
-    updatedAt: null,
-    loadedFromTarget: false,
-    hasTargetChanges: false,
-    readOnly: false,
-    source: "local",
-  };
-}
-
-function escapeTomlString(value: string): string {
-  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-}
-
-function tomlTableKey(value: string): string {
-  return /^[A-Za-z0-9_-]+$/.test(value) ? value : `"${escapeTomlString(value)}"`;
-}
-
-function getOfficialOauthProfiles(snapshot: AppSnapshot | null): ProfileSummary[] {
-  return snapshot?.profiles.filter((profile) => profile.authTypeLabel === "官方 OAuth") ?? [];
-}
-
-function resolveSymbioticOauthProfileId(): string {
-  const officialProfiles = getOfficialOauthProfiles(state.snapshot);
-  if (officialProfiles.length === 0) {
-    return "";
-  }
-
-  const selected = state.editor.thirdParty.oauthProfileId;
-  if (officialProfiles.some((profile) => profile.id === selected)) {
-    return selected;
-  }
-
-  const activeOfficial = officialProfiles.find(
-    (profile) => profile.id === state.snapshot?.activeProfileId,
-  );
-  return activeOfficial?.id ?? officialProfiles[0].id;
-}
-
-function editorCannotSaveBecauseMissingOauth(): boolean {
-  return (
-    state.editor.mode === "new" &&
-    state.editor.thirdParty.template === "symbioticThirdParty" &&
-    getOfficialOauthProfiles(state.snapshot).length === 0
-  );
-}
-
-function standaloneThirdPartyConfigInputFromDraft(editor: EditorState, strict: boolean = true): ProfileInput {
-  const baseUrl = editor.thirdParty.baseUrl.trim();
-  const apiKey = editor.thirdParty.apiKey.trim();
-  const model = editor.thirdParty.model.trim();
-
-  if (strict) {
-    if (!baseUrl) {
-      throw new Error("请填写第三方 API 的 openai_base_url。");
-    }
-    if (!apiKey) {
-      throw new Error("请填写 auth.json 中 OPENAI_API_KEY 的 value。");
-    }
-    if (!model) {
-      throw new Error("请填写 model。");
-    }
-  }
-
-  return {
-    name: editor.name.trim(),
-    notes: editor.notes.trim(),
-    authJson: JSON.stringify({ OPENAI_API_KEY: apiKey || "<your_api_key_here>" }, null, 2),
-    configToml: `openai_base_url = "${escapeTomlString(baseUrl || "https://api.openai.com/v1")}"
-supports_websockets = false
-model_provider = "openai"
-model = "${escapeTomlString(model || "gpt-5.5")}"
-review_model = "${escapeTomlString(model || "gpt-5.5")}"
-model_reasoning_effort = "high"
-plan_mode_reasoning_effort = "xhigh"
-show_raw_agent_reasoning = true
-approval_policy = "never"
-sandbox_mode = "danger-full-access"
-personality = "pragmatic"
-web_search = "live"
-model_context_window = 1000000
-model_auto_compact_token_limit = 400000
-
-[tui]
-terminal_title = []
-status_line = ["model-with-reasoning", "context-usage", "current-dir", "git-branch"]
-
-[features]
-guardian_approval = true
-remote_connections = true
-memories = true
-
-[sandbox_workspace_write]
-network_access = true
-`,
-  };
-}
-
-function symbioticAuthJsonFromOfficial(authJson: string): string {
-  const parsed = JSON.parse(authJson) as Record<string, unknown>;
-  parsed.auth_mode = "chatgpt";
-  parsed.OPENAI_API_KEY = null;
-  return JSON.stringify(parsed, null, 2);
-}
-
-function symbioticThirdPartyConfigTomlFromDraft(editor: EditorState, strict: boolean = true): string {
-  const provider = editor.thirdParty.provider.trim();
-  const baseUrl = editor.thirdParty.baseUrl.trim();
-  const token = editor.thirdParty.apiKey.trim();
-  const model = editor.thirdParty.model.trim();
-
-  if (strict) {
-    if (!provider) {
-      throw new Error("请填写共生配置的 model_provider。");
-    }
-    if (!baseUrl) {
-      throw new Error("请填写第三方 API 的 base_url。");
-    }
-    if (!token) {
-      throw new Error("请填写第三方 API 的 experimental_bearer_token。");
-    }
-    if (!model) {
-      throw new Error("请填写 model。");
-    }
-  }
-
-  const resolvedProvider = provider || "custom-provider";
-  return `model_provider = "${escapeTomlString(resolvedProvider)}"
-model = "${escapeTomlString(model || "gpt-5.5")}"
-review_model = "${escapeTomlString(model || "gpt-5.5")}"
-model_reasoning_effort = "high"
-plan_mode_reasoning_effort = "xhigh"
-show_raw_agent_reasoning = true
-approval_policy = "never"
-sandbox_mode = "danger-full-access"
-
-[model_providers.${tomlTableKey(resolvedProvider)}]
-name = "${escapeTomlString(resolvedProvider)}"
-base_url = "${escapeTomlString(baseUrl || "https://api.openai.com/v1")}"
-experimental_bearer_token = "${escapeTomlString(token || "<your_bearer_token_here>")}"
-requires_openai_auth = true
-supports_websockets = false
-
-[features]
-remote_connections = true
-remote_control = true
-`;
 }
 
 async function symbioticThirdPartyConfigInputFromDraft(
   editor: EditorState,
   strict: boolean = true,
 ): Promise<ProfileInput> {
-  const oauthProfileId = resolveSymbioticOauthProfileId();
+  const oauthProfileId = resolveOfficialOauthProfileId(
+    state.snapshot,
+    state.editor.thirdParty.oauthProfileId,
+  );
   if (!oauthProfileId) {
     if (strict) {
       throw new Error("请先登录并保存一个官方 OAuth 账号，再创建共生配置。");
@@ -936,47 +235,13 @@ async function symbioticThirdPartyConfigInputFromDraft(
       if (strict) {
         throw new Error("请先登录并保存一个官方 OAuth 账号，再创建共生配置。");
       }
-      document = {
-        id: "",
-        name: "",
-        notes: "",
-        authTypeLabel: "",
-        modelProviderId: null,
-        modelProviderApiKeyId: null,
-        modelProviderKey: null,
-        modelProviderName: null,
-        modelProviderBaseUrl: null,
-        modelProviderWireApi: null,
-        createdAt: "",
-        updatedAt: "",
-        authJson: "{}",
-        configToml: "",
-        loadedFromTarget: false,
-        hasTargetChanges: false,
-      };
+      document = createEmptyProfileDocument();
     } else {
-      document = createMockDocument(profile);
+      document = createMockProfileDocument(profile);
     }
   } else {
     if (!oauthProfileId) {
-      document = {
-        id: "",
-        name: "",
-        notes: "",
-        authTypeLabel: "",
-        modelProviderId: null,
-        modelProviderApiKeyId: null,
-        modelProviderKey: null,
-        modelProviderName: null,
-        modelProviderBaseUrl: null,
-        modelProviderWireApi: null,
-        createdAt: "",
-        updatedAt: "",
-        authJson: "{}",
-        configToml: "",
-        loadedFromTarget: false,
-        hasTargetChanges: false,
-      };
+      document = createEmptyProfileDocument();
     } else {
       document = await desktopInvoke<ProfileDocument>("get_profile_document", {
         profileId: oauthProfileId,
@@ -1016,52 +281,8 @@ async function buildEditorProfileInput(): Promise<ProfileInput> {
   };
 }
 
-function createMockDocument(profile: ProfileSummary): ProfileDocument {
-  return {
-    id: profile.id,
-    name: profile.name,
-    notes: profile.notes,
-    authTypeLabel: profile.authTypeLabel,
-    modelProviderId: profile.modelProviderId ?? null,
-    modelProviderApiKeyId: profile.modelProviderApiKeyId ?? null,
-    modelProviderKey: profile.modelProviderKey ?? null,
-    modelProviderName: profile.modelProviderName ?? null,
-    modelProviderBaseUrl: profile.modelProviderBaseUrl ?? null,
-    modelProviderWireApi: profile.modelProviderWireApi ?? null,
-    createdAt: profile.createdAt,
-    updatedAt: profile.updatedAt,
-    authJson: `{
-  "user": {
-    "email": "${profile.name.toLowerCase()}@example.com"
-  },
-  "token": "token-for-${profile.id}"
-}`,
-    configToml: `default_model = "gpt-5"
-theme = "system"
-profile = "${profile.id}"
-`,
-    loadedFromTarget: false,
-    hasTargetChanges: false,
-  };
-}
-
 function applyEditorDocument(document: ProfileDocument): void {
-  const template = createEditorState();
-  state.editor = {
-    mode: "existing",
-    profileId: document.id,
-    name: document.name,
-    notes: document.notes,
-    authJson: document.authJson,
-    configToml: document.configToml,
-    thirdParty: template.thirdParty,
-    createdAt: document.createdAt,
-    updatedAt: document.updatedAt,
-    loadedFromTarget: document.loadedFromTarget,
-    hasTargetChanges: document.hasTargetChanges,
-    readOnly: document.readOnly ?? false,
-    source: document.source ?? "local",
-  };
+  state.editor = createEditorFromDocument(document);
 }
 
 async function desktopInvoke<T>(
@@ -1077,7 +298,7 @@ async function desktopInvoke<T>(
 
 async function refreshSnapshot(): Promise<void> {
   if (!isTauriRuntime) {
-    setSnapshot(mockSnapshot);
+    setSnapshot(createPreviewAppSnapshot());
     setFlash("info", "当前是浏览器预览模式，展示的是模拟数据。");
     return;
   }
@@ -1093,31 +314,6 @@ async function refreshSnapshot(): Promise<void> {
     state.busy = false;
     render();
   }
-}
-
-function renderedPageKeyForView(): string {
-  if (state.view === "sharing") return "sharing-center";
-  return state.view;
-}
-
-function currentRenderedPageKey(): string | null {
-  return (
-    app.querySelector<HTMLElement>(".app-main-content [data-page]")?.dataset.page ??
-    null
-  );
-}
-
-function restoreMainScrollIfSamePage(previousPageKey: string | null, previousScrollTop: number): void {
-  if (!previousPageKey || previousPageKey !== renderedPageKeyForView()) return;
-  const main = app.querySelector<HTMLElement>(".app-main-content");
-  if (!main) return;
-
-  main.scrollTop = previousScrollTop;
-  window.requestAnimationFrame?.(() => {
-    if (currentRenderedPageKey() === previousPageKey) {
-      main.scrollTop = previousScrollTop;
-    }
-  });
 }
 
 
@@ -1178,31 +374,6 @@ async function switchProfile(profileId: string, profileName: string): Promise<vo
   }
 }
 
-function nativeConfirm(msg: string, okText = "确定", isDanger = false): Promise<boolean> {
-  return new Promise((resolve) => {
-    const overlay = document.createElement("div");
-    overlay.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);backdrop-filter:blur(4px);z-index:9999;display:flex;align-items:center;justify-content:center;transition:all 0.2s;";
-    const box = document.createElement("div");
-    box.style.cssText = "background:var(--bg-panel);border:1px solid var(--border);padding:28px 32px;border-radius:24px;box-shadow:var(--shadow-lg);max-width:320px;text-align:center;color:var(--text-main);transform:scale(0.95);animation:zoomIn 0.2s forwards;";
-
-    const okColor = isDanger ? "var(--danger)" : "var(--accent)";
-    const okShadow = isDanger ? "rgba(239,68,68,0.2)" : "rgba(99,102,241,0.2)";
-
-    box.innerHTML = `<style>@keyframes zoomIn { to { transform: scale(1); } }</style>
-      <h3 style="margin:0 0 12px;font-size:1.2rem;">提示</h3>
-      <p style="margin:0 0 24px;color:var(--text-muted);font-size:0.95rem;line-height:1.5;">${escapeHtml(msg)}</p>
-      <div style="display:flex;gap:12px;justify-content:center;">
-        <button id="btn-cancel" style="flex:1;padding:10px;border:none;border-radius:12px;background:var(--bg-page);color:var(--text-main);cursor:pointer;font-weight:600;border:1px solid var(--border);">取消</button>
-        <button id="btn-ok" style="flex:1;padding:10px;border:none;border-radius:12px;background:${okColor};color:white;cursor:pointer;font-weight:600;box-shadow:0 4px 12px ${okShadow};">${escapeHtml(okText)}</button>
-      </div>`;
-    overlay.appendChild(box);
-    document.body.appendChild(overlay);
-
-    document.getElementById("btn-cancel")!.onclick = () => { document.body.removeChild(overlay); resolve(false); };
-    document.getElementById("btn-ok")!.onclick = () => { document.body.removeChild(overlay); resolve(true); };
-  });
-}
-
 async function deleteProfile(profileId: string, profileName: string): Promise<void> {
   const confirmed = await nativeConfirm(`确定要销毁「${profileName}」档案吗？此操作无法撤回！`, "彻底销毁", true);
   if (!confirmed) {
@@ -1216,15 +387,7 @@ async function deleteProfile(profileId: string, profileName: string): Promise<vo
       if (!snapshot) {
         throw new Error("当前没有可删除的 profile。");
       }
-      setSnapshot({
-        ...snapshot,
-        profiles: snapshot.profiles.filter((profile) => profile.id !== profileId),
-        activeProfileId: snapshot.activeProfileId === profileId ? null : snapshot.activeProfileId,
-        lastSelectedProfileId:
-          snapshot.lastSelectedProfileId === profileId ? null : snapshot.lastSelectedProfileId,
-        lastSwitchProfileId:
-          snapshot.lastSwitchProfileId === profileId ? null : snapshot.lastSwitchProfileId,
-      });
+      setSnapshot(removeProfileFromSnapshot(snapshot, profileId));
     } else {
       const snapshot = await desktopInvoke<AppSnapshot>("delete_profile", { profileId });
       setSnapshot(snapshot);
@@ -1259,7 +422,7 @@ async function generateSymbioticFromExisting(profileId: string): Promise<void> {
       setFlash("error", "找不到这套 profile。");
       return;
     }
-    document = createMockDocument(profile);
+    document = createMockProfileDocument(profile);
   } else {
     setBusy(true);
     try {
@@ -1274,61 +437,10 @@ async function generateSymbioticFromExisting(profileId: string): Promise<void> {
     }
   }
 
-  let apiKey = "";
-  try {
-    const parsedAuth = JSON.parse(document.authJson);
-    apiKey = parsedAuth.OPENAI_API_KEY || "";
-  } catch (e) {
-    // Ignore JSON parsing errors
-  }
-
-  let baseUrl = "";
-  let model = "";
-  let provider = "";
-
-  const baseUrlMatch = document.configToml.match(/openai_base_url\s*=\s*"([^"]+)"/);
-  if (baseUrlMatch) {
-    baseUrl = baseUrlMatch[1];
-  } else {
-    const fallbackBaseUrlMatch = document.configToml.match(/base_url\s*=\s*"([^"]+)"/);
-    if (fallbackBaseUrlMatch) {
-      baseUrl = fallbackBaseUrlMatch[1];
-    }
-  }
-
-  const modelMatch = document.configToml.match(/model\s*=\s*"([^"]+)"/);
-  if (modelMatch) {
-    model = modelMatch[1];
-  }
-
-  const providerMatch = document.configToml.match(/model_provider\s*=\s*"([^"]+)"/);
-  if (providerMatch) {
-    provider = providerMatch[1];
-  }
-
-  state.editor = {
-    mode: "new",
-    profileId: null,
-    name: `${document.name} (共生)`,
-    notes: document.notes || "",
-    authJson: "",
-    configToml: "",
-    thirdParty: {
-      template: "symbioticThirdParty",
-      oauthProfileId: resolveSymbioticOauthProfileId(),
-      provider: provider || "openai",
-      baseUrl: baseUrl || "",
-      apiKey: apiKey || "",
-      model: model || "gpt-5.5",
-    },
-    createdAt: null,
-    updatedAt: null,
-    loadedFromTarget: false,
-    hasTargetChanges: false,
-    readOnly: false,
-    source: "local",
-    newTab: "manual-delta",
-  };
+  state.editor = createSymbioticEditorFromDocument(
+    document,
+    resolveOfficialOauthProfileId(state.snapshot, state.editor.thirdParty.oauthProfileId),
+  );
 
   state.view = "editor";
   setFlash("info", "已基于第三方 API 配置生成共生配置模板。请选择用于授权的官方账号，并保存。");
@@ -1347,7 +459,7 @@ async function openEditorForProfile(profileId: string): Promise<void> {
   }
 
   if (!isTauriRuntime) {
-    const document = createMockDocument(selectedProfile);
+    const document = createMockProfileDocument(selectedProfile);
     applyEditorDocument(document);
     state.view = "editor";
     render();
@@ -1456,7 +568,7 @@ async function fetchNetworkProfiles(): Promise<void> {
   state.networkLoading = true;
   render();
   try {
-    const res = await fetch(networkProfilesApiUrl(), networkFetchOptions());
+    const res = await fetch(networkProfilesApiUrl(state.networkSharing), networkFetchOptions(state.networkSharing));
     if (res.status === 401) {
       throw networkUnauthorizedError("加载企业共享库");
     }
@@ -1472,7 +584,7 @@ async function fetchNetworkProfiles(): Promise<void> {
 }
 
 async function fetchNetworkCurrentUser(options: { silent?: boolean } = {}): Promise<void> {
-  if (!hasNetworkAccessToken()) {
+  if (!hasNetworkAccessToken(state.networkSharing)) {
     state.networkUser = null;
     state.networkUserLoading = false;
     state.networkAuthRequired = true;
@@ -1483,7 +595,7 @@ async function fetchNetworkCurrentUser(options: { silent?: boolean } = {}): Prom
   state.networkUserLoading = true;
   render();
   try {
-    const res = await fetch(networkMeApiUrl(), networkFetchOptions());
+    const res = await fetch(networkMeApiUrl(state.networkSharing), networkFetchOptions(state.networkSharing));
     if (res.status === 401) {
       state.networkAuthRequired = false;
       if (!options.silent) {
@@ -1527,7 +639,7 @@ function logoutNetworkUser(): void {
 }
 
 async function fetchShareUsers(): Promise<void> {
-  if (!hasNetworkAccessToken()) {
+  if (!hasNetworkAccessToken(state.networkSharing)) {
     state.networkAuthRequired = true;
     state.shareUsers = [];
     render();
@@ -1537,13 +649,14 @@ async function fetchShareUsers(): Promise<void> {
   state.shareUsersLoading = true;
   render();
   try {
-    const res = await fetch(networkUsersApiUrl(), networkFetchOptions());
+    const res = await fetch(networkUsersApiUrl(state.networkSharing), networkFetchOptions(state.networkSharing));
     if (res.status === 401) {
       throw networkUnauthorizedError("加载可分享用户");
     }
     if (!res.ok) throw new Error("加载可分享用户失败");
     const data = (await res.json()) as { users?: ShareUserOption[] };
     state.shareUsers = data.users ?? [];
+    normalizeSelectedShareTargets();
     state.networkAuthRequired = false;
   } catch (error) {
     setFlash("error", error instanceof Error ? error.message : String(error));
@@ -1553,54 +666,19 @@ async function fetchShareUsers(): Promise<void> {
   }
 }
 
-function normalizedId(value: string | null | undefined): string {
-  return String(value ?? "").trim().toLowerCase();
-}
-
-function networkProfileVisibility(profile: NetworkProfile): ShareVisibility {
-  if (profile.visibility === "private" || profile.visibility === "selected" || profile.visibility === "public") {
-    return profile.visibility;
-  }
-  return (profile.sharedWith?.length ?? 0) > 0 ? "selected" : "private";
-}
-
-function networkProfileSharedCount(profile: NetworkProfile): number {
-  return profile.sharedWith?.length ?? 0;
-}
-
-function isOwnNetworkProfile(profile: NetworkProfile): boolean {
-  const currentUserId = normalizedId(state.networkUser?.dingUserId);
-  return Boolean(currentUserId && normalizedId(profile.ownerDingUserId) === currentUserId);
-}
-
-function ownNetworkProfiles(): NetworkProfile[] {
-  return state.networkProfiles.filter(isOwnNetworkProfile);
-}
-
-function sharingScopeLabel(profile: NetworkProfile): string {
-  const visibility = networkProfileVisibility(profile);
-  if (visibility === "public") return "全部员工可见";
-  if (visibility === "private") return "仅自己可见";
-  return `指定 ${networkProfileSharedCount(profile)} 人`;
-}
-
 function beginEditSharedProfile(profileId: string): void {
   const profile = state.networkProfiles.find((item) => item.id === profileId);
   if (!profile) {
     setFlash("error", "找不到要编辑的共享配置。");
     return;
   }
-  if (!isOwnNetworkProfile(profile)) {
+  if (!isOwnNetworkProfile(profile, state.networkUser)) {
     setFlash("error", "只能编辑自己共享的配置。");
     return;
   }
 
-  const visibility = networkProfileVisibility(profile);
-  state.sharedProfileEditDraft = {
-    profileId: profile.id,
-    visibility,
-    selectedUserIds: visibility === "selected" ? [...(profile.sharedWith ?? [])] : [],
-  };
+  state.sharedProfileEditDraft = createSharedProfileEditDraft(profile);
+  normalizeSelectedShareTargets();
   render();
 }
 
@@ -1609,15 +687,49 @@ function cancelEditSharedProfile(): void {
   render();
 }
 
+function sameDingUserId(left: string | null | undefined, right: string | null | undefined): boolean {
+  return Boolean(left && right && left.trim().toLowerCase() === right.trim().toLowerCase());
+}
+
+function selectShareTargetUsers(): ShareUserOption[] {
+  return state.shareUsers.filter((user) => !sameDingUserId(user.dingUserId, state.networkUser?.dingUserId));
+}
+
+function normalizeShareTargets(selectedUserIds: readonly string[]): string[] {
+  const knownUserIds = selectShareTargetUsers().map((user) => user.dingUserId);
+  const knownUserSet = new Set(knownUserIds);
+  const normalizedSelectedIds = selectedUserIds.filter((id) =>
+    !sameDingUserId(id, state.networkUser?.dingUserId) &&
+      (knownUserIds.length === 0 || knownUserSet.has(id)),
+  );
+
+  return Array.from(new Set(normalizedSelectedIds));
+}
+
+function normalizeSelectedShareTargets(): void {
+  if (state.shareDraft.visibility === "selected") {
+    state.shareDraft.selectedUserIds = normalizeShareTargets(state.shareDraft.selectedUserIds);
+  }
+
+  const editDraft = state.sharedProfileEditDraft;
+  if (editDraft?.visibility === "selected") {
+    state.sharedProfileEditDraft = {
+      ...editDraft,
+      selectedUserIds: normalizeShareTargets(editDraft.selectedUserIds),
+    };
+  }
+}
+
 async function saveSharedProfileShareTargets(): Promise<void> {
   const draft = state.sharedProfileEditDraft;
   if (!draft) return;
-  if (!hasNetworkAccessToken()) {
+  const normalizedSelectedUserIds = normalizeShareTargets(draft.selectedUserIds);
+  if (!hasNetworkAccessToken(state.networkSharing)) {
     state.networkAuthRequired = true;
     setFlash("error", "请先使用钉钉 SSO 登录企业共享中心。");
     return;
   }
-  if (draft.visibility === "selected" && draft.selectedUserIds.length === 0) {
+  if (draft.visibility === "selected" && normalizedSelectedUserIds.length === 0) {
     setFlash("error", "请选择至少一位共享对象，或切换为全部员工/仅自己可见。");
     return;
   }
@@ -1627,19 +739,19 @@ async function saveSharedProfileShareTargets(): Promise<void> {
     setFlash("error", "找不到要保存的共享配置。");
     return;
   }
-  if (!isOwnNetworkProfile(profile)) {
+  if (!isOwnNetworkProfile(profile, state.networkUser)) {
     setFlash("error", "只能编辑自己共享的配置。");
     return;
   }
 
   setBusy(true);
   try {
-    const authHeaders = networkAuthHeaders();
+    const authHeaders = networkAuthHeaders(state.networkSharing);
     const headers: HeadersInit = {
       "Content-Type": "application/json",
       ...(authHeaders ?? {}),
     };
-    const response = await fetch(`${networkProfilesApiUrl()}/${profile.id}`, {
+    const response = await fetch(`${networkProfilesApiUrl(state.networkSharing)}/${profile.id}`, {
       method: "POST",
       cache: "no-store",
       headers,
@@ -1647,7 +759,7 @@ async function saveSharedProfileShareTargets(): Promise<void> {
         name: profile.name,
         description: profile.description || "",
         visibility: draft.visibility,
-        sharedWith: draft.visibility === "selected" ? draft.selectedUserIds : [],
+        sharedWith: draft.visibility === "selected" ? normalizedSelectedUserIds : [],
       }),
     });
 
@@ -1670,7 +782,7 @@ async function saveSharedProfileShareTargets(): Promise<void> {
 }
 
 async function deleteSharedProfile(profileId: string): Promise<void> {
-  if (!hasNetworkAccessToken()) {
+  if (!hasNetworkAccessToken(state.networkSharing)) {
     state.networkAuthRequired = true;
     setFlash("error", "请先使用钉钉 SSO 登录企业共享中心。");
     return;
@@ -1681,7 +793,7 @@ async function deleteSharedProfile(profileId: string): Promise<void> {
     setFlash("error", "找不到要删除的共享配置。");
     return;
   }
-  if (!isOwnNetworkProfile(profile)) {
+  if (!isOwnNetworkProfile(profile, state.networkUser)) {
     setFlash("error", "只能删除自己共享的配置。");
     return;
   }
@@ -1691,10 +803,11 @@ async function deleteSharedProfile(profileId: string): Promise<void> {
 
   setBusy(true);
   try {
-    const response = await fetch(`${networkProfilesApiUrl()}/${profile.id}`, {
+    const headers = networkAuthHeaders(state.networkSharing);
+    const response = await fetch(`${networkProfilesApiUrl(state.networkSharing)}/${profile.id}`, {
       method: "DELETE",
       cache: "no-store",
-      ...(networkAuthHeaders() ? { headers: networkAuthHeaders() } : {}),
+      ...(headers ? { headers } : {}),
     });
 
     if (response.status === 401) {
@@ -1719,14 +832,14 @@ async function deleteSharedProfile(profileId: string): Promise<void> {
 
 async function loadSharingCenterData(): Promise<void> {
   saveNetworkSharingSettings(state.networkSharing);
-  if (!hasNetworkAccessToken()) {
+  if (!hasNetworkAccessToken(state.networkSharing)) {
     state.networkAuthRequired = true;
     render();
     return;
   }
 
   await fetchNetworkCurrentUser({ silent: true });
-  if (!hasNetworkAccessToken()) {
+  if (!hasNetworkAccessToken(state.networkSharing)) {
     return;
   }
   await Promise.all([fetchShareUsers(), fetchNetworkProfiles()]);
@@ -1735,7 +848,7 @@ async function loadSharingCenterData(): Promise<void> {
 async function openNetworkSsoLogin(): Promise<void> {
   saveNetworkSharingSettings(state.networkSharing);
   try {
-    const sessionResponse = await fetch(networkDesktopLoginApiUrl(), {
+    const sessionResponse = await fetch(networkDesktopLoginApiUrl(state.networkSharing), {
       method: "POST",
       cache: "no-store",
     });
@@ -1746,7 +859,7 @@ async function openNetworkSsoLogin(): Promise<void> {
       id: string;
       pollToken: string;
     };
-    const loginUrl = new URL(networkSsoLoginUrl());
+    const loginUrl = new URL(networkSsoLoginUrl(state.networkSharing));
     loginUrl.searchParams.set("desktopLoginId", session.id);
 
     if (isTauriRuntime) {
@@ -1765,7 +878,7 @@ async function openNetworkSsoLogin(): Promise<void> {
 }
 
 async function pollNetworkDesktopLogin(sessionId: string, pollToken: string): Promise<void> {
-  const pollUrl = new URL(`${networkDesktopLoginApiUrl()}/${sessionId}`);
+  const pollUrl = new URL(`${networkDesktopLoginApiUrl(state.networkSharing)}/${sessionId}`);
   pollUrl.searchParams.set("pollToken", pollToken);
 
   for (let attempt = 0; attempt < 60; attempt += 1) {
@@ -1794,8 +907,8 @@ async function pollNetworkDesktopLogin(sessionId: string, pollToken: string): Pr
 }
 
 async function fetchNetworkProfileDocument(networkProfileId: string): Promise<ProfileDocument> {
-  const apiUrl = networkProfilesApiUrl();
-  const fetchOptions = networkFetchOptions();
+  const apiUrl = networkProfilesApiUrl(state.networkSharing);
+  const fetchOptions = networkFetchOptions(state.networkSharing);
   const res = await fetch(`${apiUrl}/${networkProfileId}`, fetchOptions);
   if (res.status === 401) {
     throw networkUnauthorizedError("获取网络配置详情");
@@ -1898,20 +1011,11 @@ async function openEditorForNetworkProfile(networkProfileId: string): Promise<vo
   }
 }
 
-function networkDocumentToProfileInput(document: ProfileDocument): ProfileInput {
-  return {
-    name: document.name,
-    notes: document.notes,
-    authJson: document.authJson,
-    configToml: document.configToml,
-  };
-}
-
 async function importNetworkProfileDocument(
   document: ProfileDocument,
   options: { openEditor: boolean },
 ): Promise<void> {
-  const payload = networkDocumentToProfileInput(document);
+  const payload = profileInputFromDocument(document);
 
   if (!isTauriRuntime) {
     state.editor = {
@@ -1997,16 +1101,17 @@ async function importCurrentNetworkProfileFromEditor(): Promise<void> {
 
 async function shareLocalProfileToNetwork(): Promise<void> {
   const profileId = state.shareDraft.profileId;
+  const normalizedSelectedUserIds = normalizeShareTargets(state.shareDraft.selectedUserIds);
   if (!profileId) {
     setFlash("error", "请选择要共享的本地配置。");
     return;
   }
-  if (!hasNetworkAccessToken()) {
+  if (!hasNetworkAccessToken(state.networkSharing)) {
     state.networkAuthRequired = true;
     setFlash("error", "请先使用钉钉 SSO 登录企业共享中心。");
     return;
   }
-  if (state.shareDraft.visibility === "selected" && state.shareDraft.selectedUserIds.length === 0) {
+  if (state.shareDraft.visibility === "selected" && normalizedSelectedUserIds.length === 0) {
     setFlash("error", "请选择至少一位共享对象，或切换为全部员工可见。");
     return;
   }
@@ -2021,20 +1126,20 @@ async function shareLocalProfileToNetwork(): Promise<void> {
   try {
     const document = isTauriRuntime
       ? await desktopInvoke<ProfileDocument>("get_profile_document", { profileId })
-      : createMockDocument(summary);
+      : createMockProfileDocument(summary);
     const formData = new FormData();
     formData.append("name", document.name);
     formData.append("description", document.notes || "");
     formData.append("visibility", state.shareDraft.visibility);
     formData.append(
       "sharedWith",
-      JSON.stringify(state.shareDraft.visibility === "selected" ? state.shareDraft.selectedUserIds : []),
+      JSON.stringify(state.shareDraft.visibility === "selected" ? normalizedSelectedUserIds : []),
     );
     formData.append("file1", new File([document.authJson], "auth.json", { type: "application/json" }));
     formData.append("file2", new File([document.configToml], "config.toml", { type: "text/plain" }));
 
-    const headers = networkAuthHeaders();
-    const response = await fetch(networkProfilesApiUrl(), {
+    const headers = networkAuthHeaders(state.networkSharing);
+    const response = await fetch(networkProfilesApiUrl(state.networkSharing), {
       method: "POST",
       cache: "no-store",
       ...(headers ? { headers } : {}),
@@ -2446,1805 +1551,72 @@ async function writeThirdPartyWebsocketsDefaults(): Promise<void> {
   }
 }
 
-
-function formatDateTime(value: string | null): string {
-  if (!value) {
-    return "还没有";
-  }
-
-  return new Intl.DateTimeFormat("zh-CN", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(new Date(value));
-}
-
-function profileTypeLabel(profile: ProfileSummary | ProfileDocument): string {
-  const provider = profile.modelProviderKey?.trim() || profile.modelProviderName?.trim();
-  if (profile.authTypeLabel === "共生配置" && provider) {
-    return `共生配置 · ${provider}`;
-  }
-  if (profile.authTypeLabel === "第三方 API" && provider) {
-    return provider;
-  }
-  return profile.authTypeLabel;
-}
-
-function isOfficialOauthProfile(profile: ProfileSummary | ProfileDocument): boolean {
-  return profile.authTypeLabel === "官方 OAuth";
-}
-
-function isThirdPartyBackedProfile(profile: ProfileSummary | ProfileDocument): boolean {
-  return profile.authTypeLabel === "第三方 API" || profile.authTypeLabel === "共生配置";
-}
-
-function selectUsageWindow(
-  usage: CodexUsageSnapshot | null,
-  minutes: number,
-  fallbackPrimary: boolean,
-): CodexUsageWindow | null {
-  if (!usage) {
-    return null;
-  }
-  if (usage.primary?.windowMinutes === minutes) {
-    return usage.primary;
-  }
-  if (usage.secondary?.windowMinutes === minutes) {
-    return usage.secondary;
-  }
-  return fallbackPrimary ? usage.primary : usage.secondary;
-}
-
-function remainingPercent(usedPercent: number): number {
-  return Math.max(0, Math.min(100, Math.floor(100 - usedPercent)));
-}
-
-function formatPlanTitle(planType: string | null): string {
-  if (!planType) {
-    return "Codex Plan";
-  }
-
-  const normalized = planType.charAt(0).toUpperCase() + planType.slice(1).toLowerCase();
-  return `Codex ${normalized} Plan`;
-}
-
-function formatUsageReset(window: CodexUsageWindow | null): string {
-  if (!window?.resetsAt) {
-    return "--";
-  }
-
-  const resetAt = new Date(window.resetsAt);
-  const time = new Intl.DateTimeFormat("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(resetAt);
-  const date = new Intl.DateTimeFormat("en", {
-    day: "numeric",
-    month: "short",
-  }).format(resetAt);
-  return `${time} on ${date}`;
-}
-
-function formatLatencyDuration(ms: number | null): string {
-  if (ms == null) {
-    return "--";
-  }
-  return `${(Math.max(0, ms) / 1000).toFixed(2)}s`;
-}
-
-function renderUsageProgressRow(label: string, window: CodexUsageWindow | null): string {
-  const remaining = window ? remainingPercent(window.usedPercent) : 0;
-
-  return `
-    <div class="usage-progress-row">
-      <div class="usage-progress-head">
-        <span class="usage-progress-label">${escapeHtml(label)}</span>
-        <span class="usage-progress-reset">${escapeHtml(formatUsageReset(window))}</span>
-      </div>
-      <div class="usage-progress-line">
-        <div class="usage-progress-track">
-          <div class="usage-progress-fill" style="width:${remaining}%"></div>
-        </div>
-        <span class="usage-progress-value">${window ? `${remaining}%` : "--"}</span>
-      </div>
-    </div>
-  `;
-}
-
-function renderCodexUsagePanel(snapshot: AppSnapshot, profile: ProfileSummary): string {
-  if (!isOfficialOauthProfile(profile)) {
-    return "";
-  }
-
-  const usage = profile.codexUsage;
-  const primaryWindow = selectUsageWindow(usage, 300, true);
-  const weeklyWindow = selectUsageWindow(usage, 10080, false);
-  const usageError = usage?.error ?? null;
-  const updated = usage ? formatDateTime(usage.updatedAt) : "还没有";
-  const refreshingUsage = isPendingAction(usageRefreshActionKey(profile.id));
-  const refreshingAllUsage = isPendingAction(refreshAllUsageActionKey);
-  const usageButtonLabel = refreshingUsage ? "刷新中..." : "刷新额度";
-  const usageUpdatedCopy = refreshingUsage
-    ? "正在刷新额度…"
-    : refreshingAllUsage
-      ? "批量刷新中…"
-      : `更新于：${updated}`;
-
-  return `
-    <section class="usage-panel">
-      <div class="usage-panel-head">
-        <div class="usage-panel-copy">
-          <strong>${escapeHtml(formatPlanTitle(usage?.planType ?? null))}</strong>
-          <span class="usage-panel-updated">${escapeHtml(usageUpdatedCopy)}</span>
-        </div>
-        ${
-          snapshot.codexUsageApiEnabled
-            ? `
-              <button
-                class="button button-ghost usage-refresh-button"
-                data-action="refresh-codex-usage"
-                data-id="${profile.id}"
-                data-name="${escapeHtml(profile.name)}"
-                ${state.busy || refreshingUsage || refreshingAllUsage ? "disabled" : ""}
-              >
-                ${escapeHtml(usageButtonLabel)}
-              </button>
-            `
-            : `
-              <button
-                class="button button-ghost usage-refresh-button"
-                data-action="enable-codex-usage"
-                ${state.busy || refreshingAllUsage ? "disabled" : ""}
-              >
-                启用额度查询
-              </button>
-            `
-        }
-      </div>
-      ${
-        usageError
-          ? `<p class="latency-panel-error">额度刷新失败：${escapeHtml(usageError)}</p>`
-          : `
-            <div class="usage-progress-list">
-              ${renderUsageProgressRow("5H", primaryWindow)}
-              ${renderUsageProgressRow("WEEKLY", weeklyWindow)}
-            </div>
-          `
-      }
-    </section>
-  `;
-}
-
-function renderThirdPartyLatencyPanel(profile: ProfileSummary): string {
-  if (!isThirdPartyBackedProfile(profile)) {
-    return "";
-  }
-
-  const probe = profile.thirdPartyLatency;
-  const updated = probe ? formatDateTime(probe.updatedAt) : "还没有";
-  const refreshingLatency = isPendingAction(latencyProbeActionKey(profile.id));
-  const actionLabel = refreshingLatency ? "测速中..." : probe ? "重新测速" : "开始测速";
-  const probeMeta = [probe?.wireApi, probe?.model].filter(Boolean).join(" · ");
-  const probeUpdatedCopy = refreshingLatency ? "正在执行测速…" : `更新于：${updated}`;
-
-  return `
-    <section class="latency-panel" data-role="third-party-latency-panel">
-      <div class="latency-panel-head">
-        <div class="latency-panel-copy">
-          <strong>第三方 API 测速</strong>
-          <span class="latency-panel-updated">${escapeHtml(probeUpdatedCopy)}</span>
-        </div>
-        <button
-          class="button button-ghost latency-refresh-button"
-          data-action="refresh-third-party-latency"
-          data-id="${profile.id}"
-          data-name="${escapeHtml(profile.name)}"
-          ${state.busy || refreshingLatency ? "disabled" : ""}
-        >
-          ${escapeHtml(actionLabel)}
-        </button>
-      </div>
-      ${
-        probe?.error
-          ? `<p class="latency-panel-error">测速失败：${escapeHtml(probe.error)}</p>`
-          : `
-            <div class="latency-panel-stats">
-              <div class="latency-stat">
-                <span class="latency-stat-label">首 Token</span>
-                <strong>${escapeHtml(formatLatencyDuration(probe?.ttftMs ?? null))}</strong>
-              </div>
-              <div class="latency-stat">
-                <span class="latency-stat-label">总耗时</span>
-                <strong>${escapeHtml(formatLatencyDuration(probe?.totalMs ?? null))}</strong>
-              </div>
-            </div>
-          `
-      }
-      <div class="latency-panel-meta">
-        ${
-          probeMeta
-            ? `<span>${escapeHtml(probeMeta)}</span>`
-            : `<span>点击按钮后会发送一次极小的流式请求用于测速</span>`
-        }
-        ${
-          probe?.statusCode != null
-            ? `<span>HTTP ${escapeHtml(String(probe.statusCode))}</span>`
-            : ""
-        }
-      </div>
-    </section>
-  `;
-}
-
-function formatThirdPartyUsageAmount(usage: ThirdPartyUsageSnapshot | null | undefined): string {
-  if (!usage?.remaining) {
-    return "--";
-  }
-  return [usage.remaining, usage.unit].filter(Boolean).join(" ");
-}
-
-function parseQuotaNumber(value: string | null | undefined): number | null {
-  if (value == null) {
-    return null;
-  }
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function formatQuotaCurrency(value: string | null | undefined): string {
-  const parsed = parseQuotaNumber(value);
-  return parsed == null ? "--" : `$${parsed.toFixed(2)}`;
-}
-
-function clampQuotaPercent(value: number | null | undefined): number | null {
-  if (value == null || !Number.isFinite(value)) {
-    return null;
-  }
-  return Math.max(0, Math.min(100, value));
-}
-
-function quotaPercent(quota: ThirdPartyUsageQuotaSnapshot | null | undefined): number | null {
-  const explicit = clampQuotaPercent(quota?.usedPercent);
-  if (explicit != null) {
-    return explicit;
-  }
-  const used = parseQuotaNumber(quota?.used);
-  const total = parseQuotaNumber(quota?.total);
-  if (used == null || total == null || total <= 0) {
-    return null;
-  }
-  return clampQuotaPercent((used / total) * 100);
-}
-
-function formatQuotaPercent(quota: ThirdPartyUsageQuotaSnapshot | null | undefined): string {
-  const percent = quotaPercent(quota);
-  return percent == null ? "--" : `${Math.round(percent)}%`;
-}
-
-function formatProfileSummary(profile: ProfileSummary): string {
-  if (isOfficialOauthProfile(profile)) {
-    const usage = profile.codexUsage;
-    if (usage?.error) {
-      return "额度失败";
-    }
-
-    const primaryWindow = selectUsageWindow(usage, 300, true);
-    const weeklyWindow = selectUsageWindow(usage, 10080, false);
-    return `5H ${primaryWindow ? `${remainingPercent(primaryWindow.usedPercent)}%` : "--"} · WEEKLY ${weeklyWindow ? `${remainingPercent(weeklyWindow.usedPercent)}%` : "--"}`;
-  }
-
-  if (isThirdPartyBackedProfile(profile)) {
-    const usage = profile.thirdPartyUsage;
-    const probe = profile.thirdPartyLatency;
-    return [
-      `今日 ${formatQuotaCurrency(usage?.daily?.used)} / ${formatQuotaCurrency(usage?.daily?.total)}`,
-      `本周 ${formatQuotaCurrency(usage?.weekly?.used)} / ${formatQuotaCurrency(usage?.weekly?.total)}`,
-      `TTFT ${formatLatencyDuration(probe?.ttftMs ?? null)}`,
-    ].join(" · ");
-  }
-
-  return "暂无摘要";
-}
-
-function renderThirdPartyQuotaCard(label: string, quota: ThirdPartyUsageQuotaSnapshot | null | undefined): string {
-  const percent = quotaPercent(quota) ?? 0;
-  return `
-    <div class="third-party-quota-card">
-      <div class="third-party-quota-head">
-        <strong>${escapeHtml(label)}</strong>
-        <span>${escapeHtml(formatQuotaPercent(quota))}</span>
-      </div>
-      <div class="third-party-quota-amount">
-        ${escapeHtml(formatQuotaCurrency(quota?.used))} / ${escapeHtml(formatQuotaCurrency(quota?.total))}
-      </div>
-      <div class="usage-progress-track">
-        <div class="usage-progress-fill" style="width:${percent}%"></div>
-      </div>
-    </div>
-  `;
-}
-
-function renderThirdPartyUsagePanel(profile: ProfileSummary): string {
-  if (!isThirdPartyBackedProfile(profile)) {
-    return "";
-  }
-
-  const usage = profile.thirdPartyUsage ?? null;
-  const updated = usage ? formatDateTime(usage.updatedAt) : "还没有";
-  const refreshingUsage = isPendingAction(thirdPartyUsageActionKey(profile.id));
-  const refreshingAllCodexUsage = isPendingAction(refreshAllUsageActionKey);
-  const actionLabel = refreshingUsage
-    ? "刷新中..."
-    : refreshingAllCodexUsage
-    ? "等待中..."
-    : usage
-    ? "重新刷新"
-    : "刷新用量";
-  const provider = usage?.provider ?? "ylscode";
-  const usageUpdatedCopy = refreshingUsage ? "正在刷新用量…" : `更新于：${updated}`;
-
-  return `
-    <section class="latency-panel" data-role="third-party-usage-panel">
-      <div class="latency-panel-head">
-        <div class="latency-panel-copy">
-          <strong>第三方 API 用量</strong>
-          <span class="latency-panel-updated">${escapeHtml(usageUpdatedCopy)}</span>
-        </div>
-        <button
-          class="button button-ghost latency-refresh-button"
-          data-action="refresh-third-party-usage"
-          data-id="${profile.id}"
-          data-name="${escapeHtml(profile.name)}"
-          ${state.busy || refreshingUsage || refreshingAllCodexUsage ? "disabled" : ""}
-        >
-          ${escapeHtml(actionLabel)}
-        </button>
-      </div>
-      ${
-        usage?.error
-          ? `<p class="latency-panel-error">用量刷新失败：${escapeHtml(usage.error)}</p>`
-          : `
-            <div class="third-party-quota-grid">
-              ${renderThirdPartyQuotaCard("今日配额", usage?.daily ?? null)}
-              ${renderThirdPartyQuotaCard("本周配额", usage?.weekly ?? null)}
-            </div>
-          `
-      }
-      <div class="latency-panel-meta">
-        <span>${escapeHtml(provider)}</span>
-      </div>
-    </section>
-  `;
-}
-
-function renderThirdPartyRuntimePanel(profile: ProfileSummary): string {
-  if (!isThirdPartyBackedProfile(profile)) {
-    return "";
-  }
-
-  const usage = profile.thirdPartyUsage ?? null;
-  const probe = profile.thirdPartyLatency;
-  const refreshingUsage = isPendingAction(thirdPartyUsageActionKey(profile.id));
-  const refreshingLatency = isPendingAction(latencyProbeActionKey(profile.id));
-  const refreshingAllCodexUsage = isPendingAction(refreshAllUsageActionKey);
-  const provider = usage?.provider ?? "ylscode";
-
-  return `
-    <section class="runtime-panel" data-role="third-party-runtime-panel">
-      <div class="runtime-panel-head">
-        <div class="runtime-provider">${escapeHtml(provider)}</div>
-        <div class="runtime-actions">
-          <button
-            class="button button-ghost runtime-action-button"
-            data-action="refresh-third-party-usage"
-            data-id="${profile.id}"
-            data-name="${escapeHtml(profile.name)}"
-            ${state.busy || refreshingUsage || refreshingAllCodexUsage ? "disabled" : ""}
-          >
-            ${refreshingUsage ? "用量中..." : refreshingAllCodexUsage ? "等待中..." : "刷新用量"}
-          </button>
-          <button
-            class="button button-ghost runtime-action-button"
-            data-action="refresh-third-party-latency"
-            data-id="${profile.id}"
-            data-name="${escapeHtml(profile.name)}"
-            ${state.busy || refreshingLatency ? "disabled" : ""}
-          >
-            ${refreshingLatency ? "测速中..." : "测速"}
-          </button>
-        </div>
-      </div>
-      ${
-        usage?.error || probe?.error
-          ? `
-            <div class="runtime-errors">
-              ${usage?.error ? `<p>用量：${escapeHtml(usage.error)}</p>` : ""}
-              ${probe?.error ? `<p>测速：${escapeHtml(probe.error)}</p>` : ""}
-            </div>
-          `
-          : ""
-      }
-      <div class="runtime-metrics">
-        <div class="runtime-metric runtime-metric-wide">
-          <div class="runtime-metric-head">
-            <span>今日</span>
-            <em>${escapeHtml(formatQuotaPercent(usage?.daily))}</em>
-          </div>
-          <strong>${escapeHtml(formatQuotaCurrency(usage?.daily?.used))} / ${escapeHtml(formatQuotaCurrency(usage?.daily?.total))}</strong>
-          <div class="usage-progress-track">
-            <div class="usage-progress-fill" style="width:${quotaPercent(usage?.daily) ?? 0}%"></div>
-          </div>
-        </div>
-        <div class="runtime-metric runtime-metric-wide">
-          <div class="runtime-metric-head">
-            <span>本周</span>
-            <em>${escapeHtml(formatQuotaPercent(usage?.weekly))}</em>
-          </div>
-          <strong>${escapeHtml(formatQuotaCurrency(usage?.weekly?.used))} / ${escapeHtml(formatQuotaCurrency(usage?.weekly?.total))}</strong>
-          <div class="usage-progress-track">
-            <div class="usage-progress-fill" style="width:${quotaPercent(usage?.weekly) ?? 0}%"></div>
-          </div>
-        </div>
-        <div class="runtime-metric">
-          <span>首 Token</span>
-          <strong>${escapeHtml(formatLatencyDuration(probe?.ttftMs ?? null))}</strong>
-        </div>
-        <div class="runtime-metric">
-          <span>总耗时</span>
-          <strong>${escapeHtml(formatLatencyDuration(probe?.totalMs ?? null))}</strong>
-        </div>
-      </div>
-    </section>
-  `;
-}
-
-function totalSafeRepairCandidates(report: SessionRecoveryReport): number {
-  return (
-    report.repairCandidates.missingRolloutFiles +
-    report.repairCandidates.hasUserEventFalseButRolloutHasUserMessage +
-    report.repairCandidates.dbThreadIdsMissingFromSessionIndex +
-    report.repairCandidates.sessionIndexIdsMissingFromDb
-  );
-}
-
-function totalTimeRepairCandidates(report: SessionRecoveryReport): number {
-  return (
-    report.repairCandidates.dbTimeMismatchWithSessionIndex +
-    report.repairCandidates.rolloutMtimeMismatchWithSessionIndex
-  );
-}
-
-function formatSessionRecoveryFlash(report: SessionRecoveryReport): string {
-  const safeCandidates = totalSafeRepairCandidates(report);
-  const timeCandidates = totalTimeRepairCandidates(report);
-  const providerMismatch =
-    report.repairCandidates.appDefaultModelProviderMismatch ?? 0;
-  const outsideRecent =
-    report.samples.savedRootsWithChatsOutsideRecentWindow.length;
-
-  if (safeCandidates === 0 && timeCandidates === 0 && providerMismatch === 0) {
-    if (outsideRecent > 0) {
-      return `诊断完成：未发现真实索引损坏，但有 ${outsideRecent} 个旧项目落在 recent 窗口之外。`;
-    }
-    return "诊断完成：未发现需要修复的会话索引问题。";
-  }
-
-  if (providerMismatch > 0) {
-    return `诊断发现 ${providerMismatch} 条活跃会话的 model provider 与当前默认 provider 不一致。切换 profile 时会执行安全会话修复并同步 provider。`;
-  }
-
-  return `诊断完成：安全修复候选 ${safeCandidates} 项，时间修复候选 ${timeCandidates} 项。`;
-}
-
-function formatSessionRepairFlash(result: SessionRepairResult, advanced: boolean): string {
-  if (!result.repaired) {
-    return result.note;
-  }
-
-  const updates = result.updates;
-  const repairedSummary = [
-    updates.hasUserEvent > 0 ? `has_user_event ${updates.hasUserEvent} 项` : null,
-    updates.dbTime > 0 ? `数据库时间 ${updates.dbTime} 项` : null,
-    updates.rolloutMtime > 0 ? `rollout mtime ${updates.rolloutMtime} 项` : null,
-  ]
-    .filter(Boolean)
-    .join("，");
-
-  return advanced
-    ? `高级修复已完成：${repairedSummary || "没有需要回写的时间戳"}。`
-    : `安全修复已完成：${repairedSummary || "没有需要落盘的修复项"}。`;
-}
-
-
-function renderProfileLayoutToggle(): string {
-  return `
-    <div class="profile-layout-toggle" role="group" aria-label="Profile layout">
-      <button
-        class="profile-layout-button ${state.profileLayout === "list" ? "active" : ""}"
-        data-action="profile-layout-list"
-        ${state.busy ? "disabled" : ""}
-      >
-        列表
-      </button>
-      <button
-        class="profile-layout-button ${state.profileLayout === "grid" ? "active" : ""}"
-        data-action="profile-layout-grid"
-        ${state.busy ? "disabled" : ""}
-      >
-        卡片
-      </button>
-    </div>
-  `;
-}
-
-function formatQuotaCurrencyCompact(value: string | null | undefined): string {
-  const parsed = parseQuotaNumber(value);
-  if (parsed == null) {
-    return "--";
-  }
-  return `$${parsed.toFixed(2).replace(/\.00$/, "")}`;
-}
-
-function renderProfileRowMetrics(profile: ProfileSummary): string {
-  if (isOfficialOauthProfile(profile)) {
-    const usage = profile.codexUsage;
-    if (usage?.error) {
-      return `
-        <span class="profile-row-metric profile-row-metric-error" data-role="profile-row-metric">
-          <span>额度</span>
-          <strong>失败</strong>
-        </span>
-        <span class="profile-row-metric profile-row-metric-muted" data-role="profile-row-metric">
-          <span>5H</span>
-          <strong>--</strong>
-        </span>
-        <span class="profile-row-metric profile-row-metric-muted" data-role="profile-row-metric">
-          <span>本周</span>
-          <strong>--</strong>
-        </span>
-      `;
-    }
-
-    const primaryWindow = selectUsageWindow(usage, 300, true);
-    const weeklyWindow = selectUsageWindow(usage, 10080, false);
-    return `
-      <span class="profile-row-metric" data-role="profile-row-metric">
-        <span>5H</span>
-        <strong>${primaryWindow ? `${remainingPercent(primaryWindow.usedPercent)}%` : "--"}</strong>
-      </span>
-      <span class="profile-row-metric" data-role="profile-row-metric">
-        <span>本周</span>
-        <strong>${weeklyWindow ? `${remainingPercent(weeklyWindow.usedPercent)}%` : "--"}</strong>
-      </span>
-      <span class="profile-row-metric profile-row-metric-muted" data-role="profile-row-metric">
-        <span>首响</span>
-        <strong>--</strong>
-      </span>
-    `;
-  }
-
-  if (isThirdPartyBackedProfile(profile)) {
-    const usage = profile.thirdPartyUsage;
-    const probe = profile.thirdPartyLatency;
-    return `
-      <span class="profile-row-metric" data-role="profile-row-metric">
-        <span>今日</span>
-        <strong>${escapeHtml(formatQuotaCurrencyCompact(usage?.daily?.used))} / ${escapeHtml(formatQuotaCurrencyCompact(usage?.daily?.total))}</strong>
-      </span>
-      <span class="profile-row-metric" data-role="profile-row-metric">
-        <span>本周</span>
-        <strong>${escapeHtml(formatQuotaCurrencyCompact(usage?.weekly?.used))} / ${escapeHtml(formatQuotaCurrencyCompact(usage?.weekly?.total))}</strong>
-      </span>
-      <span class="profile-row-metric" data-role="profile-row-metric">
-        <span>首响</span>
-        <strong>${escapeHtml(formatLatencyDuration(probe?.ttftMs ?? null))}</strong>
-      </span>
-    `;
-  }
-
-  return `
-    <span class="profile-row-metric" data-role="profile-row-metric">
-      <span>状态</span>
-      <strong>--</strong>
-    </span>
-  `;
-}
-
-function renderProfileList(snapshot: AppSnapshot, profiles: ProfileSummary[]): string {
-  return `
-    <div class="profile-list" data-role="profile-list">
-      ${profiles
-        .map((profile) => {
-          const live = snapshot.activeProfileId === profile.id;
-          const refreshingCodexUsage = isPendingAction(usageRefreshActionKey(profile.id));
-          const refreshingAllCodexUsage = isPendingAction(refreshAllUsageActionKey);
-          const refreshingThirdPartyUsage = isPendingAction(thirdPartyUsageActionKey(profile.id));
-          const refreshingLatency = isPendingAction(latencyProbeActionKey(profile.id));
-          return `
-            <article class="profile-row ${live ? "profile-row-live" : ""}" data-role="profile-row" data-state="${live ? "live" : "idle"}">
-              <div class="profile-row-main">
-                <span class="profile-row-copy">
-                  <span class="profile-row-title">
-                    <strong>${escapeHtml(profile.name)}</strong>
-                    <span class="pill pill-type">${escapeHtml(profileTypeLabel(profile))}</span>
-                  </span>
-                  <span>${escapeHtml(profile.notes || "暂无备注")}</span>
-                </span>
-              </div>
-              <div class="profile-row-metrics">
-                ${renderProfileRowMetrics(profile)}
-              </div>
-              <div class="profile-row-actions" data-role="profile-row-actions">
-                <span class="profile-row-action-slot" data-role="profile-row-primary-action">
-                ${
-                  live
-                    ? `<span class="profile-row-status profile-row-status-live">生效中</span>`
-                    : `<button class="button button-secondary profile-row-switch" data-action="switch" data-id="${profile.id}" data-name="${escapeHtml(profile.name)}" ${state.busy ? "disabled" : ""}>应用</button>`
-                }
-                </span>
-                <span class="profile-row-action-slot" data-role="profile-row-quota-action">
-                ${
-                  isOfficialOauthProfile(profile)
-                    ? snapshot.codexUsageApiEnabled
-                      ? `
-                        <button
-                          class="button button-ghost profile-row-utility"
-                          data-action="refresh-codex-usage"
-                          data-id="${profile.id}"
-                          data-name="${escapeHtml(profile.name)}"
-                          ${state.busy || refreshingCodexUsage || refreshingAllCodexUsage ? "disabled" : ""}
-                        >
-                          ${refreshingCodexUsage ? "刷新中..." : "额度"}
-                        </button>
-                      `
-                      : `
-                        <button
-                          class="button button-ghost profile-row-utility"
-                          data-action="enable-codex-usage"
-                          ${state.busy || refreshingAllCodexUsage ? "disabled" : ""}
-                        >
-                          启用额度
-                        </button>
-                      `
-                    : `
-                      <button
-                        class="button button-ghost profile-row-utility"
-                        data-action="refresh-third-party-usage"
-                        data-id="${profile.id}"
-                        data-name="${escapeHtml(profile.name)}"
-                        ${state.busy || refreshingThirdPartyUsage || refreshingAllCodexUsage ? "disabled" : ""}
-                      >
-                        ${refreshingThirdPartyUsage ? "刷新中..." : refreshingAllCodexUsage ? "等待中..." : "额度"}
-                      </button>
-                    `
-                }
-                </span>
-                <span class="profile-row-action-slot" data-role="profile-row-latency-action">
-                ${
-                  isThirdPartyBackedProfile(profile)
-                    ? `
-                      <button
-                        class="button button-ghost profile-row-utility"
-                        data-action="refresh-third-party-latency"
-                        data-id="${profile.id}"
-                        data-name="${escapeHtml(profile.name)}"
-                        ${state.busy || refreshingLatency ? "disabled" : ""}
-                      >
-                        ${refreshingLatency ? "测速中..." : "测速"}
-                      </button>
-                    `
-                    : `<span class="profile-row-action-placeholder">--</span>`
-                }
-                </span>
-                <span class="profile-row-action-slot" data-role="profile-row-detail-action" style="display: flex; gap: 4px; align-items: center;">
-                ${profile.authTypeLabel === "第三方 API"
-                  ? `<button class="button button-ghost" data-action="generate-symbiotic" data-id="${profile.id}" title="以此配置生成共生配置" ${state.busy ? "disabled" : ""}>生成共生</button>`
-                  : ""
-                }
-                <button class="button button-ghost profile-row-detail" title="查看和编辑完整信息" data-action="view-profile-details" data-id="${profile.id}" ${state.busy ? "disabled" : ""}>详情</button>
-                </span>
-              </div>
-            </article>
-          `;
-        })
-        .join("")}
-    </div>
-  `;
-}
-
-function renderProfileGrid(snapshot: AppSnapshot, profiles: ProfileSummary[]): string {
-  return `
-    <div class="card-grid" data-role="profile-grid">
-      ${profiles.length === 0 ? `
-        <div class="empty-state">
-          <h3>暂无存档记录</h3>
-          <p>点击右上角 "+ 新建配置" 按钮录入您的第一套 Profile 集合吧！</p>
-        </div>
-      ` : ""}
-      ${profiles
-        .map(
-          (profile) => `
-            <article
-              class="card profile-card ${snapshot.activeProfileId === profile.id ? "profile-card-live" : ""}"
-              data-role="profile-card"
-              data-state="${snapshot.activeProfileId === profile.id ? "live" : "idle"}"
-            >
-              <div class="card-head">
-                <h2 title="${escapeHtml(profile.name)}">${escapeHtml(profile.name)}</h2>
-                <div style="display: flex; gap: 8px; align-items: center; flex-shrink: 0;">
-                  ${snapshot.activeProfileId === profile.id ? `
-                    <div class="status-badge">
-                      <div class="status-dot status-dot-pulse"></div>
-                      <span>Active</span>
-                    </div>
-                  ` : ""}
-                  <span class="pill pill-type">${escapeHtml(profileTypeLabel(profile))}</span>
-                </div>
-              </div>
-              <p class="card-note" style="${!profile.notes ? 'opacity:0.5;font-style:italic;' : ''}">${escapeHtml(profile.notes || "暂无备注")}</p>
-              ${renderCodexUsagePanel(snapshot, profile)}
-              ${renderThirdPartyRuntimePanel(profile)}
-
-              <div class="card-actions-overlay">
-                <div style="display: flex; flex-direction: column; gap: 4px; flex-grow: 1;">
-                  <p class="card-date">更新于：${formatDateTime(profile.updatedAt)}</p>
-                  ${snapshot.activeProfileId === profile.id
-                    ? `<div class="env-active-label"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg> 环境生效中</div>`
-                    : `<button class="button button-secondary" style="width:100%" data-action="switch" data-id="${profile.id}" data-name="${escapeHtml(profile.name)}" ${state.busy ? "disabled" : ""}>应用此配置</button>`}
-                </div>
-
-                <div class="card-secondary-actions" style="align-self: flex-end; padding-bottom: 2px; display: flex; gap: 4px;">
-                  ${profile.authTypeLabel === "第三方 API"
-                    ? `<button class="button button-ghost" data-action="generate-symbiotic" data-id="${profile.id}" title="以此配置生成共生配置" ${state.busy ? "disabled" : ""}>生成共生</button>`
-                    : ""}
-                  <button class="button button-ghost profile-row-detail" title="查看和编辑完整信息" data-action="view-profile-details" data-id="${profile.id}" ${state.busy ? "disabled" : ""}>详情</button>
-                </div>
-              </div>
-            </article>
-          `,
-        )
-        .join("")}
-    </div>
-  `;
-}
-
-function getEditorProfileSummary(snapshot: AppSnapshot | null): ProfileSummary | null {
-  if (!snapshot || !state.editor.profileId) {
-    return null;
-  }
-  return snapshot.profiles.find((profile) => profile.id === state.editor.profileId) ?? null;
-}
-
-function renderEditorRuntimePanel(snapshot: AppSnapshot, profile: ProfileSummary | null): string {
-  if (!profile || state.editor.source !== "local") {
-    return "";
-  }
-
-  const live = snapshot.activeProfileId === profile.id;
-  return `
-    <section class="editor-runtime" data-role="editor-runtime-panel">
-      <div class="editor-runtime-head">
-        <div>
-          <span class="pill pill-type">${escapeHtml(profileTypeLabel(profile))}</span>
-          ${live ? `<span class="profile-row-status profile-row-status-live">生效中</span>` : ""}
-        </div>
-        ${
-          live
-            ? ""
-            : `<button class="button button-secondary" data-action="switch" data-id="${profile.id}" data-name="${escapeHtml(profile.name)}" ${state.busy ? "disabled" : ""}>应用此配置</button>`
-        }
-      </div>
-      ${renderCodexUsagePanel(snapshot, profile)}
-      ${renderThirdPartyUsagePanel(profile)}
-      ${renderThirdPartyLatencyPanel(profile)}
-    </section>
-  `;
-}
-
-function renderThirdPartyConfigFields(readOnly: boolean): string {
-  const disabled = state.busy || readOnly ? "disabled" : "";
-  const officialProfiles = getOfficialOauthProfiles(state.snapshot);
-  const selectedOauthProfileId = resolveSymbioticOauthProfileId();
-  const isSymbiotic = state.editor.thirdParty.template === "symbioticThirdParty";
-  const missingOauth = isSymbiotic && officialProfiles.length === 0;
-  const tokenPlaceholder = isSymbiotic ? "第三方 API token" : "sk-...";
-
-  // Build the option panels layout depending on selection
-  let gridContentHtml = "";
-  if (isSymbiotic) {
-    gridContentHtml = `
-      <label class="field full-width">
-        <span>复用官方 OAuth 账号</span>
-        <select id="symbiotic-oauth-profile" ${disabled || missingOauth ? "disabled" : ""}>
-          ${officialProfiles
-            .map(
-              (profile) => `
-                <option value="${escapeHtml(profile.id)}" ${profile.id === selectedOauthProfileId ? "selected" : ""}>
-                  ${escapeHtml(profile.name)}
-                </option>
-              `,
-            )
-            .join("")}
-        </select>
-        <span class="field-hint">共生模式必须借用一个官方已登录账号的鉴权状态。</span>
-      </label>
-
-      <label class="field">
-        <span>提供商代码 <code class="raw-key">model_provider</code></span>
-        <input
-          id="third-party-provider"
-          type="text"
-          value="${escapeHtml(state.editor.thirdParty.provider)}"
-          placeholder="ylscode"
-          ${disabled}
-        />
-        <span class="field-hint">提供商简码，建议小写拼音或英文。</span>
-      </label>
-
-      <label class="field">
-        <span>默认模型 <code class="raw-key">model</code></span>
-        <input
-          id="third-party-model"
-          type="text"
-          value="${escapeHtml(state.editor.thirdParty.model)}"
-          placeholder="gpt-5.4"
-          ${disabled}
-        />
-        <span class="field-hint">默认请求的模型名称，例如 deepseek-chat。</span>
-      </label>
-
-      <label class="field full-width">
-        <span>接口地址 <code class="raw-key">base_url</code></span>
-        <input
-          id="third-party-base-url"
-          type="url"
-          value="${escapeHtml(state.editor.thirdParty.baseUrl)}"
-          placeholder="https://example.com/v1"
-          ${disabled}
-        />
-        <span class="field-hint">第三方服务商的 API 基础端点地址。</span>
-      </label>
-
-      <label class="field full-width">
-        <span>API 密钥 <code class="raw-key">experimental_bearer_token</code></span>
-        <input
-          id="third-party-api-key"
-          type="password"
-          value="${escapeHtml(state.editor.thirdParty.apiKey)}"
-          placeholder="${escapeHtml(tokenPlaceholder)}"
-          autocomplete="off"
-          ${disabled}
-        />
-        <span class="field-hint">用于共生接口请求的 Bearer Token / 密钥。</span>
-      </label>
-    `;
-  } else {
-    gridContentHtml = `
-      <label class="field full-width">
-        <span>接口地址 <code class="raw-key">openai_base_url</code></span>
-        <input
-          id="third-party-base-url"
-          type="url"
-          value="${escapeHtml(state.editor.thirdParty.baseUrl)}"
-          placeholder="https://example.com/v1"
-          ${disabled}
-        />
-        <span class="field-hint">第三方 API 的基础路径，兼容 OpenAI 格式。</span>
-      </label>
-
-      <label class="field">
-        <span>API 密钥 <code class="raw-key">OPENAI_API_KEY</code></span>
-        <input
-          id="third-party-api-key"
-          type="password"
-          value="${escapeHtml(state.editor.thirdParty.apiKey)}"
-          placeholder="${escapeHtml(tokenPlaceholder)}"
-          autocomplete="off"
-          ${disabled}
-        />
-        <span class="field-hint">您的 API 密钥，仅保存在本地。</span>
-      </label>
-
-      <label class="field">
-        <span>默认模型 <code class="raw-key">model</code></span>
-        <input
-          id="third-party-model"
-          type="text"
-          value="${escapeHtml(state.editor.thirdParty.model)}"
-          placeholder="gpt-5.5"
-          ${disabled}
-        />
-        <span class="field-hint">默认请求的模型名称，例如 deepseek-chat。</span>
-      </label>
-    `;
-  }
-
-  return `
-    <section class="third-party-delta-card" data-role="third-party-delta-form">
-      <div class="delta-card-header" style="display: none;">
-        <p class="eyebrow">Third-party API</p>
-        <h2 style="font-size: 1.25rem; font-weight: 750; color: var(--text-main); margin: 0 0 6px 0;">${isSymbiotic ? "共生配置" : "只填写第三方 API 的差异量"}</h2>
-        <p style="font-size: 0.85rem; color: var(--text-muted); margin: 0 0 16px 0; line-height: 1.4;">
-          ${isSymbiotic
-            ? "复用已经登录的官方 OAuth 账号，同时把模型请求转到第三方 API。"
-            : "保存时会自动生成 auth.json 和 config.toml，不会要求你手写完整配置。"}
-        </p>
-      </div>
-
-      <div class="profile-template-options" data-role="profile-template-options">
-        <label class="template-card-option">
-          <input
-            id="profile-template-standalone"
-            name="profile-template"
-            type="radio"
-            value="standaloneThirdParty"
-            ${state.editor.thirdParty.template === "standaloneThirdParty" ? "checked" : ""}
-            ${disabled}
-          />
-          <div class="option-content">
-            <span class="option-title">独立第三方 API</span>
-            <span class="option-desc">仅配置第三方接口与模型参数，与官方登录账号互不干扰。</span>
-          </div>
-        </label>
-        <label class="template-card-option">
-          <input
-            id="profile-template-symbiotic"
-            name="profile-template"
-            type="radio"
-            value="symbioticThirdParty"
-            ${isSymbiotic ? "checked" : ""}
-            ${disabled}
-          />
-          <div class="option-content">
-            <span class="option-title">共生配置</span>
-            <span class="option-desc">复用已登录的官方 OAuth 账号授权，同时把模型调用转到第三方接口。</span>
-          </div>
-        </label>
-      </div>
-
-      ${
-        isSymbiotic
-          ? `
-            <aside class="flash flash-info" data-role="symbiotic-enhanced-launch-hint" style="margin: 4px 0 12px 0; padding: 12px 14px;">
-              <span style="font-size: 0.82rem; line-height: 1.4;">共生配置已经替代增强启动；插件入口会通过官方 OAuth 登录状态保持可用，不再需要单独执行增强启动。</span>
-            </aside>
-          `
-          : ""
-      }
-
-      ${
-        isSymbiotic && missingOauth
-          ? `
-            <aside class="flash flash-error" data-role="symbiotic-oauth-missing" style="margin: 4px 0 12px 0; padding: 12px 14px;">
-              <span style="font-size: 0.82rem; line-height: 1.4;">错误：请先登录并保存一个官方 OAuth 账号，再创建共生配置。</span>
-            </aside>
-          `
-          : ""
-      }
-
-      <div class="third-party-delta-grid">
-        ${gridContentHtml}
-      </div>
-    </section>
-  `;
-}
-
-function renderNewProfileTabSelector(): string {
-  const currentTab = state.editor.newTab || "manual-delta";
-  return `
-    <div class="editor-template-tabs" data-role="editor-template-tabs">
-      <button class="tab-btn ${currentTab === "manual-delta" ? "active" : ""}" data-action="editor-tab-delta">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
-        极简第三方 API
-      </button>
-      <button class="tab-btn ${currentTab === "manual-full" ? "active" : ""}" data-action="editor-tab-full">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
-        空白完整配置
-      </button>
-    </div>
-  `;
-}
-
-function renderNewPageNetworkSection(): string {
-  const authPrompt = `
-    <div data-role="network-auth-prompt" style="display:flex; flex-direction:column; align-items:center; gap:10px; margin-top:14px;">
-      <p style="max-width:520px; color:var(--text-muted); line-height:1.5;">
-        云端共享库需要钉钉 SSO 登录。完成登录后客户端会自动连接企业共享库。
-      </p>
-      <div class="content-actions" style="justify-content:center; flex-wrap:wrap;">
-        <button class="button button-primary" data-action="open-network-sso-login">
-          钉钉 SSO 登录
-        </button>
-        <button class="button button-secondary" data-action="refresh-network-in-editor">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
-          重新加载
-        </button>
-      </div>
-    </div>
-  `;
-
-  if (state.networkLoading) {
-    return `
-      <div class="empty-state" style="border:none;background:transparent;padding:48px 0;">
-        <div class="busy-dialog-spinner" style="margin: 0 auto 16px auto; width: 28px; height: 28px;"></div>
-        <p style="color:var(--text-muted);">正在获取云端共享配置，请稍候...</p>
-      </div>
-    `;
-  }
-
-  if (state.networkAuthRequired || !state.networkSharing.token.trim()) {
-    return `
-      <div class="empty-state">
-        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--text-muted);margin-bottom:12px;"><path d="M15 3h4a2 2 0 0 1 2 2v4"></path><path d="M10 14 21 3"></path><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path></svg>
-        <h3>需要登录企业共享库</h3>
-        ${authPrompt}
-      </div>
-    `;
-  }
-
-  if (state.networkProfiles.length === 0) {
-    return `
-      <div class="empty-state">
-        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--text-muted);margin-bottom:12px;"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"></path></svg>
-        <h3>云端共享库为空</h3>
-        <p>目前还没有任何云端共享的配置文件。</p>
-        <button class="button button-secondary" data-action="refresh-network-in-editor" style="margin-top:12px;">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
-          重新加载
-        </button>
-      </div>
-    `;
-  }
-
-  return `
-    <div class="network-section-header" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
-      <h3 style="font-size:1.1rem; font-weight:700; color:var(--text-main); margin:0;">可用云端共享配置 (${state.networkProfiles.length})</h3>
-      <button class="button button-secondary" data-action="refresh-network-in-editor" style="padding:4px 10px; font-size:0.8rem; height:28px; display:inline-flex; align-items:center; gap:4px;">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
-        <span>刷新列表</span>
-      </button>
-    </div>
-    <div class="card-grid" style="grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; margin-bottom: 24px;">
-      ${state.networkProfiles.map((profile) => `
-        <article class="card profile-card" style="padding: 16px; display: flex; flex-direction: column; justify-content: space-between; min-height: 160px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-panel); transition: all 0.2s;">
-          <div>
-            <div class="card-head" style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px; margin-bottom:8px;">
-              <h4 style="font-size:1rem; font-weight:700; color:var(--text-main); margin:0;" title="${escapeHtml(profile.name)}">${escapeHtml(profile.name)}</h4>
-              <span class="pill pill-type" style="font-size:0.7rem; padding: 2px 6px; color:var(--text-muted); border-color:var(--border-light); background:var(--bg-page); flex-shrink: 0;">☁️ 远程</span>
-            </div>
-            <p style="font-size:0.85rem; color:var(--text-muted); margin: 0 0 12px 0; display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;text-overflow:ellipsis;line-height:1.4;">${escapeHtml(profile.description || "云端共享配置")}</p>
-            ${isOwnNetworkProfile(profile) ? `
-              <div style="display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:999px; background:rgba(79,70,229,0.10); color:var(--accent); font-size:0.76rem; font-weight:700;">
-                <span>我共享的配置</span>
-                <span>${escapeHtml(sharingScopeLabel(profile))}</span>
-              </div>
-            ` : ""}
-          </div>
-          <div style="display:flex; justify-content:space-between; align-items:center; border-top:1px solid var(--border-light); padding-top:12px; margin-top:auto;">
-            <span style="font-size:0.75rem; color:var(--text-muted);">更新: ${formatDateTime(profile.createdAt).split(" ")[0]}</span>
-            <div style="display:flex; gap:8px;">
-              <button class="button button-ghost" data-action="view-network-profile-details" data-id="${profile.id}" style="padding: 4px 8px; font-size: 0.8rem; height: 28px;">
-                详情
-              </button>
-              <button class="button button-primary" data-action="import-network-profile-to-editor" data-id="${profile.id}" style="padding: 4px 10px; font-size: 0.8rem; height: 28px; display:inline-flex; align-items:center; gap:2px;">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-                导入
-              </button>
-            </div>
-          </div>
-        </article>
-      `).join("")}
-    </div>
-  `;
-}
-
 async function importNetworkProfileToEditor(networkProfileId: string): Promise<void> {
   await importNetworkProfileAsLocal(networkProfileId, { openEditor: false });
 }
 
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
-function getFlashIcon(kind: FlashKind): string {
-  switch (kind) {
-    case "success":
-      return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
-    case "error":
-      return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>`;
-    case "info":
-    default:
-      return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>`;
-  }
-}
-
-function renderFlash(): string {
-  if (!state.flash) {
-    return "";
-  }
-
-  return `
-    <div class="toast-notification toast-${state.flash.kind}">
-      <span class="toast-icon">${getFlashIcon(state.flash.kind)}</span>
-      <span class="toast-text">${escapeHtml(state.flash.text)}</span>
-      <button class="toast-close" data-action="clear-flash" aria-label="关闭">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-      </button>
-    </div>
-  `;
-}
-
-function renderBusyDialog(): string {
-  if (!state.busyDialog) {
-    return "";
-  }
-
-  return `
-    <aside
-      class="busy-dialog-backdrop"
-      role="status"
-      aria-live="polite"
-      aria-busy="true"
-      data-role="profile-switch-busy-dialog"
-    >
-      <div class="busy-dialog">
-        <div class="busy-dialog-spinner" aria-hidden="true"></div>
-        <div class="busy-dialog-copy">
-          <h2>${escapeHtml(state.busyDialog.title)}</h2>
-          <p>${escapeHtml(state.busyDialog.message)}</p>
-          <div class="busy-dialog-progress" aria-hidden="true">
-            <span></span>
-          </div>
-        </div>
-      </div>
-    </aside>
-  `;
-}
-
-
-
-
-
-
-
-function renderCardsPage(snapshot: AppSnapshot): string {
-  const migratingLegacyThirdParty = isPendingAction(migrateLegacyThirdPartyActionKey);
+function renderCardsView(snapshot: AppSnapshot): string {
   const orderedProfiles = [...snapshot.profiles].sort((a, b) => {
     if (a.id === snapshot.activeProfileId) return -1;
     if (b.id === snapshot.activeProfileId) return 1;
     return 0;
   });
 
-  return `
-    <section class="cards-page" data-page="cards">
-      <header class="content-header" data-tauri-drag-region>
-        <div class="header-title">
-          <h2>配置管理</h2>
-          <span class="header-subtitle">共 ${snapshot.profiles.length} 个本地配置文件</span>
-        </div>
-        <div class="content-actions">
-          <button class="button button-secondary" title="重新从本地目录读取配置文件" data-role="global-refresh" data-action="refresh" ${state.busy ? "disabled" : ""}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
-            <span>同步本地配置</span>
-          </button>
-          <button class="button button-primary" data-role="add-card" data-action="new-profile" ${state.busy ? "disabled" : ""}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-            新建配置
-          </button>
-        </div>
-      </header>
-
-      <section class="grid-container">
-        <div class="section-header">
-          <h3 class="section-title">已保存的配置文件</h3>
-          <div class="section-actions">
-            <button
-              class="button button-secondary"
-              data-action="refresh-all-codex-usage"
-              title="连接 API 接口以获取并更新所有配置的最新额度使用情况"
-              ${state.busy || isPendingActionPrefix("codex-usage") ? "disabled" : ""}
-              style="padding: 6px 12px; font-size: 0.82rem; height: 32px; display: inline-flex; align-items: center; gap: 4px;"
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"></line><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
-              <span>${isPendingAction(refreshAllUsageActionKey) ? "更新中..." : "更新全部额度用量"}</span>
-            </button>
-            ${renderProfileLayoutToggle()}
-          </div>
-        </div>
-        ${
-          state.profileLayout === "list"
-            ? renderProfileList(snapshot, orderedProfiles)
-            : renderProfileGrid(snapshot, orderedProfiles)
-        }
-      </section>
-    </section>
-  `;
+  return renderCardsPage({
+    snapshot,
+    profiles: orderedProfiles,
+    layout: state.profileLayout,
+    busy: state.busy,
+    pendingActions: state.pendingActions,
+  });
 }
 
-function shareUserInitial(user: ShareUserOption): string {
-  return (user.label || user.name || user.mobile || user.jobNumber || user.dingUserId || "企")
-    .trim()
-    .slice(0, 1)
-    .toUpperCase();
-}
-
-function renderShareUserCheckboxList(selectedUserIds: string[], checkboxClass: string): string {
-  if (state.shareUsersLoading) {
-    return `
-      <div class="empty-state" style="padding: 18px;">
-        <div class="busy-dialog-spinner" style="margin: 0 auto 10px auto; width: 22px; height: 22px;"></div>
-        <p>正在加载可分享用户...</p>
-      </div>
-    `;
-  }
-
-  if (state.shareUsers.length === 0) {
-    return `
-      <div class="empty-state" style="padding: 18px;">
-        <h3>暂无可选用户</h3>
-        <p>只有登录过企业共享中心的用户会出现在这里。</p>
-      </div>
-    `;
-  }
-
-  return `
-    <div class="sharing-user-list" data-role="share-user-list">
-      ${state.shareUsers.map((user) => `
-        <label class="share-user-row">
-          <input
-            class="${escapeHtml(checkboxClass)}"
-            type="checkbox"
-            value="${escapeHtml(user.dingUserId)}"
-            ${selectedUserIds.includes(user.dingUserId) ? "checked" : ""}
-          />
-          <span class="share-user-avatar">${escapeHtml(shareUserInitial(user))}</span>
-          <span class="share-user-copy">
-            <strong>${escapeHtml(user.label)}</strong>
-            <span>${escapeHtml(user.mobile || user.jobNumber || user.dingUserId)}</span>
-          </span>
-        </label>
-      `).join("")}
-    </div>
-  `;
-}
-
-function renderShareUserPicker(): string {
-  if (state.shareDraft.visibility !== "selected") {
-    return "";
-  }
-  return renderShareUserCheckboxList(state.shareDraft.selectedUserIds, "share-user-checkbox");
-}
-
-function renderSharedProfileEditUserPicker(): string {
-  const draft = state.sharedProfileEditDraft;
-  if (!draft || draft.visibility !== "selected") {
-    return "";
-  }
-  return renderShareUserCheckboxList(draft.selectedUserIds, "shared-profile-edit-user-checkbox");
-}
-
-function renderSharingCenterTabs(): string {
-  return `
-    <div class="editor-template-tabs sharing-tabs" data-role="sharing-center-tabs">
-      <button class="tab-btn ${state.sharingCenterTab === "own" ? "active" : ""}" data-action="sharing-tab-own">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;"><path d="M20 21a8 8 0 0 0-16 0"></path><circle cx="12" cy="7" r="4"></circle></svg>
-        共享自己的配置
-      </button>
-      <button class="tab-btn ${state.sharingCenterTab === "library" ? "active" : ""}" data-action="sharing-tab-library">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><path d="M3.3 7 12 12l8.7-5"></path><path d="M12 22V12"></path></svg>
-        企业共享库
-      </button>
-    </div>
-  `;
-}
-
-function renderLocalShareForm(snapshot: AppSnapshot, authRequired: boolean): string {
-  const profiles = snapshot.profiles;
-  const selectedProfileId = state.shareDraft.profileId ?? profiles[0]?.id ?? null;
-  const selectedProfile = profiles.find((profile) => profile.id === selectedProfileId) ?? profiles[0] ?? null;
-  if (selectedProfile && state.shareDraft.profileId !== selectedProfile.id) {
-    state.shareDraft.profileId = selectedProfile.id;
-  }
-  const selectedUserCount = state.shareDraft.selectedUserIds.length;
-  const selectedShareDisabled =
-    state.shareDraft.visibility === "selected" && selectedUserCount === 0;
-  const shareSummary =
-    state.shareDraft.visibility === "public"
-      ? "全部已登录员工可见"
-      : selectedUserCount > 0
-        ? `已选择 ${selectedUserCount} 人`
-        : "请选择共享对象";
-
-  return `
-    <section class="card sharing-share-form" data-role="local-share-form">
-      <div class="sharing-section-head">
-        <div>
-          <h3>共享我的本地配置</h3>
-          <p>选择本地配置、指定可见范围，再发布到企业共享库。</p>
-        </div>
-        <span class="sharing-section-badge">发布配置</span>
-      </div>
-
-      ${authRequired ? `
-        <div class="empty-state" data-role="network-auth-prompt" style="padding:20px;margin-top:16px;">
-          <h3>需要登录企业共享中心</h3>
-          <p>完成钉钉 SSO 登录后，客户端会自动连接企业共享库，并允许共享配置和选择共享对象。</p>
-          <button class="button button-primary" data-action="open-network-sso-login" style="margin-top:12px;">钉钉 SSO 登录</button>
-        </div>
-      ` : `
-        <div class="sharing-publish-layout">
-          <div class="sharing-config-block">
-            <div class="sharing-block-label">
-              <span>1</span>
-              <strong>选择本地配置</strong>
-            </div>
-            <label class="field">
-              <span>本地配置</span>
-              <select id="share-profile-select" ${state.busy || profiles.length === 0 ? "disabled" : ""}>
-                ${profiles.map((profile) => `
-                  <option value="${escapeHtml(profile.id)}" ${profile.id === selectedProfile?.id ? "selected" : ""}>
-                    ${escapeHtml(profile.name)}
-                  </option>
-                `).join("")}
-              </select>
-            </label>
-            ${selectedProfile ? `
-              <div class="sharing-selected-profile">
-                <strong>${escapeHtml(selectedProfile.name)}</strong>
-                <span>${escapeHtml(selectedProfile.notes || selectedProfile.authTypeLabel || "本地配置")}</span>
-                <em>更新: ${formatDateTime(selectedProfile.updatedAt)}</em>
-              </div>
-            ` : ""}
-          </div>
-
-          <fieldset class="sharing-scope-block">
-            <div class="sharing-block-label">
-              <span>2</span>
-              <strong>设置共享范围</strong>
-            </div>
-            <div class="share-scope-options">
-              <label class="share-scope-option">
-                <input
-                  id="share-visibility-selected"
-                  name="share-visibility"
-                  type="radio"
-                  value="selected"
-                  ${state.shareDraft.visibility === "selected" ? "checked" : ""}
-                />
-                <div>
-                  <strong>指定用户</strong>
-                  <span>只共享给选中的员工。</span>
-                </div>
-              </label>
-              <label class="share-scope-option">
-                <input
-                  id="share-visibility-public"
-                  name="share-visibility"
-                  type="radio"
-                  value="public"
-                  ${state.shareDraft.visibility === "public" ? "checked" : ""}
-                />
-                <div>
-                  <strong>全部员工</strong>
-                  <span>所有已登录员工可见。</span>
-                </div>
-              </label>
-            </div>
-          </fieldset>
-
-          <div class="sharing-recipient-block" data-state="${state.shareDraft.visibility}">
-            <div class="sharing-block-label">
-              <span>3</span>
-              <strong>选择共享对象</strong>
-            </div>
-            ${state.shareDraft.visibility === "selected" ? renderShareUserPicker() : `
-              <div class="sharing-recipient-note">
-                <strong>无需逐个选择人员</strong>
-                <span>发布后，所有已登录企业共享库的员工都可以看到这套配置。</span>
-              </div>
-            `}
-          </div>
-        </div>
-
-        <div class="sharing-form-footer">
-          <div class="sharing-submit-summary">
-            <strong>${escapeHtml(selectedProfile?.name || "未选择配置")}</strong>
-            <span>${escapeHtml(shareSummary)}</span>
-          </div>
-          <button
-            class="button button-primary"
-            data-action="share-local-profile"
-            ${state.busy || profiles.length === 0 || selectedShareDisabled ? "disabled" : ""}
-          >
-            共享到企业共享库
-          </button>
-        </div>
-      `}
-    </section>
-  `;
-}
-
-function renderOwnedSharedProfiles(authRequired: boolean): string {
-  if (authRequired) {
-    return "";
-  }
-
-  if (state.networkLoading) {
-    return `
-      <section class="card shared-profiles-panel" data-role="owned-shared-profiles">
-        <div class="empty-state" style="padding:28px;">
-          <div class="busy-dialog-spinner" style="margin: 0 auto 12px auto; width: 24px; height: 24px;"></div>
-          <p>正在加载我已共享的配置...</p>
-        </div>
-      </section>
-    `;
-  }
-
-  const profiles = ownNetworkProfiles();
-  return `
-    <section class="card shared-profiles-panel" data-role="owned-shared-profiles">
-      <div class="sharing-section-head">
-        <div>
-          <h3>我已共享的配置</h3>
-          <p>管理自己发布到企业共享库的配置和可见人员。</p>
-        </div>
-        <span class="sharing-section-badge">${profiles.length} 个</span>
-      </div>
-
-      ${profiles.length === 0 ? `
-        <div class="empty-state" style="padding:24px;margin-top:16px;">
-          <h3>还没有共享配置</h3>
-          <p>上方共享成功后，会出现在这里。</p>
-        </div>
-      ` : `
-        <div class="shared-profile-list">
-          ${profiles.map((profile) => renderOwnedSharedProfileCard(profile)).join("")}
-        </div>
-      `}
-    </section>
-  `;
-}
-
-function renderOwnedSharedProfileCard(profile: NetworkProfile): string {
-  const draft = state.sharedProfileEditDraft?.profileId === profile.id ? state.sharedProfileEditDraft : null;
-  const editing = Boolean(draft);
-  const scope = sharingScopeLabel(profile);
-  const selectedDisabled = draft?.visibility === "selected" && draft.selectedUserIds.length === 0;
-
-  return `
-    <article class="shared-profile-row" data-role="owned-shared-profile" data-id="${escapeHtml(profile.id)}">
-      <div class="shared-profile-row-main">
-        <div class="shared-profile-row-title">
-          <h4>${escapeHtml(profile.name)}</h4>
-          <span class="pill pill-type" style="font-size:0.74rem;">${escapeHtml(scope)}</span>
-        </div>
-        <p>${escapeHtml(profile.description || "云端共享配置")}</p>
-        <div class="shared-profile-row-meta">
-          更新: ${formatDateTime(profile.updatedAt || profile.createdAt)}
-        </div>
-      </div>
-      <div class="shared-profile-row-actions">
-        ${editing ? `
-          <span class="pill pill-type" style="font-size:0.74rem;">编辑中</span>
-        ` : `
-          <button class="button button-secondary" data-action="edit-shared-profile-users" data-id="${escapeHtml(profile.id)}" ${state.busy ? "disabled" : ""}>修改共享人</button>
-          <button class="button button-danger" data-action="delete-shared-profile" data-id="${escapeHtml(profile.id)}" ${state.busy ? "disabled" : ""}>删除</button>
-        `}
-      </div>
-
-      ${editing && draft ? `
-        <div class="shared-profile-editor">
-          <fieldset class="field" style="border:0;padding:0;margin:0;">
-            <span>共享范围</span>
-            <div class="share-scope-options three">
-              ${([
-                ["selected", "指定用户", "只共享给选中的员工。"],
-                ["public", "全部员工", "企业共享库内全部可见。"],
-                ["private", "仅自己", "停止对其他人共享。"],
-              ] as const).map(([value, title, desc]) => `
-                <label class="share-scope-option">
-                  <input
-                    class="shared-profile-edit-visibility"
-                    name="shared-profile-edit-visibility-${escapeHtml(profile.id)}"
-                    type="radio"
-                    value="${value}"
-                    ${draft.visibility === value ? "checked" : ""}
-                  />
-                  <div>
-                    <strong>${title}</strong>
-                    <span>${desc}</span>
-                  </div>
-                </label>
-              `).join("")}
-            </div>
-          </fieldset>
-          ${renderSharedProfileEditUserPicker()}
-          <div class="shared-profile-editor-actions">
-            <button class="button button-secondary" data-action="cancel-edit-shared-profile" ${state.busy ? "disabled" : ""}>取消</button>
-            <button
-              class="button button-primary"
-              data-action="save-shared-profile-users"
-              ${state.busy || selectedDisabled ? "disabled" : ""}
-            >
-              保存共享对象
-            </button>
-          </div>
-        </div>
-      ` : ""}
-    </article>
-  `;
-}
-
-function renderOwnSharingTab(snapshot: AppSnapshot, authRequired: boolean): string {
-  return `
-    <div class="sharing-own-stack">
-      ${renderLocalShareForm(snapshot, authRequired)}
-      ${renderOwnedSharedProfiles(authRequired)}
-    </div>
-  `;
-}
-
-function renderEnterpriseLibraryTab(authRequired: boolean): string {
-  return `
-    <section class="card sharing-library-panel" data-role="network-profile-library" style="min-height:360px;">
-      <div class="card-head">
-        <h3>企业共享库</h3>
-      </div>
-      <p class="card-note">这里展示您有权限查看和导入的云端共享配置。自己共享的配置会标出当前共享范围。</p>
-      <div style="margin-top:16px;">
-        ${authRequired ? `
-          <div class="empty-state" data-role="network-auth-prompt" style="padding:28px;">
-            <h3>需要登录企业共享库</h3>
-            <p>完成钉钉 SSO 登录后，客户端会自动连接企业共享库。</p>
-            <button class="button button-primary" data-action="open-network-sso-login" style="margin-top:12px;">钉钉 SSO 登录</button>
-          </div>
-        ` : renderNewPageNetworkSection()}
-      </div>
-    </section>
-  `;
-}
-
-function renderSharingCenterPage(snapshot: AppSnapshot): string {
+function renderSharingCenterView(snapshot: AppSnapshot): string {
   const authRequired = state.networkAuthRequired || !state.networkSharing.token.trim();
+  let sharingTabHtml = "";
 
-  return `
-    <section class="cards-page" data-page="sharing-center">
-      <header class="content-header" data-tauri-drag-region>
-        <div class="header-title">
-          <h2>配置共享中心</h2>
-          <span class="header-subtitle">共享本地配置，也从企业共享库导入可用配置</span>
-        </div>
-        <div class="content-actions">
-          <button class="button button-secondary" data-action="refresh-sharing-center" ${state.busy ? "disabled" : ""}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
-            刷新共享中心
-          </button>
-        </div>
-      </header>
+  if (state.sharingCenterTab === "own") {
+    const shareTargetUsers = selectShareTargetUsers();
+    const localShareForm = resolveLocalShareFormState(snapshot.profiles, state.shareDraft);
+    if (localShareForm.profileIdToPersist && state.shareDraft.profileId !== localShareForm.profileIdToPersist) {
+      state.shareDraft.profileId = localShareForm.profileIdToPersist;
+    }
 
-      ${renderSharingCenterTabs()}
-      ${state.sharingCenterTab === "own"
-        ? renderOwnSharingTab(snapshot, authRequired)
-        : renderEnterpriseLibraryTab(authRequired)}
-    </section>
-  `;
-}
-
-function renderEditorPage(): string {
-  const snapshot = state.snapshot;
-  if (!snapshot) {
-    return "";
-  }
-  const existing = state.editor.mode === "existing";
-  const readOnly = state.editor.readOnly;
-  const saveDisabled = state.busy || editorCannotSaveBecauseMissingOauth();
-  const editorProfile = getEditorProfileSummary(snapshot);
-
-  const showTabs = state.editor.mode === "new";
-  const currentTab = state.editor.newTab || "manual-delta";
-
-  const title =
-    readOnly
-      ? (state.editor.name || "查看网络共享配置")
-      : state.editor.mode === "fromCurrent"
-      ? "保存当前 Codex 配置为新 Profile"
-      : existing
-        ? (state.editor.name || "查看和编辑 Profile")
-        : "手动创建新 Profile";
-
-  const subtitle =
-    readOnly
-      ? "该配置来自网络共享库，仅供查看，不能直接编辑或保存。"
-      : state.editor.mode === "fromCurrent"
-      ? "把当前 `.codex` 里的内容复制成一套新的 profile。"
-      : existing
-        ? "查看和编辑此 Profile 的配置文本。"
-        : "直接手工填写名称、备注以及配置内容。";
-
-  let bodyContent = "";
-  {
-    const configFields = (showTabs && currentTab === "manual-delta")
-      ? renderThirdPartyConfigFields(readOnly)
-      : `
-        <div class="editor-panels">
-          <div class="code-editor-card">
-            <div class="code-editor-header">
-              <span class="code-editor-title">auth.json</span>
-              <span class="code-editor-format">JSON</span>
-            </div>
-            <textarea
-              id="editor-auth-json"
-              class="code-textarea"
-              spellcheck="false"
-              ${state.busy || readOnly ? "disabled" : ""}
-            >${escapeHtml(state.editor.authJson)}</textarea>
-          </div>
-
-          <div class="code-editor-card">
-            <div class="code-editor-header">
-              <span class="code-editor-title">config.toml</span>
-              <span class="code-editor-format">TOML</span>
-            </div>
-            <textarea
-              id="editor-config-toml"
-              class="code-textarea"
-              spellcheck="false"
-              ${state.busy || readOnly ? "disabled" : ""}
-            >${escapeHtml(state.editor.configToml)}</textarea>
-          </div>
-        </div>
-      `;
-
-    bodyContent = `
-      <div class="editor-layout-grid">
-        <!-- Left Main Column: Config inputs / textareas -->
-        <div class="editor-main-column">
-          ${configFields}
-        </div>
-
-        <!-- Right Sidebar Column: Metadata & stats -->
-        <div class="editor-sidebar-column">
-          <!-- Profile Basic Info Card -->
-          <div class="sidebar-card">
-            <div class="sidebar-card-title">基本信息</div>
-            <label class="field">
-              <span>Profile 名称</span>
-              <input
-                id="editor-name"
-                type="text"
-                value="${escapeHtml(state.editor.name)}"
-                placeholder="例如：淘宝 1 / Work / Backup"
-                ${state.busy || readOnly ? "disabled" : ""}
-              />
-            </label>
-
-            <label class="field" style="margin-top: 16px;">
-              <span>备注</span>
-              <textarea
-                id="editor-notes"
-                rows="3"
-                placeholder="写一点识别信息，比如账号用途、邮箱、额度状态"
-                ${state.busy || readOnly ? "disabled" : ""}
-              >${escapeHtml(state.editor.notes)}</textarea>
-            </label>
-
-            ${readOnly
-              ? (state.editor.source === "network"
-                ? `
-                  <div class="sidebar-actions">
-                    <button class="button button-primary button-full" data-action="import-current-network-profile" ${state.busy ? "disabled" : ""}>
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;"><polyline points="4 17 10 11 16 17"></polyline><polyline points="4 6 10 12 16 6"></polyline></svg>
-                      导入并编辑配置
-                    </button>
-                  </div>
-	                `
-	                : "")
-              : `
-                  <div class="sidebar-actions">
-                    <button class="button button-primary button-full" data-action="save-and-switch" ${saveDisabled ? "disabled" : ""}>
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
-                      ${existing ? "保存并立即启动" : "创建并立即启动"}
-                    </button>
-                    ${existing && editorProfile?.authTypeLabel === "第三方 API" && state.editor.profileId
-                      ? `
-                        <button class="button button-secondary button-full" style="border-color: var(--accent); color: var(--accent); margin-bottom: 4px;" data-action="generate-symbiotic" data-id="${state.editor.profileId}">
-                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
-                          生成共生配置
-                        </button>
-                      `
-                      : ""
-                    }
-                    <div class="sidebar-actions-row">
-                      <button class="button button-secondary" data-action="save-editor" ${saveDisabled ? "disabled" : ""}>
-                        ${existing
-                          ? `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>保存修改`
-                          : `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>创建配置`
-                        }
-                      </button>
-                      ${existing && state.editor.profileId
-                        ? `
-                          <button
-                            class="button button-danger"
-                            data-action="delete-profile"
-                            data-id="${state.editor.profileId}"
-                            data-name="${escapeHtml(state.editor.name)}"
-                            ${state.busy ? "disabled" : ""}
-                          >
-                            删除
-                          </button>
-                        `
-                        : ""
-                      }
-                    </div>
-                  </div>
-                `
-            }
-          </div>
-
-          <!-- Runtime panel (Quota metrics, speed tests) -->
-          ${renderEditorRuntimePanel(snapshot, editorProfile)}
-
-          <!-- Metadata card (Creation/Update time) -->
-          ${existing || readOnly ? `
-            <div class="sidebar-card metadata-card">
-              <div class="sidebar-card-title">版本与时间</div>
-              <div class="meta-row">
-                <span class="meta-label">创建时间</span>
-                <span class="meta-value">${formatDateTime(state.editor.createdAt)}</span>
-              </div>
-              <div class="meta-row">
-                <span class="meta-label">最近更新</span>
-                <span class="meta-value">${formatDateTime(state.editor.updatedAt)}</span>
-              </div>
-            </div>
-          ` : ""}
-        </div>
-      </div>
-    `;
+    sharingTabHtml = renderOwnSharingTab({
+      profiles: snapshot.profiles,
+      authRequired,
+      busy: state.busy,
+      currentUser: state.networkUser,
+      shareDraft: state.shareDraft,
+      localShareForm,
+      shareUserPickerHtml: renderShareUserPicker({
+        users: shareTargetUsers,
+        loading: state.shareUsersLoading,
+        shareDraft: state.shareDraft,
+      }),
+      ownedProfilesLoading: state.networkLoading,
+      ownedProfiles: selectOwnNetworkProfiles(state),
+      editDraft: state.sharedProfileEditDraft,
+      editUserPickerHtml: renderSharedProfileEditUserPicker({
+        users: shareTargetUsers,
+        loading: state.shareUsersLoading,
+        editDraft: state.sharedProfileEditDraft,
+      }),
+    });
+  } else {
+    sharingTabHtml = renderEnterpriseLibraryTab({
+      authRequired,
+      loading: state.networkLoading,
+      profiles: state.networkProfiles,
+      currentUser: state.networkUser,
+    });
   }
 
-  return `
-    <section class="editor-page" data-page="editor">
-      <header class="editor-header">
-        <div class="editor-header-left">
-          <button class="button button-ghost" data-action="back-to-cards" ${state.busy ? "disabled" : ""}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
-            返回卡片网格
-          </button>
-          <div>
-            <p class="eyebrow" style="display: none;">Profile Detail</p>
-            <h1 style="margin-top: 4px;">${title}</h1>
-            <p class="page-copy" style="display: none;">${subtitle}</p>
-          </div>
-        </div>
-      </header>
-
-      ${readOnly
-        ? `
-          <aside class="flash flash-info" data-role="editor-readonly-notice">
-            <span>网络共享配置仅支持查看详情，不能直接编辑或保存。</span>
-          </aside>
-        `
-        : ""}
-
-      ${state.editor.mode === "existing" && state.editor.hasTargetChanges
-        ? `
-          <aside class="flash flash-info" data-role="editor-live-change-notice">
-            <span>当前运行中的配置有变动，请保存以同步回这套 Profile。</span>
-          </aside>
-        `
-        : ""}
-
-      ${showTabs ? renderNewProfileTabSelector() : ""}
-
-      ${bodyContent}
-    </section>
-  `;
+  return renderSharingCenterPage({
+    activeTab: state.sharingCenterTab,
+    busy: state.busy,
+    tabContentHtml: sharingTabHtml,
+  });
 }
 
 function bindInputValue(selector: string, onInput: (value: string) => void): void {
@@ -4253,107 +1625,51 @@ function bindInputValue(selector: string, onInput: (value: string) => void): voi
   });
 }
 
-function networkUserDisplayName(user: NetworkUserPrincipal | null): string {
-  return user?.name?.trim() || user?.mobile?.trim() || user?.jobNumber?.trim() || user?.dingUserId || "企业账号";
-}
-
-function networkUserMeta(user: NetworkUserPrincipal | null): string {
-  if (!user) return "";
-  return user.mobile?.trim() || user.jobNumber?.trim() || user.dingUserId;
-}
-
-function renderSidebarLoginStatus(): string {
-  const hasToken = Boolean(state.networkSharing.token.trim());
-  if (!hasToken || state.networkAuthRequired) {
-    return `
-      <section class="sidebar-login-card sidebar-login-card-guest" data-role="sidebar-login-status">
-        <div class="sidebar-login-main">
-          <span class="sidebar-login-dot sidebar-login-dot-muted"></span>
-          <div class="sidebar-login-copy">
-            <strong>未登录</strong>
-            <span>登录后同步企业共享库</span>
-          </div>
-        </div>
-        <button class="sidebar-login-button" data-action="open-network-sso-login">钉钉 SSO 登录</button>
-      </section>
-    `;
-  }
-
-  if (state.networkUserLoading && !state.networkUser) {
-    return `
-      <section class="sidebar-login-card" data-role="sidebar-login-status">
-        <div class="sidebar-login-main">
-          <span class="sidebar-login-dot sidebar-login-dot-loading"></span>
-          <div class="sidebar-login-copy">
-            <strong>检查登录中</strong>
-            <span>正在连接企业共享库</span>
-          </div>
-        </div>
-      </section>
-    `;
-  }
-
-  const userName = networkUserDisplayName(state.networkUser);
-  const userMeta = networkUserMeta(state.networkUser);
-  return `
-    <section class="sidebar-login-card sidebar-login-card-signed-in" data-role="sidebar-login-status">
-      <div class="sidebar-login-main">
-        <span class="sidebar-login-avatar">${escapeHtml(userName.slice(0, 1).toUpperCase())}</span>
-        <div class="sidebar-login-copy">
-          <strong>${escapeHtml(userName)}</strong>
-          <span>${escapeHtml(userMeta || "已登录企业共享库")}</span>
-        </div>
-      </div>
-    </section>
-  `;
-}
-
-function renderNetworkAccountSettings(): string {
-  const hasToken = Boolean(state.networkSharing.token.trim());
-  const userName = networkUserDisplayName(state.networkUser);
-  const userMeta = networkUserMeta(state.networkUser);
-
-  return `
-    <div class="network-account-settings" data-role="network-account-settings">
-      <div>
-        <span class="field-hint">当前登录</span>
-        <strong>${hasToken && !state.networkAuthRequired ? escapeHtml(userName) : "未登录"}</strong>
-        <p class="card-note" style="margin-top: 4px;">${
-          hasToken && !state.networkAuthRequired
-            ? escapeHtml(userMeta || "已连接企业共享库")
-            : "请先使用钉钉 SSO 登录企业共享库。"
-        }</p>
-      </div>
-      <button
-        class="button button-secondary"
-        data-action="logout-network-user"
-        ${hasToken ? "" : "disabled"}
-      >
-        退出登录
-      </button>
-    </div>
-  `;
-}
-
 function render(): void {
   const previousMain = app.querySelector<HTMLElement>(".app-main-content");
-  const previousPageKey = currentRenderedPageKey();
+  const previousPageKey = currentRenderedPageKey(app);
   const previousScrollTop = previousMain?.scrollTop ?? 0;
   const snapshot = state.snapshot;
 
   let content = "";
   if (state.view === "cards" && snapshot) {
-    content = renderCardsPage(snapshot);
+    content = renderCardsView(snapshot);
   } else if (state.view === "sharing" && snapshot) {
-    content = renderSharingCenterPage(snapshot);
+    content = renderSharingCenterView(snapshot);
   } else if (state.view === "settings") {
-    content = renderSettingsPage();
+    content = renderSettingsPage({
+      networkSharing: state.networkSharing,
+      defaultNetworkProfilesApi: DEFAULT_NETWORK_PROFILES_API,
+      networkPortalUrl: networkPortalBaseUrl(state.networkSharing),
+      accountSettingsHtml: renderNetworkAccountSettings({
+        hasToken: Boolean(state.networkSharing.token.trim()),
+        authRequired: state.networkAuthRequired,
+        user: state.networkUser,
+      }),
+      busy: state.busy,
+      migratingLegacyThirdParty: hasPendingAction(
+        state.pendingActions,
+        migrateLegacyThirdPartyActionKey,
+      ),
+      writingThirdPartyWebsocketsDefaults: hasPendingAction(
+        state.pendingActions,
+        writeThirdPartyWebsocketsDefaultsActionKey,
+      ),
+    });
   } else if (state.view === "sessions") {
-    content = renderSessionsPage();
+    content = renderSessionsPage(selectSessionRenderState(state));
   } else if (state.view === "session-cleanup") {
-    content = renderSessionCleanupPage();
+    content = renderSessionCleanupPage({
+      sessions: state.sessions,
+      nowMs: Date.now(),
+    });
   } else {
-    content = renderEditorPage();
+    content = renderEditorPage({
+      snapshot: state.snapshot,
+      editor: state.editor,
+      busy: state.busy,
+      pendingActions: state.pendingActions,
+    });
   }
 
   const hasPendingUpdate = state.update.lastResult?.hasUpdate ?? false;
@@ -4362,673 +1678,52 @@ function render(): void {
     ? `v${state.update.lastResult?.latestVersion ?? "--"}`
     : `v${currentVersionText}`;
 
-  app.innerHTML = `
-    <div class="app-layout">
-      <aside class="app-sidebar">
-        <div class="sidebar-header">
-          <div class="app-logo">
-            <svg class="app-logo-icon" viewBox="0 0 24 24" width="24" height="24" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <defs>
-                <linearGradient id="logo-grad" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">
-                  <stop offset="0%" stop-color="#22D3EE"/>
-                  <stop offset="100%" stop-color="#4F46E5"/>
-                </linearGradient>
-              </defs>
-              <rect x="2" y="2" width="20" height="20" rx="6" fill="url(#logo-grad)"/>
-              <rect x="6" y="9" width="12" height="6" rx="3" fill="rgba(255,255,255,0.2)" stroke="#FFFFFF" stroke-width="1.2"/>
-              <circle cx="13.5" cy="12" r="2.2" fill="#FFFFFF"/>
-            </svg>
-            <span>Codex 助手</span>
-          </div>
-        </div>
-        <nav class="sidebar-nav">
-	          <button class="nav-item ${state.view === 'cards' || state.view === 'editor' ? 'active' : ''}" data-action="nav-profiles">
-	            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
-	            配置管理
-	          </button>
-	          <button class="nav-item ${state.view === 'sharing' ? 'active' : ''}" data-action="nav-sharing">
-	            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><path d="M8.59 13.51 15.42 17.49"></path><path d="M15.41 6.51 8.59 10.49"></path></svg>
-	            配置共享
-	          </button>
-	          <button class="nav-item ${state.view === 'sessions' ? 'active' : ''}" data-action="nav-sessions">
-	            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
-	            会话管理
-          </button>
-          <button class="nav-item ${state.view === 'settings' ? 'active' : ''}" data-action="nav-settings">
-            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
-            全局设置
-          </button>
-        </nav>
-        <div class="sidebar-footer">
-          ${renderSidebarLoginStatus()}
-          <div class="version-status ${state.update.checking ? 'version-status-checking' : hasPendingUpdate ? 'version-status-update' : 'version-status-latest'}" data-role="update-entry" data-action="check-update" style="display: flex; align-items: center; gap: 8px; cursor: pointer;" title="${hasPendingUpdate ? '有新版本，点击下载并安装' : '最新版本，点击重新检查'}">
-            <span class="version-status-dot"></span>
-            <span>${
-              state.update.checking
-                ? "检测版本中..."
-                : hasPendingUpdate
-                  ? `有新版本 ${updateVersionText}`
-                  : `最新版 v${currentVersionText}`
-            }</span>
-          </div>
-        </div>
-      </aside>
-      <main class="app-main-content">
-        ${content}
-      </main>
-      ${renderFlash()}
-    </div>
-    ${renderBusyDialog()}
-  `;
+  app.innerHTML = renderAppShell({
+    view: state.view,
+    contentHtml: content,
+    sidebarLoginStatusHtml: renderSidebarLoginStatus({
+      hasToken: Boolean(state.networkSharing.token.trim()),
+      authRequired: state.networkAuthRequired,
+      userLoading: state.networkUserLoading,
+      user: state.networkUser,
+    }),
+    flash: state.flash,
+    busyDialog: state.busyDialog,
+    update: {
+      checking: state.update.checking,
+      hasPendingUpdate,
+      currentVersionText,
+      updateVersionText,
+    },
+  });
 
   bindEvents();
-  restoreMainScrollIfSamePage(previousPageKey, previousScrollTop);
-}
-
-function renderSettingsPage(): string {
-  const migratingLegacyThirdParty = isPendingAction(migrateLegacyThirdPartyActionKey);
-  const writingThirdPartyWebsocketsDefaults = isPendingAction(
-    writeThirdPartyWebsocketsDefaultsActionKey,
-  );
-
-  return `
-    <section class="cards-page" data-page="settings">
-      <header class="content-header" data-tauri-drag-region>
-        <h2>全局设置</h2>
-      </header>
-
-      <div class="grid-container" style="max-width: 760px;">
-        <div class="card">
-          <div class="card-head">
-            <h3>企业共享库</h3>
-          </div>
-          <p class="card-note">从这里打开钉钉 SSO 登录页，登录完成后客户端会自动连接企业共享库。客户端只会拉取您有权限访问的配置。</p>
-          <div style="display:grid; gap: 14px; margin-top: 16px;">
-            <label class="field">
-              <span>共享库 API 地址</span>
-              <input
-                id="network-profiles-api"
-                type="url"
-                value="${escapeHtml(state.networkSharing.profilesApi)}"
-                placeholder="${escapeHtml(DEFAULT_NETWORK_PROFILES_API)}"
-              />
-            </label>
-            <label class="field">
-              <span>桌面访问令牌</span>
-              <input
-                id="network-profile-token"
-                type="password"
-                value="${escapeHtml(state.networkSharing.token)}"
-                placeholder="cas_..."
-                autocomplete="off"
-              />
-            </label>
-            ${renderNetworkAccountSettings()}
-            <div class="content-actions">
-              <button class="button button-primary" data-action="open-network-sso-login">
-                钉钉 SSO 登录
-              </button>
-              <a class="button button-secondary" href="${escapeHtml(networkPortalBaseUrl())}/profiles" target="_blank" rel="noreferrer">
-                打开共享库网页
-              </a>
-            </div>
-            <div class="content-actions">
-              <button class="button button-primary" data-action="save-network-sharing-settings">
-                保存共享库设置
-              </button>
-              <button class="button button-secondary" data-action="refresh-network-after-settings">
-                保存并刷新共享库
-              </button>
-            </div>
-          </div>
-        </div>
-        <div class="card">
-          <div class="card-head">
-            <h3>数据迁移</h3>
-          </div>
-          <p class="card-note">将旧版本的第三方 API 配置迁移到新的配置格式。如果您之前有使用旧版配置，建议执行此操作。</p>
-          <div class="content-actions" style="margin-top: 16px;">
-            <button
-              class="button button-secondary"
-              data-action="migrate-legacy-third-party"
-              ${state.busy || migratingLegacyThirdParty ? "disabled" : ""}
-            >
-              ${migratingLegacyThirdParty ? "迁移中..." : "迁移旧第三方配置"}
-            </button>
-            <button
-              class="button button-secondary"
-              data-action="write-third-party-websockets-defaults"
-              ${state.busy || writingThirdPartyWebsocketsDefaults ? "disabled" : ""}
-            >
-              ${writingThirdPartyWebsocketsDefaults ? "写入中..." : "写入第三方 WebSocket 默认值"}
-            </button>
-          </div>
-        </div>
-      </div>
-    </section>
-  `;
-}
-
-function getSessionsListHtml(): string {
-  // Filter sessions
-  let filtered = state.sessions;
-  if (state.sessionFilter === "active") {
-    filtered = filtered.filter(s => !s.archived);
-  } else if (state.sessionFilter === "archived") {
-    filtered = filtered.filter(s => s.archived);
-  }
-
-  // Search filter
-  const query = state.sessionSearchQuery.toLowerCase().trim();
-  if (query) {
-    filtered = filtered.filter(s =>
-      (s.title && s.title.toLowerCase().includes(query)) ||
-      s.id.toLowerCase().includes(query) ||
-      (s.cwd && s.cwd.toLowerCase().includes(query))
-    );
-  }
-
-  // Formatting helper for size
-  const formatSize = (bytes?: number | null) => {
-    if (bytes === undefined || bytes === null) return "未知大小";
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  };
-
-  const selectedSession = state.sessions.find(s => s.id === state.selectedSessionId);
-
-  // Rendering session list (left pane content)
-  let listHtml = "";
-  if (state.sessionsLoading) {
-    listHtml = `
-      <div class="sessions-empty-state" style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 40px 20px;">
-        <div class="busy-dialog-spinner" style="margin: 0 auto; width: 24px; height: 24px; border-width: 2px;"></div>
-        <span style="color: var(--text-muted); font-size: 0.85rem;">正在加载会话列表...</span>
-      </div>
-    `;
-  } else if (filtered.length === 0) {
-    listHtml = `<div class="sessions-empty-state">没有找到符合条件的会话</div>`;
-  } else if (state.sessionSortOrder === "cwd") {
-    // Group by CWD
-    const groups: Record<string, CodexSessionInfo[]> = {};
-    for (const s of filtered) {
-      const cwd = s.cwd || "未指定工作空间";
-      if (!groups[cwd]) groups[cwd] = [];
-      groups[cwd].push(s);
-    }
-
-    // Sort cwd keys by the most recent session's update time descending (pre-calculated for performance)
-    const cwdMaxTimes: Record<string, number> = {};
-    for (const cwd of Object.keys(groups)) {
-      cwdMaxTimes[cwd] = Math.max(...groups[cwd].map(s => s.updatedAtMs));
-    }
-    const sortedCwds = Object.keys(groups).sort((a, b) => {
-      return cwdMaxTimes[b] - cwdMaxTimes[a];
-    });
-    for (const cwd of sortedCwds) {
-      const folderSessions = groups[cwd];
-      // Sort sessions within cwd by updatedAtMs descending
-      folderSessions.sort((a, b) => b.updatedAtMs - a.updatedAtMs);
-
-      listHtml += `
-        <details class="workspace-group" open>
-          <summary class="workspace-header">
-            <svg class="icon-folder" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
-            <span class="workspace-title" title="${escapeHtml(cwd)}">${escapeHtml(cwd.split(/[/\\]/).pop() || cwd)}</span>
-            <span class="workspace-count">${folderSessions.length}</span>
-            <svg class="icon-chevron" viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><polyline points="6 9 12 15 18 9"></polyline></svg>
-          </summary>
-          <div class="workspace-sessions">
-            ${folderSessions.map(s => renderSessionItemHtml(s, selectedSession, formatSize)).join("")}
-          </div>
-        </details>
-      `;
-    }
-  } else {
-    // Sort by updatedAtMs descending
-    const sorted = [...filtered].sort((a, b) => b.updatedAtMs - a.updatedAtMs);
-    listHtml = `<div class="sessions-linear-list">${sorted.map(s => renderSessionItemHtml(s, selectedSession, formatSize)).join("")}</div>`;
-  }
-  return listHtml;
-}
-
-function getSessionDetailHtml(): string {
-  const selectedSession = state.sessions.find(s => s.id === state.selectedSessionId);
-
-  // Formatting helper for size
-  const formatSize = (bytes?: number | null) => {
-    if (bytes === undefined || bytes === null) return "未知大小";
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  };
-
-  let rightPaneHtml = "";
-  if (!selectedSession) {
-    rightPaneHtml = `
-      <div class="session-detail-empty">
-        <svg viewBox="0 0 24 24" width="48" height="48" stroke="currentColor" stroke-width="1.5" fill="none"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
-        <p>选择左侧的 Codex 会话以预览历史消息</p>
-      </div>
-    `;
-  } else {
-    rightPaneHtml = `
-      <div class="session-detail-active">
-        <header class="session-detail-header">
-          <div class="session-detail-title-row">
-            <h3 class="session-detail-title" title="${escapeHtml(selectedSession.title || selectedSession.id)}">
-              ${escapeHtml(selectedSession.title || "未命名会话")}
-            </h3>
-            <span class="session-detail-badge ${selectedSession.archived ? 'badge-archived' : 'badge-active'}">
-              ${selectedSession.archived ? '已归档' : '活跃'}
-            </span>
-          </div>
-          <div class="session-detail-meta-row">
-            <span class="meta-item">
-              <strong>路径:</strong> <code title="${escapeHtml(selectedSession.rolloutPath || '')}">${escapeHtml(selectedSession.rolloutPath || '无')}</code>
-            </span>
-            <span class="meta-item">
-              <strong>工作目录:</strong> <code title="${escapeHtml(selectedSession.cwd || '')}">${escapeHtml(selectedSession.cwd || '无')}</code>
-            </span>
-            <span class="meta-item">
-              <strong>大小:</strong> ${formatSize(selectedSession.fileSize)}
-            </span>
-            ${selectedSession.modelProvider ? `
-              <span class="meta-item">
-                <strong>提供商:</strong> <span class="pill pill-provider">${escapeHtml(selectedSession.modelProvider)}</span>
-              </span>
-            ` : ""}
-          </div>
-          <div class="session-detail-actions">
-            <button class="button button-secondary" data-action="rename-session" data-id="${selectedSession.id}">
-              <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M12 20h9M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>
-              重命名
-            </button>
-            <button class="button button-secondary" data-action="toggle-archive-session" data-id="${selectedSession.id}" data-archived="${selectedSession.archived}">
-              <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="9" y1="9" x2="15" y2="9"></line><line x1="9" y1="13" x2="15" y2="13"></line><line x1="9" y1="17" x2="15" y2="17"></line></svg>
-              ${selectedSession.archived ? '取消归档' : '归档会话'}
-            </button>
-            <button class="button button-secondary" data-action="export-session" data-id="${selectedSession.id}">
-              <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"></path></svg>
-              导出
-            </button>
-            <button class="button button-danger" data-action="delete-session" data-id="${selectedSession.id}">
-              <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
-              彻底删除
-            </button>
-          </div>
-        </header>
-        <div class="session-messages-container">
-          ${renderSessionMessages()}
-        </div>
-      </div>
-    `;
-  }
-  return rightPaneHtml;
+  restoreMainScrollIfSamePage({
+    appRoot: app,
+    previousPageKey,
+    previousScrollTop,
+    currentView: state.view,
+    requestAnimationFrame: window.requestAnimationFrame?.bind(window),
+  });
 }
 
 function refreshSessionsListView(): void {
   const listScroll = document.querySelector(".sessions-list-scroll");
   if (listScroll) {
-    listScroll.innerHTML = getSessionsListHtml();
+    listScroll.innerHTML = renderSessionsListHtml(selectSessionRenderState(state));
   }
 }
 
 function refreshSessionDetailPane(): void {
   const detailPane = document.querySelector(".sessions-detail-pane");
   if (detailPane) {
-    detailPane.innerHTML = getSessionDetailHtml();
+    detailPane.innerHTML = renderSessionDetailHtml(selectSessionRenderState(state));
   }
-}
-
-function renderSessionsPage(): string {
-  const listHtml = getSessionsListHtml();
-  const rightPaneHtml = getSessionDetailHtml();
-
-  return `
-    <div class="sessions-page-container">
-      <div class="sessions-sidebar-pane">
-        <div class="sessions-pane-header" data-tauri-drag-region style="display: flex; justify-content: space-between; align-items: center;">
-          <h2>Codex 会话管理</h2>
-          <button class="icon-button" data-action="nav-session-cleanup" title="清理旧会话" style="width: 28px; height: 28px; border-radius: 6px;">
-            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
-          </button>
-        </div>
-        <div class="sessions-pane-filters">
-          <div class="search-input-wrapper">
-            <svg class="search-icon" viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-            <input type="text" id="session-search" placeholder="搜索标题、工作空间..." value="${escapeHtml(state.sessionSearchQuery)}">
-            <span id="search-clear-container">
-              ${state.sessionSearchQuery ? `<button class="search-clear-btn" id="session-search-clear">×</button>` : ""}
-            </span>
-          </div>
-          <div class="filter-controls-row">
-            <div class="filter-group">
-              <button class="filter-tab ${state.sessionFilter === 'all' ? 'active' : ''}" data-filter="all">全部</button>
-              <button class="filter-tab ${state.sessionFilter === 'active' ? 'active' : ''}" data-filter="active">活跃</button>
-              <button class="filter-tab ${state.sessionFilter === 'archived' ? 'active' : ''}" data-filter="archived">已归档</button>
-            </div>
-            <div class="sort-group">
-              <button class="sort-btn ${state.sessionSortOrder === 'time' ? 'active' : ''}" data-sort="time" title="按时间排序">
-                <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
-              </button>
-              <button class="sort-btn ${state.sessionSortOrder === 'cwd' ? 'active' : ''}" data-sort="cwd" title="按工作空间分组">
-                <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
-              </button>
-            </div>
-          </div>
-        </div>
-        <div class="sessions-list-scroll">
-          ${listHtml}
-        </div>
-      </div>
-      <div class="sessions-detail-pane">
-        ${rightPaneHtml}
-      </div>
-    </div>
-  `;
-}
-
-function renderSessionItemHtml(
-  s: CodexSessionInfo,
-  selectedSession: CodexSessionInfo | undefined,
-  formatSize: (bytes?: number | null) => string
-): string {
-  const isSelected = selectedSession && selectedSession.id === s.id;
-
-  // High-performance custom formatting to bypass slow Intl/toLocaleString inside list renders
-  const date = new Date(s.updatedAtMs);
-  const month = date.getMonth() + 1;
-  const day = date.getDate();
-  const hours = date.getHours().toString().padStart(2, '0');
-  const minutes = date.getMinutes().toString().padStart(2, '0');
-  const timeStr = `${month}月${day}日 ${hours}:${minutes}`;
-
-  return `
-    <div class="session-item-card ${isSelected ? 'selected' : ''}" data-action="select-session" data-id="${s.id}">
-      <div class="session-card-header">
-        <span class="session-card-title" title="${escapeHtml(s.title || s.id)}">${escapeHtml(s.title || "未命名会话")}</span>
-        ${s.archived ? `<span class="session-card-archive-badge">已归档</span>` : ""}
-      </div>
-      <div class="session-card-details">
-        <span class="session-card-cwd" title="${escapeHtml(s.cwd || '')}">${escapeHtml(s.cwd ? (s.cwd.split(/[/\\]/).pop() || '') : '无目录')}</span>
-        <div class="session-card-meta">
-          <span>${timeStr}</span>
-          <span class="dot-separator">•</span>
-          <span>${formatSize(s.fileSize)}</span>
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-function renderSessionMessages(): string {
-  if (state.messagesLoading) {
-    return `
-      <div class="messages-loading-state" style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; height: 100%; min-height: 200px; padding: 40px 20px;">
-        <div class="busy-dialog-spinner" style="margin: 0 auto; width: 24px; height: 24px; border-width: 2px;"></div>
-        <span style="color: var(--text-muted); font-size: 0.85rem;">正在加载会话消息...</span>
-      </div>
-    `;
-  }
-
-  if (state.sessionMessages.length === 0) {
-    return `<div class="messages-empty">该会话暂无消息，或对话文件为空。</div>`;
-  }
-
-  return state.sessionMessages.map(msg => {
-    const isUser = msg.role === "user";
-    const bubbleClass = isUser ? "msg-user" : "msg-assistant";
-    const avatarChar = isUser ? "👤" : "🤖";
-    const displayName = isUser ? "User" : "Codex";
-
-    return `
-      <div class="message-bubble-wrapper ${bubbleClass}">
-        <div class="message-avatar">${avatarChar}</div>
-        <div class="message-content-box">
-          <div class="message-sender">${displayName}</div>
-          <div class="message-text">${formatMessageText(msg.text)}</div>
-        </div>
-      </div>
-    `;
-  }).join("");
-}
-
-function formatMessageText(text: string): string {
-  // Escape HTML first to prevent XSS
-  let escaped = escapeHtml(text);
-
-  // Replace code blocks: ```lang ... ```
-  escaped = escaped.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (_, lang, codeContent) => {
-    return `<pre class="code-block" data-lang="${lang || 'code'}"><code>${codeContent}</code></pre>`;
-  });
-
-  // Replace inline code: `code`
-  escaped = escaped.replace(/`([^`\n]+)`/g, '<code>$1</code>');
-
-  // Replace markdown links: [text](url)
-  escaped = escaped.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" class="chat-link">$1</a>');
-
-  // Replace paragraph newlines
-  escaped = escaped.split('\n').join('<br>');
-
-  return escaped;
-}
-
-function renderSessionCleanupPage(): string {
-  const ONE_MONTH_MS = 30 * 24 * 60 * 60 * 1000;
-  const now = Date.now();
-  const oneMonthAgo = now - ONE_MONTH_MS;
-
-  // Formatting helper for size
-  const formatSize = (bytes?: number | null) => {
-    if (bytes === undefined || bytes === null) return "未知大小";
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  };
-
-  // Group all sessions by CWD
-  const groups: Record<string, CodexSessionInfo[]> = {};
-  for (const s of state.sessions) {
-    const cwd = s.cwd || "未指定工作空间";
-    if (!groups[cwd]) groups[cwd] = [];
-    groups[cwd].push(s);
-  }
-
-  // 1. Projects with NO sessions updated in the last 30 days
-  interface InactiveProject {
-    cwd: string;
-    sessions: CodexSessionInfo[];
-    lastActiveTime: number;
-  }
-
-  const inactiveProjects: InactiveProject[] = [];
-  for (const [cwd, sessions] of Object.entries(groups)) {
-    // Find the latest update time in this group
-    const latestActive = Math.max(...sessions.map(s => s.updatedAtMs));
-    if (latestActive < oneMonthAgo) {
-      inactiveProjects.push({
-        cwd,
-        sessions,
-        lastActiveTime: latestActive
-      });
-    }
-  }
-
-  // Sort inactive projects by lastActiveTime descending (most recently inactive first)
-  inactiveProjects.sort((a, b) => b.lastActiveTime - a.lastActiveTime);
-
-  // 2. Individual sessions updated more than 30 days ago
-  const oldSessions = state.sessions
-    .filter(s => s.updatedAtMs < oneMonthAgo)
-    .sort((a, b) => b.updatedAtMs - a.updatedAtMs);
-
-  // Render inactive projects HTML
-  let projectsHtml = "";
-  if (inactiveProjects.length === 0) {
-    projectsHtml = `<div class="cleanup-empty-state">没有超过 1 个月未活跃的项目</div>`;
-  } else {
-    projectsHtml = `
-      <div class="cleanup-list">
-        ${inactiveProjects.map(p => {
-          const date = new Date(p.lastActiveTime);
-          const timeStr = `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`;
-          const totalSize = p.sessions.reduce((acc, s) => acc + (s.fileSize || 0), 0);
-          const idsJson = JSON.stringify(p.sessions.map(s => s.id));
-          return `
-            <div class="cleanup-project-card">
-              <div class="project-info">
-                <svg class="icon-folder" viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
-                <div class="project-details">
-                  <span class="project-path" title="${escapeHtml(p.cwd)}">${escapeHtml(p.cwd)}</span>
-                  <div class="project-meta">
-                    <span>最后活跃: ${timeStr}</span>
-                    <span class="dot-separator">•</span>
-                    <span>会话总数: ${p.sessions.length} 个</span>
-                    <span class="dot-separator">•</span>
-                    <span>总计占用: ${formatSize(totalSize)}</span>
-                  </div>
-                </div>
-              </div>
-              <button class="button button-danger btn-clean-project" data-cwd="${escapeHtml(p.cwd)}" data-ids='${escapeHtml(idsJson)}'>
-                清空项目会话
-              </button>
-            </div>
-          `;
-        }).join("")}
-      </div>
-    `;
-  }
-
-  // Render old sessions HTML
-  let sessionsHtml = "";
-  if (oldSessions.length === 0) {
-    sessionsHtml = `<div class="cleanup-empty-state">没有超过 1 个月的旧会话</div>`;
-  } else {
-    sessionsHtml = `
-      <div class="batch-action-bar">
-        <label class="checkbox-wrapper select-all-wrapper">
-          <input type="checkbox" id="cleanup-select-all">
-          <span>全选所有旧会话 (${oldSessions.length})</span>
-        </label>
-        <button class="button button-danger" id="cleanup-batch-delete-btn" disabled>
-          批量物理删除 (已选 <span id="cleanup-selected-count">0</span>)
-        </button>
-      </div>
-      <div class="cleanup-table-wrapper">
-        <table class="cleanup-table">
-          <thead>
-            <tr>
-              <th width="40"></th>
-              <th>会话标题</th>
-              <th>工作空间 (CWD)</th>
-              <th width="120">最后活跃</th>
-              <th width="100">大小</th>
-              <th width="80">操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${oldSessions.map(s => {
-              const date = new Date(s.updatedAtMs);
-              const timeStr = `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`;
-              return `
-                <tr class="cleanup-row" data-id="${s.id}">
-                  <td>
-                    <input type="checkbox" class="cleanup-item-checkbox" data-id="${s.id}">
-                  </td>
-                  <td class="cell-title" title="${escapeHtml(s.title || s.id)}">
-                    <strong>${escapeHtml(s.title || "未命名会话")}</strong>
-                    ${s.archived ? `<span class="session-card-archive-badge">已归档</span>` : ""}
-                  </td>
-                  <td class="cell-cwd" title="${escapeHtml(s.cwd || '')}">
-                    <code>${escapeHtml(s.cwd || '无')}</code>
-                  </td>
-                  <td>${timeStr}</td>
-                  <td>${formatSize(s.fileSize)}</td>
-                  <td>
-                    <button class="button button-danger btn-clean-single-session" data-id="${s.id}">删除</button>
-                  </td>
-                </tr>
-              `;
-            }).join("")}
-          </tbody>
-        </table>
-      </div>
-    `;
-  }
-
-  return `
-    <div class="cleanup-page-container">
-      <header class="cleanup-header">
-        <div style="display: flex; align-items: center; gap: 12px;">
-          <button class="icon-button" data-action="back-to-sessions" title="返回会话管理">
-            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
-          </button>
-          <h2>会话清理</h2>
-        </div>
-        <p class="cleanup-subtitle">清理长期未使用的会话，物理删除对话 rollout 文件，释放磁盘空间。</p>
-      </header>
-
-      <div class="cleanup-sections-wrapper">
-        <div class="cleanup-section">
-          <div class="cleanup-section-header">
-            <h3>超过 1 个月没有任何会话产生的工作空间项目 (${inactiveProjects.length})</h3>
-            <span class="section-desc">这些项目的开发工作可能已经结束，可以安全清理。</span>
-          </div>
-          ${projectsHtml}
-        </div>
-
-        <div class="cleanup-section">
-          <div class="cleanup-section-header">
-            <h3>所有项目中早于 1 个月的旧会话 (${oldSessions.length})</h3>
-            <span class="section-desc">清理时间久远的聊天记录，保留近期活动。</span>
-          </div>
-          ${sessionsHtml}
-        </div>
-      </div>
-    </div>
-  `;
 }
 
 async function fetchCodexSessions(): Promise<void> {
   if (!isTauriRuntime) {
-    state.sessions = [
-      {
-        id: "session-1",
-        rolloutPath: "/Users/example/.codex/sessions/2026/05/21/rollout-1.jsonl",
-        updatedAtMs: Date.now() - 1000 * 60 * 10,
-        cwd: "/Volumes/Acer/Dev/codex_auth_switch",
-        title: "新增会话管理功能讨论",
-        hasUserEvent: true,
-        archived: false,
-        modelProvider: "openai",
-        fileSize: 12048,
-      },
-      {
-        id: "session-2",
-        rolloutPath: "/Users/example/.codex/sessions/2026/05/20/rollout-2.jsonl",
-        updatedAtMs: Date.now() - 1000 * 60 * 60 * 25,
-        cwd: "/Volumes/Acer/Dev/another_project",
-        title: "修复 Tailwind 样式错误",
-        hasUserEvent: true,
-        archived: false,
-        modelProvider: "anthropic",
-        fileSize: 4567,
-      },
-      {
-        id: "session-3",
-        rolloutPath: "/Users/example/.codex/archived_sessions/rollout-3.jsonl",
-        updatedAtMs: Date.now() - 1000 * 60 * 60 * 24 * 5,
-        cwd: "/Volumes/Acer/Dev/codex_auth_switch",
-        title: "旧的登录逻辑重构",
-        hasUserEvent: true,
-        archived: true,
-        modelProvider: "openai",
-        fileSize: 85930,
-      }
-    ];
+    state.sessions = createPreviewCodexSessions(Date.now());
     state.selectedSessionId = null;
     state.sessionMessages = [];
     render();
@@ -5066,10 +1761,7 @@ async function fetchCodexSessions(): Promise<void> {
 async function fetchCodexSessionMessages(threadId: string): Promise<void> {
   if (!isTauriRuntime) {
     state.selectedSessionId = threadId;
-    state.sessionMessages = [
-      { role: "user", text: "我想给 app新增一个功能，就是 codex 会话管理，有什么建议没有" },
-      { role: "assistant", text: "这是一个非常好的想法！Codex 的会话非常多，如果能提供会话列表、归档和物理删除功能，对管理磁盘空间 and 历史记录非常有帮助。以下是我的建议：\n\n1. 双栏布局：左侧是会话列表，可以按更新时间或工作空间目录分组；右侧是消息预览。\n2. 重命名：可以调用 SQLite 和 `session_index.jsonl` 同步更新会话标题。\n3. 归档与删除：归档移动到 `archived_sessions/` 目录，删除则物理删除 rollout 文件并从 SQLite 中删除。" },
-    ];
+    state.sessionMessages = createPreviewCodexSessionMessages();
     refreshSessionDetailPane();
     return;
   }
@@ -5245,30 +1937,6 @@ async function batchDeleteSessions(sessionIds: string[]): Promise<void> {
   }
 }
 
-function exportCodexSessionToMarkdown(session: CodexSessionInfo, messages: CodexMessage[]) {
-  let md = `# Codex Session: ${session.title || "Untitled Session"}\n`;
-  md += `- **Session ID**: \`${session.id}\`\n`;
-  md += `- **Directory**: \`${session.cwd || "N/A"}\`\n`;
-  md += `- **Date**: ${new Date(session.updatedAtMs).toLocaleString()}\n`;
-  md += `- **Model Provider**: \`${session.modelProvider || "unknown"}\`\n\n`;
-  md += `---\n\n`;
-
-  for (const msg of messages) {
-    const roleName = msg.role === "user" ? "User" : "Codex";
-    md += `### 👤 ${roleName}\n\n${msg.text}\n\n`;
-  }
-
-  const blob = new Blob([md], { type: "text/markdown;charset=utf-8;" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.setAttribute("href", url);
-  link.setAttribute("download", `codex-session-${session.id}.md`);
-  link.style.visibility = "hidden";
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-}
-
 function bindEvents(): void {
   const editorNameInput = document.querySelector<HTMLInputElement>("#editor-name");
   editorNameInput?.addEventListener("input", (event) => {
@@ -5319,27 +1987,23 @@ function bindEvents(): void {
     state.networkAuthRequired = !value.trim();
     state.networkUser = null;
   });
-  document
-    .querySelector<HTMLSelectElement>("#share-profile-select")
-    ?.addEventListener("change", (event) => {
-      state.shareDraft.profileId = (event.currentTarget as HTMLSelectElement).value;
-    });
   document.querySelectorAll<HTMLInputElement>('input[name="share-visibility"]').forEach((input) => {
     input.addEventListener("change", (event) => {
       state.shareDraft.visibility = (event.currentTarget as HTMLInputElement).value as ShareVisibility;
+      normalizeSelectedShareTargets();
       render();
     });
   });
   document.querySelectorAll<HTMLInputElement>(".share-user-checkbox").forEach((input) => {
     input.addEventListener("change", (event) => {
       const checkbox = event.currentTarget as HTMLInputElement;
-      const current = new Set(state.shareDraft.selectedUserIds);
+      const selectedUserIds = new Set(state.shareDraft.selectedUserIds);
       if (checkbox.checked) {
-        current.add(checkbox.value);
+        selectedUserIds.add(checkbox.value);
       } else {
-        current.delete(checkbox.value);
+        selectedUserIds.delete(checkbox.value);
       }
-      state.shareDraft.selectedUserIds = Array.from(current);
+      state.shareDraft.selectedUserIds = normalizeShareTargets(Array.from(selectedUserIds));
       render();
     });
   });
@@ -5348,15 +2012,15 @@ function bindEvents(): void {
       const draft = state.sharedProfileEditDraft;
       if (!draft) return;
       const checkbox = event.currentTarget as HTMLInputElement;
-      const current = new Set(draft.selectedUserIds);
+      const selectedUserIds = new Set(draft.selectedUserIds);
       if (checkbox.checked) {
-        current.add(checkbox.value);
+        selectedUserIds.add(checkbox.value);
       } else {
-        current.delete(checkbox.value);
+        selectedUserIds.delete(checkbox.value);
       }
       state.sharedProfileEditDraft = {
         ...draft,
-        selectedUserIds: Array.from(current),
+        selectedUserIds: normalizeShareTargets(Array.from(selectedUserIds)),
       };
       render();
     });
@@ -5369,7 +2033,7 @@ function bindEvents(): void {
       state.sharedProfileEditDraft = {
         ...draft,
         visibility,
-        selectedUserIds: visibility === "selected" ? draft.selectedUserIds : [],
+        selectedUserIds: visibility === "selected" ? normalizeShareTargets(draft.selectedUserIds) : [],
       };
       render();
     });
@@ -5380,7 +2044,10 @@ function bindEvents(): void {
       const value = (event.currentTarget as HTMLInputElement).value as NewProfileTemplate;
       state.editor.thirdParty.template = value;
       if (value === "symbioticThirdParty") {
-        state.editor.thirdParty.oauthProfileId = resolveSymbioticOauthProfileId();
+        state.editor.thirdParty.oauthProfileId = resolveOfficialOauthProfileId(
+          state.snapshot,
+          state.editor.thirdParty.oauthProfileId,
+        );
       }
       render();
     });
@@ -5445,6 +2112,16 @@ function bindEvents(): void {
         await loadSharingCenterData();
       } else if (action === "refresh-sharing-center") {
         await loadSharingCenterData();
+      } else if (action === "select-share-profile-tab") {
+        if (button.dataset.profileId) {
+          state.shareDraft.profileId = button.dataset.profileId;
+        }
+        if (button.dataset.ownedId) {
+          beginEditSharedProfile(button.dataset.ownedId);
+        } else {
+          state.sharedProfileEditDraft = null;
+          render();
+        }
       } else if (action === "share-local-profile") {
         await shareLocalProfileToNetwork();
       } else if (action === "sharing-tab-own") {

@@ -1,11 +1,6 @@
-pub mod antigravity;
 pub mod core;
 pub mod menu_bar;
 
-use crate::antigravity::manager::AntigravityManager;
-use crate::antigravity::models::{
-    AntigravityProfileSummary, AntigravitySnapshot, AntigravitySwitchResult,
-};
 use crate::core::{
     check_for_update, check_install_location as resolve_install_location,
     install_update as perform_install_update, restart_codex_app, AppSnapshot,
@@ -29,14 +24,6 @@ fn manager_from_app(app: &AppHandle) -> Result<ProfileManager, String> {
         .app_data_dir()
         .map_err(|error| error.to_string())?;
     ProfileManager::load_or_default(app_data_dir).map_err(|error| error.to_string())
-}
-
-fn antigravity_manager_from_app(app: &AppHandle) -> Result<AntigravityManager, String> {
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| error.to_string())?;
-    AntigravityManager::load_or_default(app_data_dir).map_err(|error| error.to_string())
 }
 
 async fn run_blocking_manager_task<T, F>(app: AppHandle, task: F) -> Result<T, String>
@@ -74,50 +61,6 @@ fn list_model_providers(app: AppHandle) -> Result<Vec<ModelProviderSummary>, Str
                 .map(ModelProviderSummary::from)
                 .collect()
         })
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-fn load_antigravity_snapshot(app: AppHandle) -> Result<AntigravitySnapshot, String> {
-    antigravity_manager_from_app(&app)?
-        .snapshot()
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-fn import_current_antigravity_profile(
-    app: AppHandle,
-    name: String,
-    notes: String,
-) -> Result<AntigravityProfileSummary, String> {
-    antigravity_manager_from_app(&app)?
-        .import_current_profile(name, notes)
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-fn switch_antigravity_profile(
-    app: AppHandle,
-    profile_id: String,
-) -> Result<AntigravitySwitchResult, String> {
-    let mut manager = antigravity_manager_from_app(&app)?;
-    manager
-        .switch_profile(&profile_id)
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-fn restore_last_antigravity_backup(app: AppHandle) -> Result<AntigravitySwitchResult, String> {
-    let mut manager = antigravity_manager_from_app(&app)?;
-    manager
-        .restore_latest_backup()
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-fn reveal_antigravity_source(app: AppHandle) -> Result<(), String> {
-    antigravity_manager_from_app(&app)?
-        .reveal_source_dir()
         .map_err(|error| error.to_string())
 }
 
@@ -515,11 +458,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             load_snapshot,
             list_model_providers,
-            load_antigravity_snapshot,
-            import_current_antigravity_profile,
-            switch_antigravity_profile,
-            restore_last_antigravity_backup,
-            reveal_antigravity_source,
             import_profile,
             import_from_target_dir,
             get_target_profile_input,
