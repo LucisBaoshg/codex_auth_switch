@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Codex 助手",
+  "productName": "Codex Auth Switch",
   "identifier": "com.lucifer.codex-auth-switch",
   "build": {
     "beforeDevCommand": "npm run dev",
