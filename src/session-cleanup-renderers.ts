@@ -7,26 +7,42 @@ import {
   type CodexSessionInfo,
 } from "./session-utils";
 
+export type CleanupFilter = "7d" | "30d";
+
 export type SessionCleanupRenderState = {
   sessions: CodexSessionInfo[];
   nowMs: number;
+  cleanupFilter?: CleanupFilter;
 };
 
 export function renderSessionCleanupPage(state: SessionCleanupRenderState): string {
-  const cleanupCutoffMs = state.nowMs - SESSION_CLEANUP_WINDOW_MS;
+  const filter = state.cleanupFilter || "30d";
+  const windowMs = filter === "7d" ? 7 * 24 * 60 * 60 * 1000 : 30 * 24 * 60 * 60 * 1000;
+  const cleanupCutoffMs = state.nowMs - windowMs;
   const inactiveProjects = getInactiveSessionProjects(state.sessions, cleanupCutoffMs);
   const oldSessions = getOldSessions(state.sessions, cleanupCutoffMs);
-  const projectsHtml = renderInactiveProjects(inactiveProjects);
-  const sessionsHtml = renderOldSessions(oldSessions);
+  const timeLabel = filter === "7d" ? "7 天" : "1 个月";
+  const projectsHtml = renderInactiveProjects(inactiveProjects, filter);
+  const sessionsHtml = renderOldSessions(oldSessions, filter);
 
   return `
     <div class="cleanup-page-container">
       <header class="cleanup-header">
-        <div style="display: flex; align-items: center; gap: 12px;">
-          <button class="icon-button" data-action="back-to-sessions" title="返回会话管理">
-            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
-          </button>
-          <h2>会话清理</h2>
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
+          <div style="display: flex; align-items: center; gap: 12px;">
+            <button class="icon-button" data-action="back-to-sessions" title="返回会话管理">
+              <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+            </button>
+            <h2>会话清理</h2>
+          </div>
+          <div class="editor-template-tabs" style="margin-bottom: 0;">
+            <button class="tab-btn ${filter === "7d" ? "active" : ""}" data-action="set-cleanup-filter" data-filter="7d">
+              近 7 天
+            </button>
+            <button class="tab-btn ${filter === "30d" ? "active" : ""}" data-action="set-cleanup-filter" data-filter="30d">
+              超过 1 个月
+            </button>
+          </div>
         </div>
         <p class="cleanup-subtitle">清理长期未使用的会话，物理删除对话 rollout 文件，释放磁盘空间。</p>
       </header>
@@ -34,7 +50,7 @@ export function renderSessionCleanupPage(state: SessionCleanupRenderState): stri
       <div class="cleanup-sections-wrapper">
         <div class="cleanup-section">
           <div class="cleanup-section-header">
-            <h3>超过 1 个月没有任何会话产生的工作空间项目 (${inactiveProjects.length})</h3>
+            <h3>超过 ${timeLabel}没有任何会话产生的工作空间项目 (${inactiveProjects.length})</h3>
             <span class="section-desc">这些项目的开发工作可能已经结束，可以安全清理。</span>
           </div>
           ${projectsHtml}
@@ -42,7 +58,7 @@ export function renderSessionCleanupPage(state: SessionCleanupRenderState): stri
 
         <div class="cleanup-section">
           <div class="cleanup-section-header">
-            <h3>所有项目中早于 1 个月的旧会话 (${oldSessions.length})</h3>
+            <h3>所有项目中早于 ${timeLabel}的旧会话 (${oldSessions.length})</h3>
             <span class="section-desc">清理时间久远的聊天记录，保留近期活动。</span>
           </div>
           ${sessionsHtml}
@@ -54,9 +70,11 @@ export function renderSessionCleanupPage(state: SessionCleanupRenderState): stri
 
 function renderInactiveProjects(
   inactiveProjects: ReturnType<typeof getInactiveSessionProjects<CodexSessionInfo>>,
+  filter: CleanupFilter,
 ): string {
+  const timeLabel = filter === "7d" ? "7 天" : "1 个月";
   if (inactiveProjects.length === 0) {
-    return `<div class="cleanup-empty-state">没有超过 1 个月未活跃的项目</div>`;
+    return `<div class="cleanup-empty-state">没有超过 ${timeLabel}未活跃的项目</div>`;
   }
 
   return `
@@ -93,9 +111,10 @@ function renderInactiveProjects(
   `;
 }
 
-function renderOldSessions(oldSessions: CodexSessionInfo[]): string {
+function renderOldSessions(oldSessions: CodexSessionInfo[], filter: CleanupFilter): string {
+  const timeLabel = filter === "7d" ? "7 天" : "1 个月";
   if (oldSessions.length === 0) {
-    return `<div class="cleanup-empty-state">没有超过 1 个月的旧会话</div>`;
+    return `<div class="cleanup-empty-state">没有超过 ${timeLabel}的旧会话</div>`;
   }
 
   return `

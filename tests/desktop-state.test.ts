@@ -98,6 +98,7 @@ test("selects session render state from desktop state", async () => {
     sessionSortOrder: "cwd",
     sessionsLoading: true,
     messagesLoading: true,
+    showAllMessages: false,
   });
 });
 

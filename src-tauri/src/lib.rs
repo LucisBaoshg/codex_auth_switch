@@ -3,10 +3,11 @@ pub mod menu_bar;
 
 use crate::core::{
     check_for_update, check_install_location as resolve_install_location,
-    install_update as perform_install_update, restart_codex_app, AppSnapshot,
-    CodexMessage, CodexSessionInfo, InstallLocationStatus, LegacyThirdPartyMigrationResult,
-    ModelProviderSummary, ProfileDocument, ProfileInput, ProfileManager, SessionRecoveryReport,
-    SessionRepairResult, ThirdPartyWebsocketsDefaultResult, UpdateCheckResult, UpdateInstallRequest,
+    install_update as perform_install_update, restart_codex_app, AppSnapshot, CodexMessage,
+    CodexSessionInfo, CodexUsageStatsFilter, CodexUsageStatsSnapshot, InstallLocationStatus,
+    LegacyThirdPartyMigrationResult, ModelProviderSummary, ProfileDocument, ProfileInput,
+    ProfileManager, SessionRecoveryReport, SessionRepairResult, ThirdPartyWebsocketsDefaultResult,
+    UpdateCheckResult, UpdateInstallRequest,
 };
 use crate::menu_bar::{
     install_menu_bar, menu_bar_refresh_target, sync_menu_bar_usage, MenuBarRefreshKind,
@@ -363,6 +364,19 @@ async fn list_codex_sessions(app: AppHandle) -> Result<Vec<CodexSessionInfo>, St
 }
 
 #[tauri::command]
+async fn refresh_codex_usage_stats(
+    app: AppHandle,
+    filter: Option<CodexUsageStatsFilter>,
+) -> Result<CodexUsageStatsSnapshot, String> {
+    run_blocking_manager_task(app, move |manager| {
+        manager
+            .refresh_codex_usage_stats_with_filter(filter.unwrap_or_default())
+            .map_err(|error| error.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
 async fn get_codex_session_messages(
     app: AppHandle,
     thread_id: String,
@@ -483,6 +497,7 @@ pub fn run() {
             install_update,
             check_install_location,
             list_codex_sessions,
+            refresh_codex_usage_stats,
             get_codex_session_messages,
             archive_codex_session,
             delete_codex_session,

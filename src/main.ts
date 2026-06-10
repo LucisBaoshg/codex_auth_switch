@@ -98,6 +98,8 @@ import {
 import { createPreviewAppSnapshot } from "./app-preview-data";
 import type {
   AppSnapshot,
+  CodexUsageStatsFilter,
+  CodexUsageStatsSnapshot,
   InstallLocationStatus,
   LegacyThirdPartyMigrationResult,
   ProfileDocument,
@@ -120,7 +122,8 @@ import {
   renderSessionsListHtml,
   renderSessionsPage,
 } from "./session-renderers";
-import { renderSessionCleanupPage } from "./session-cleanup-renderers";
+import { renderSessionCleanupPage, type CleanupFilter } from "./session-cleanup-renderers";
+import { renderCodexUsageStatsPage } from "./usage-stats-renderers";
 import {
   renderEnterpriseLibraryTab,
   renderOwnSharingTab,
@@ -312,6 +315,217 @@ async function refreshSnapshot(): Promise<void> {
     setFlash("error", error instanceof Error ? error.message : String(error));
   } finally {
     state.busy = false;
+    render();
+  }
+}
+
+function createPreviewCodexUsageStats(): CodexUsageStatsSnapshot {
+  const updatedAt = new Date().toISOString();
+  return {
+    updatedAt,
+    filter: state.usageStatsFilter,
+    sync: {
+      imported: 3,
+      skipped: 2,
+      filesScanned: 4,
+      errors: [],
+    },
+    summary: {
+      totalRequests: 18,
+      totalCostUsd: "0.387250",
+      totalInputTokens: 48230,
+      totalOutputTokens: 12680,
+      totalCacheReadTokens: 39200,
+      totalCacheCreationTokens: 0,
+      totalReasoningOutputTokens: 5860,
+      realTotalTokens: 100110,
+      cacheHitRate: 39200 / (48230 + 39200),
+    },
+    trends: [
+      {
+        date: "2026-06-06",
+        requestCount: 5,
+        totalCostUsd: "0.082100",
+        totalInputTokens: 12600,
+        totalOutputTokens: 2800,
+        totalCacheReadTokens: 9200,
+        totalCacheCreationTokens: 0,
+        totalReasoningOutputTokens: 920,
+        realTotalTokens: 24600,
+      },
+      {
+        date: "2026-06-07",
+        requestCount: 7,
+        totalCostUsd: "0.163900",
+        totalInputTokens: 18600,
+        totalOutputTokens: 5200,
+        totalCacheReadTokens: 15400,
+        totalCacheCreationTokens: 0,
+        totalReasoningOutputTokens: 2380,
+        realTotalTokens: 39200,
+      },
+      {
+        date: "2026-06-08",
+        requestCount: 6,
+        totalCostUsd: "0.141250",
+        totalInputTokens: 17030,
+        totalOutputTokens: 4680,
+        totalCacheReadTokens: 14600,
+        totalCacheCreationTokens: 0,
+        totalReasoningOutputTokens: 2560,
+        realTotalTokens: 36310,
+      },
+    ],
+    modelBreakdown: [
+      {
+        name: "gpt-5.4",
+        requestCount: 12,
+        totalCostUsd: "0.301300",
+        totalInputTokens: 34200,
+        totalOutputTokens: 9820,
+        totalCacheReadTokens: 28800,
+        totalCacheCreationTokens: 0,
+        totalReasoningOutputTokens: 4720,
+        realTotalTokens: 72820,
+      },
+      {
+        name: "gpt-5.4-mini",
+        requestCount: 6,
+        totalCostUsd: "0.085950",
+        totalInputTokens: 14030,
+        totalOutputTokens: 2860,
+        totalCacheReadTokens: 10400,
+        totalCacheCreationTokens: 0,
+        totalReasoningOutputTokens: 1140,
+        realTotalTokens: 27290,
+      },
+    ],
+    effortBreakdown: [
+      {
+        name: "high",
+        requestCount: 9,
+        totalCostUsd: "0.268400",
+        totalInputTokens: 27600,
+        totalOutputTokens: 8360,
+        totalCacheReadTokens: 21400,
+        totalCacheCreationTokens: 0,
+        totalReasoningOutputTokens: 4620,
+        realTotalTokens: 57360,
+      },
+      {
+        name: "medium",
+        requestCount: 9,
+        totalCostUsd: "0.118850",
+        totalInputTokens: 20630,
+        totalOutputTokens: 4320,
+        totalCacheReadTokens: 17800,
+        totalCacheCreationTokens: 0,
+        totalReasoningOutputTokens: 1240,
+        realTotalTokens: 42750,
+      },
+    ],
+    availableModels: ["gpt-5.4", "gpt-5.4-mini"],
+    availableEfforts: ["high", "medium"],
+    logs: [
+      {
+        requestId: "codex_session:preview-a:3",
+        sessionId: "preview-a",
+        model: "gpt-5.4",
+        provider: "openai",
+        effort: "high",
+        createdAt: updatedAt,
+        inputTokens: 2250,
+        outputTokens: 760,
+        cacheReadTokens: 1800,
+        cacheCreationTokens: 0,
+        reasoningOutputTokens: 420,
+        totalCostUsd: "0.017475",
+        sourcePath: "/Users/example/.codex/sessions/2026/06/08/rollout-preview-a.jsonl",
+      },
+      {
+        requestId: "codex_session:preview-b:2",
+        sessionId: "preview-b",
+        model: "gpt-5.4-mini",
+        provider: "openai",
+        effort: "medium",
+        createdAt: "2026-06-08T08:12:00Z",
+        inputTokens: 1680,
+        outputTokens: 520,
+        cacheReadTokens: 980,
+        cacheCreationTokens: 0,
+        reasoningOutputTokens: 180,
+        totalCostUsd: "0.004335",
+        sourcePath: "/Users/example/.codex/sessions/2026/06/08/rollout-preview-b.jsonl",
+      },
+    ],
+  };
+}
+
+function usageFilterPayload(): { filter: CodexUsageStatsFilter } {
+  return {
+    filter: {
+      startDate: state.usageStatsFilter.startDate || null,
+      endDate: state.usageStatsFilter.endDate || null,
+      model: state.usageStatsFilter.model || null,
+      effort: state.usageStatsFilter.effort || null,
+    },
+  };
+}
+
+function usageDateDaysAgo(days: number): string {
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+function setUsageStatsRange(range: string): void {
+  if (range === "7d") {
+    state.usageStatsFilter.startDate = usageDateDaysAgo(6);
+    state.usageStatsFilter.endDate = new Date().toISOString().slice(0, 10);
+    return;
+  }
+  if (range === "30d") {
+    state.usageStatsFilter.startDate = usageDateDaysAgo(29);
+    state.usageStatsFilter.endDate = new Date().toISOString().slice(0, 10);
+    return;
+  }
+  if (range === "all") {
+    state.usageStatsFilter.startDate = null;
+    state.usageStatsFilter.endDate = null;
+  }
+}
+
+async function applyUsageStatsFilter(): Promise<void> {
+  state.usageStats = null;
+  await loadUsageStats();
+}
+
+async function loadUsageStats(options: { showSuccess?: boolean } = {}): Promise<void> {
+  state.usageStatsLoading = true;
+  state.usageStatsError = null;
+  render();
+  try {
+    if (!isTauriRuntime) {
+      state.usageStats = createPreviewCodexUsageStats();
+      if (options.showSuccess) {
+        setFlash("info", "当前是浏览器预览模式，展示的是模拟使用统计。");
+      }
+      return;
+    }
+
+    state.usageStats = await desktopInvoke<CodexUsageStatsSnapshot>(
+      "refresh_codex_usage_stats",
+      usageFilterPayload(),
+    );
+    if (options.showSuccess) {
+      const imported = state.usageStats.sync.imported.toLocaleString("en-US");
+      const skipped = state.usageStats.sync.skipped.toLocaleString("en-US");
+      setFlash("success", `使用统计已刷新：新增 ${imported} 条，跳过 ${skipped} 条。`);
+    }
+  } catch (error) {
+    const message = formatErrorMessage(error);
+    state.usageStatsError = message;
+    setFlash("error", message);
+  } finally {
+    state.usageStatsLoading = false;
     render();
   }
 }
@@ -1662,6 +1876,15 @@ function render(): void {
     content = renderSessionCleanupPage({
       sessions: state.sessions,
       nowMs: Date.now(),
+      cleanupFilter: state.cleanupFilter,
+    });
+  } else if (state.view === "usage-stats") {
+    content = renderCodexUsageStatsPage({
+      loading: state.usageStatsLoading,
+      error: state.usageStatsError,
+      stats: state.usageStats,
+      filter: state.usageStatsFilter,
+      activeTab: state.usageStatsActiveTab,
     });
   } else {
     content = renderEditorPage({
@@ -1762,11 +1985,13 @@ async function fetchCodexSessionMessages(threadId: string): Promise<void> {
   if (!isTauriRuntime) {
     state.selectedSessionId = threadId;
     state.sessionMessages = createPreviewCodexSessionMessages();
+    state.showAllMessages = false;
     refreshSessionDetailPane();
     return;
   }
 
   state.messagesLoading = true;
+  state.showAllMessages = false;
   refreshSessionDetailPane();
   try {
     const messages = await desktopInvoke<CodexMessage[]>("get_codex_session_messages", { threadId });
@@ -1967,6 +2192,36 @@ function bindEvents(): void {
     state.editor.configToml = (event.currentTarget as HTMLTextAreaElement).value;
   });
 
+  document
+    .querySelector<HTMLInputElement>('[data-action="set-usage-start-date"]')
+    ?.addEventListener("change", async (event) => {
+      state.usageStatsFilter.startDate = (event.currentTarget as HTMLInputElement).value || null;
+      await applyUsageStatsFilter();
+    });
+
+  document
+    .querySelector<HTMLInputElement>('[data-action="set-usage-end-date"]')
+    ?.addEventListener("change", async (event) => {
+      state.usageStatsFilter.endDate = (event.currentTarget as HTMLInputElement).value || null;
+      await applyUsageStatsFilter();
+    });
+
+  document
+    .querySelector<HTMLSelectElement>('[data-action="set-usage-model"]')
+    ?.addEventListener("change", async (event) => {
+      const value = (event.currentTarget as HTMLSelectElement).value;
+      state.usageStatsFilter.model = value === "all" ? null : value;
+      await applyUsageStatsFilter();
+    });
+
+  document
+    .querySelector<HTMLSelectElement>('[data-action="set-usage-effort"]')
+    ?.addEventListener("change", async (event) => {
+      const value = (event.currentTarget as HTMLSelectElement).value;
+      state.usageStatsFilter.effort = value === "all" ? null : value;
+      await applyUsageStatsFilter();
+    });
+
   bindInputValue("#third-party-base-url", (value) => {
     state.editor.thirdParty.baseUrl = value;
   });
@@ -2150,6 +2405,22 @@ function bindEvents(): void {
           render();
           await fetchCodexSessions();
         }
+      } else if (action === "nav-usage-stats") {
+        if (state.view !== "usage-stats") {
+          state.view = "usage-stats";
+          render();
+        }
+        if (!state.usageStats && !state.usageStatsLoading) {
+          await loadUsageStats();
+        }
+      } else if (action === "refresh-usage-stats") {
+        await loadUsageStats({ showSuccess: true });
+      } else if (action === "set-usage-range" && button.dataset.range) {
+        setUsageStatsRange(button.dataset.range);
+        await applyUsageStatsFilter();
+      } else if (action === "set-usage-tab" && button.dataset.tab) {
+        state.usageStatsActiveTab = button.dataset.tab as any;
+        render();
       } else if (action === "nav-session-cleanup") {
         if (state.view !== "session-cleanup") {
           state.view = "session-cleanup";
@@ -2283,6 +2554,38 @@ function bindEvents(): void {
     sessionsContainer.addEventListener("click", async (event) => {
       const target = event.target as HTMLElement;
 
+      // Load all messages
+      const loadAllBtn = target.closest<HTMLButtonElement>("[data-action=\"load-all-messages\"]");
+      if (loadAllBtn) {
+        state.showAllMessages = true;
+        refreshSessionDetailPane();
+        return;
+      }
+
+      // Toggle message collapse
+      const toggleCollapseBtn = target.closest<HTMLButtonElement>("[data-action=\"toggle-message-collapse\"]");
+      if (toggleCollapseBtn) {
+        const collapsible = toggleCollapseBtn.closest(".collapsible-message") as HTMLDivElement;
+        if (collapsible) {
+          const preview = collapsible.querySelector(".collapsible-preview") as HTMLDivElement;
+          const full = collapsible.querySelector(".collapsible-full") as HTMLDivElement;
+          const isCollapsed = collapsible.dataset.collapsed === "true";
+          if (isCollapsed) {
+            collapsible.dataset.collapsed = "false";
+            preview.style.display = "none";
+            full.style.display = "block";
+            toggleCollapseBtn.innerHTML = "收起 ▴";
+          } else {
+            collapsible.dataset.collapsed = "true";
+            preview.style.display = "block";
+            full.style.display = "none";
+            const length = collapsible.dataset.length || "";
+            toggleCollapseBtn.innerHTML = `展开全部 (${length} 字) ▾`;
+          }
+        }
+        return;
+      }
+
       // Card selection
       const card = target.closest<HTMLDivElement>(".session-item-card");
       if (card) {
@@ -2405,6 +2708,16 @@ function bindEvents(): void {
   }
 
   // --- Session Cleanup Page Event Listeners ---
+  document.querySelectorAll<HTMLButtonElement>('[data-action="set-cleanup-filter"]').forEach(btn => {
+    btn.addEventListener("click", () => {
+      const filter = btn.dataset.filter as CleanupFilter;
+      if (filter && state.cleanupFilter !== filter) {
+        state.cleanupFilter = filter;
+        render();
+      }
+    });
+  });
+
   document.querySelectorAll<HTMLButtonElement>(".btn-clean-project").forEach(btn => {
     btn.addEventListener("click", async () => {
       const cwd = btn.dataset.cwd;

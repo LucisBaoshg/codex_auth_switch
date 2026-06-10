@@ -2321,3 +2321,134 @@ fn restart_codex_has_cross_platform_process_plan() {
     assert_eq!(linux.quit_command.program, "sh");
     assert_eq!(linux.open_command.program, "sh");
 }
+
+#[test]
+fn test_get_codex_session_messages_parsing() {
+    let (_app_dir, target_dir, manager) = temp_manager();
+
+    let rollout_path = target_dir.path().join("sessions").join("2026").join("test_thread.jsonl");
+    fs::create_dir_all(rollout_path.parent().unwrap()).unwrap();
+
+    // Write different session event payload formats
+    let events = vec![
+        // 1. message event (nested developer role)
+        json!({
+            "timestamp": "2026-06-10T05:26:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "developer",
+                "content": [{"type": "input_text", "text": "system context text"}]
+            }
+        }),
+        // 2. user_message event
+        json!({
+            "timestamp": "2026-06-10T05:26:01.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "user_message",
+                "message": "hello agent"
+            }
+        }),
+        // 3. reasoning event
+        json!({
+            "timestamp": "2026-06-10T05:26:02.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "planning the changes"}],
+                "encrypted_content": "xyz"
+            }
+        }),
+        // 4. agent_message event
+        json!({
+            "timestamp": "2026-06-10T05:26:03.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "agent_message",
+                "message": "im working on it"
+            }
+        }),
+        // 5. function_call event
+        json!({
+            "timestamp": "2026-06-10T05:26:04.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "read_file",
+                "arguments": "{\"path\":\"foo.txt\"}"
+            }
+        }),
+        // 6. function_call_output event
+        json!({
+            "timestamp": "2026-06-10T05:26:05.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "output": "file content here"
+            }
+        }),
+        // 7. message event (legacy format without payload wrapping)
+        json!({
+            "type": "message",
+            "role": "assistant",
+            "content": "done"
+        })
+    ];
+
+    let mut content = String::new();
+    for event in events {
+        content.push_str(&event.to_string());
+        content.push('\n');
+    }
+    fs::write(&rollout_path, content).unwrap();
+
+    seed_recovery_database(
+        target_dir.path(),
+        &[RecoveryThreadSeed {
+            id: "test_thread".into(),
+            cwd: "/tmp/test_project".into(),
+            title: "Test Thread".into(),
+            rollout_path: rollout_path.clone(),
+            updated_at_ms: 1_000,
+            has_user_event: true,
+            archived: false,
+            model_provider: "openai".into(),
+        }],
+    );
+
+    let messages = manager
+        .get_codex_session_messages("test_thread")
+        .expect("get messages");
+
+    assert_eq!(messages.len(), 7);
+
+    // 1. developer message
+    assert_eq!(messages[0].role, "developer");
+    assert_eq!(messages[0].text, "system context text");
+
+    // 2. user_message
+    assert_eq!(messages[1].role, "user");
+    assert_eq!(messages[1].text, "hello agent");
+
+    // 3. reasoning summary
+    assert_eq!(messages[2].role, "thought");
+    assert_eq!(messages[2].text, "planning the changes");
+
+    // 4. agent_message
+    assert_eq!(messages[3].role, "assistant");
+    assert_eq!(messages[3].text, "im working on it");
+
+    // 5. function_call
+    assert_eq!(messages[4].role, "call");
+    assert!(messages[4].text.contains("🔧 调用工具: read_file"));
+    assert!(messages[4].text.contains("foo.txt"));
+
+    // 6. function_call_output
+    assert_eq!(messages[5].role, "response");
+    assert_eq!(messages[5].text, "file content here");
+
+    // 7. legacy message
+    assert_eq!(messages[6].role, "assistant");
+    assert_eq!(messages[6].text, "done");
+}

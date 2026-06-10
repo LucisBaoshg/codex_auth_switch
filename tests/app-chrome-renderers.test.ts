@@ -55,6 +55,7 @@ test("renders app shell with navigation, update status, content and overlays", a
   expect(html).toContain('class="app-sidebar"');
   expect(html).toContain('data-action="nav-profiles"');
   expect(html).toContain('nav-item active" data-action="nav-profiles"');
+  expect(html).toContain('data-action="nav-usage-stats"');
   expect(html).toContain("Codex 助手");
   expect(html).toContain('data-role="login-status"');
   expect(html).toContain('data-role="update-entry"');

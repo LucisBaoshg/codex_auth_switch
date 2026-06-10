@@ -1,5 +1,10 @@
 import type { BusyDialogState } from "./app-chrome-renderers";
-import type { AppSnapshot, UpdateCheckResult } from "./desktop-types";
+import type {
+  AppSnapshot,
+  CodexUsageStatsFilter,
+  CodexUsageStatsSnapshot,
+  UpdateCheckResult,
+} from "./desktop-types";
 import type { FlashKind } from "./html-utils";
 import type {
   NetworkProfile,
@@ -25,10 +30,18 @@ import type {
   SessionRenderState,
   SessionSortOrder,
 } from "./session-renderers";
+import type { CleanupFilter } from "./session-cleanup-renderers";
 import type { CodexMessage, CodexSessionInfo } from "./session-utils";
 import type { SharingCenterTab } from "./sharing-center-renderers";
 
-export type ViewMode = "cards" | "editor" | "sharing" | "settings" | "sessions" | "session-cleanup";
+export type ViewMode =
+  | "cards"
+  | "editor"
+  | "sharing"
+  | "settings"
+  | "sessions"
+  | "session-cleanup"
+  | "usage-stats";
 export type PlatformMode = "codex";
 
 export type DesktopState = {
@@ -67,7 +80,25 @@ export type DesktopState = {
   sessionSortOrder: SessionSortOrder;
   sessionsLoading: boolean;
   messagesLoading: boolean;
+  showAllMessages: boolean;
+  cleanupFilter: CleanupFilter;
+  usageStatsFilter: CodexUsageStatsFilter;
+  usageStats: CodexUsageStatsSnapshot | null;
+  usageStatsLoading: boolean;
+  usageStatsError: string | null;
+  usageStatsActiveTab: "logs" | "trends" | "breakdowns";
 };
+
+function defaultUsageStatsFilter(): CodexUsageStatsFilter {
+  const endDate = new Date().toISOString().slice(0, 10);
+  const startDate = new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  return {
+    startDate,
+    endDate,
+    model: null,
+    effort: null,
+  };
+}
 
 export function createDesktopState(networkSharing: NetworkSharingSettings): DesktopState {
   return {
@@ -106,6 +137,13 @@ export function createDesktopState(networkSharing: NetworkSharingSettings): Desk
     sessionSortOrder: "time",
     sessionsLoading: false,
     messagesLoading: false,
+    showAllMessages: false,
+    cleanupFilter: "30d",
+    usageStatsFilter: defaultUsageStatsFilter(),
+    usageStats: null,
+    usageStatsLoading: false,
+    usageStatsError: null,
+    usageStatsActiveTab: "logs",
   };
 }
 
@@ -125,6 +163,7 @@ export function selectSessionRenderState(state: DesktopState): SessionRenderStat
     sessionSortOrder: state.sessionSortOrder,
     sessionsLoading: state.sessionsLoading,
     messagesLoading: state.messagesLoading,
+    showAllMessages: state.showAllMessages,
   };
 }
 

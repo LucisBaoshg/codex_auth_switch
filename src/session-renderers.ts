@@ -18,6 +18,7 @@ export type SessionRenderState = {
   sessionSortOrder: SessionSortOrder;
   sessionsLoading: boolean;
   messagesLoading: boolean;
+  showAllMessages: boolean;
 };
 
 export function renderSessionsListHtml(state: SessionRenderState): string {
@@ -244,22 +245,79 @@ function renderSessionMessages(state: SessionRenderState): string {
     return `<div class="messages-empty">该会话暂无消息，或对话文件为空。</div>`;
   }
 
-  return state.sessionMessages
+  const total = state.sessionMessages.length;
+  const limit = 40;
+  const needTruncate = !state.showAllMessages && total > limit;
+  const displayedMessages = needTruncate
+    ? state.sessionMessages.slice(total - limit)
+    : state.sessionMessages;
+
+  const loadMoreHtml = needTruncate
+    ? `
+      <div class="load-more-container">
+        <button class="load-more-btn" data-action="load-all-messages">
+          显示更早的 ${total - limit} 条消息...
+        </button>
+      </div>
+    `
+    : "";
+
+  const messagesHtml = displayedMessages
     .map((message) => {
-      const isUser = message.role === "user";
-      const bubbleClass = isUser ? "msg-user" : "msg-assistant";
-      const avatarChar = isUser ? "👤" : "🤖";
-      const displayName = isUser ? "User" : "Codex";
+      let bubbleClass = "msg-assistant";
+      let avatarChar = "🤖";
+      let displayName = "Codex";
+
+      if (message.role === "user") {
+        bubbleClass = "msg-user";
+        avatarChar = "👤";
+        displayName = "User";
+      } else if (message.role === "thought") {
+        bubbleClass = "msg-thought";
+        avatarChar = "🧠";
+        displayName = "思考过程";
+      } else if (message.role === "call") {
+        bubbleClass = "msg-call";
+        avatarChar = "🔧";
+        displayName = "调用工具";
+      } else if (message.role === "response") {
+        bubbleClass = "msg-response";
+        avatarChar = "💻";
+        displayName = "工具返回";
+      } else if (message.role === "system") {
+        bubbleClass = "msg-system";
+        avatarChar = "⚙️";
+        displayName = "系统指令";
+      }
+
+      // Collapsible for long arguments or outputs
+      let messageHtml = formatMessageText(message.text);
+      const textLimit = 3000;
+      if (message.text.length > textLimit && (message.role === "call" || message.role === "response")) {
+        const firstPart = formatMessageText(message.text.slice(0, 1500) + "\n\n...");
+        const formattedFull = formatMessageText(message.text);
+        messageHtml = `
+          <div class="collapsible-message" data-collapsed="true" data-length="${message.text.length}">
+            <div class="collapsible-preview">${firstPart}</div>
+            <div class="collapsible-full" style="display: none;">${formattedFull}</div>
+            <button class="collapsible-toggle-btn" data-action="toggle-message-collapse">
+              展开全部 (${message.text.length} 字) ▾
+            </button>
+          </div>
+        `;
+      }
 
       return `
         <div class="message-bubble-wrapper ${bubbleClass}">
           <div class="message-avatar">${avatarChar}</div>
           <div class="message-content-box">
             <div class="message-sender">${displayName}</div>
-            <div class="message-text">${formatMessageText(message.text)}</div>
+            <div class="message-text">${messageHtml}</div>
           </div>
         </div>
       `;
     })
     .join("");
+
+  return loadMoreHtml + messagesHtml;
 }

@@ -61,6 +61,85 @@ export type AppSnapshot = {
   profiles: ProfileSummary[];
 };
 
+export type CodexUsageStatsSyncResult = {
+  imported: number;
+  skipped: number;
+  filesScanned: number;
+  errors: string[];
+};
+
+export type CodexUsageStatsFilter = {
+  startDate?: string | null;
+  endDate?: string | null;
+  model?: string | null;
+  effort?: string | null;
+};
+
+export type CodexUsageStatsSummary = {
+  totalRequests: number;
+  totalCostUsd: string;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCacheReadTokens: number;
+  totalCacheCreationTokens: number;
+  totalReasoningOutputTokens: number;
+  realTotalTokens: number;
+  cacheHitRate: number;
+};
+
+export type CodexUsageStatsTrend = {
+  date: string;
+  requestCount: number;
+  totalCostUsd: string;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCacheReadTokens: number;
+  totalCacheCreationTokens: number;
+  totalReasoningOutputTokens: number;
+  realTotalTokens: number;
+};
+
+export type CodexUsageStatsBreakdown = {
+  name: string;
+  requestCount: number;
+  totalCostUsd: string;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCacheReadTokens: number;
+  totalCacheCreationTokens: number;
+  totalReasoningOutputTokens: number;
+  realTotalTokens: number;
+};
+
+export type CodexUsageStatsLog = {
+  requestId: string;
+  sessionId: string;
+  model: string;
+  provider: string;
+  effort: string;
+  createdAt: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  reasoningOutputTokens: number;
+  totalCostUsd: string;
+  sourcePath: string;
+};
+
+export type CodexUsageStatsSnapshot = {
+  updatedAt: string;
+  filter: CodexUsageStatsFilter;
+  sync: CodexUsageStatsSyncResult;
+  summary: CodexUsageStatsSummary;
+  trends: CodexUsageStatsTrend[];
+  modelBreakdown: CodexUsageStatsBreakdown[];
+  effortBreakdown: CodexUsageStatsBreakdown[];
+  availableModels: string[];
+  availableEfforts: string[];
+  logs: CodexUsageStatsLog[];
+};
+
 export type LegacyThirdPartyMigrationResult = {
   migratedProfileIds: string[];
   skippedProfileIds: string[];
