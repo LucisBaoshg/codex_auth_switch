@@ -477,6 +477,12 @@ function usageDateDaysAgo(days: number): string {
 }
 
 function setUsageStatsRange(range: string): void {
+  if (range === "today") {
+    const today = new Date().toISOString().slice(0, 10);
+    state.usageStatsFilter.startDate = today;
+    state.usageStatsFilter.endDate = today;
+    return;
+  }
   if (range === "7d") {
     state.usageStatsFilter.startDate = usageDateDaysAgo(6);
     state.usageStatsFilter.endDate = new Date().toISOString().slice(0, 10);

@@ -14,7 +14,7 @@ export type CodexUsageStatsPageInput = {
   activeTab: "logs" | "trends" | "breakdowns";
 };
 
-type UsageRangePreset = "7d" | "30d" | "all" | "custom";
+type UsageRangePreset = "today" | "7d" | "30d" | "all" | "custom";
 
 function formatInteger(value: number): string {
   return Math.round(value).toLocaleString("en-US");
@@ -69,6 +69,9 @@ function inferRangePreset(filter: CodexUsageStatsFilter): UsageRangePreset {
   if (!filter.startDate && !filter.endDate) {
     return "all";
   }
+  if (filter.startDate === currentDate() && filter.endDate === currentDate()) {
+    return "today";
+  }
   if (filter.endDate === currentDate() && filter.startDate === dateDaysAgo(6)) {
     return "7d";
   }
@@ -108,6 +111,7 @@ function renderFilterBar(input: CodexUsageStatsPageInput): string {
     <section class="usage-filter-bar" aria-label="使用统计筛选">
       <!-- Presets Segmented Control -->
       <div class="usage-range-group" role="group" aria-label="时间范围">
+        ${renderRangeButton("今日", "today", activePreset)}
         ${renderRangeButton("7 天", "7d", activePreset)}
         ${renderRangeButton("30 天", "30d", activePreset)}
         ${renderRangeButton("全部", "all", activePreset)}
