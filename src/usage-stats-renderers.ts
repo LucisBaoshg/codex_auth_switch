@@ -417,7 +417,6 @@ function renderLogTable(stats: CodexUsageStatsSnapshot): string {
             <th>输入</th>
             <th>输出</th>
             <th class="cell-cost">生成成本</th>
-            <th>耗时/首字</th>
             <th>状态</th>
             <th>来源</th>
           </tr>
@@ -443,7 +442,6 @@ function renderLogTable(stats: CodexUsageStatsSnapshot): string {
                   </div>
                 </td>
                 <td class="cell-cost"><strong>${formatCost(log.totalCostUsd)}</strong></td>
-                <td class="cell-latency">--</td>
                 <td><span class="status-badge ${statusClass}">200</span></td>
                 <td class="cell-source">codex_session</td>
               </tr>
