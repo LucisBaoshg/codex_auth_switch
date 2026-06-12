@@ -18,7 +18,7 @@ function cargoVersion(path: string): string {
 function cargoLockPackageVersion(path: string, packageName: string): string {
   const content = readProjectFile(path);
   const packagePattern = new RegExp(
-    String.raw`\[\[package\]\]\nname = "${packageName}"\nversion = "([^"]+)"`,
+    String.raw`\[\[package\]\]\r?\nname = "${packageName}"\r?\nversion = "([^"]+)"`,
     "m",
   );
   const match = content.match(packagePattern);
