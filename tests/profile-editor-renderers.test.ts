@@ -342,6 +342,40 @@ test("renders editor layout by composing config and sidebar panels", async () =>
   expect(html).toContain("disabled");
 });
 
+test("disables profile deletion for the active editor profile", async () => {
+  expect(existsSync(join(root, "src/profile-editor-renderers.ts"))).toBe(true);
+  const rendererModule = await import(renderersImportPath);
+
+  expect(rendererModule).toHaveProperty("renderEditorLayout");
+  const { renderEditorLayout } = rendererModule as typeof import("../src/profile-editor-renderers");
+  const editorProfile = createProfile({
+    id: "third-party-a",
+    name: "Third Party",
+    authTypeLabel: "第三方 API",
+  });
+
+  const html = renderEditorLayout({
+    snapshot: createSnapshot({ activeProfileId: "third-party-a", profiles: [editorProfile] }),
+    editor: createEditor({
+      mode: "existing",
+      profileId: "third-party-a",
+      name: "Third Party",
+      notes: "Active runtime",
+    }),
+    editorProfile,
+    configFieldsHtml: "<section data-role=\"config-fields\">fields</section>",
+    busy: false,
+    readOnly: false,
+    existing: true,
+    saveDisabled: false,
+    pendingActions: new Set(),
+  });
+
+  expect(html).toContain('data-action="delete-profile"');
+  expect(html).toContain("这是当前 Codex 正在使用的配置，不能直接删除");
+  expect(html).toMatch(/data-action="delete-profile"[\s\S]*disabled/);
+});
+
 test("renders editor page shell around prebuilt editor content", async () => {
   expect(existsSync(join(root, "src/profile-editor-renderers.ts"))).toBe(true);
   const rendererModule = await import(renderersImportPath);

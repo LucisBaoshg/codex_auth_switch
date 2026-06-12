@@ -19,3 +19,11 @@ test("publishes every desktop platform from the main release workflow", () => {
   expect(publishRelease).toContain("rustup target add ${{ matrix.rust_target }}");
   expect(existsSync(join(root, ".github/workflows/publish-macos-intel.yml"))).toBe(false);
 });
+
+test("runs release preflight before creating the GitHub release", () => {
+  const publishRelease = readProjectFile(".github/workflows/publish-release.yml");
+
+  expect(publishRelease).toContain("release-preflight:");
+  expect(publishRelease).toMatch(/prepare-release:[\s\S]*?needs: release-preflight/);
+  expect(publishRelease).toMatch(/release-preflight:[\s\S]*?run: npm test/);
+});

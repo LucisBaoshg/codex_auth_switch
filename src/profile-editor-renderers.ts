@@ -20,6 +20,9 @@ import {
 
 export type NewProfileEditorTab = "manual-delta" | "manual-full";
 
+const activeProfileDeleteMessage =
+  "这是当前 Codex 正在使用的配置，不能直接删除。请先切换到其他配置后再删除。";
+
 export type NewProfileTabSelectorInput = {
   currentTab?: NewProfileEditorTab;
 };
@@ -62,6 +65,8 @@ export type EditorBasicInfoCardInput = {
   readOnly: boolean;
   existing: boolean;
   saveDisabled: boolean;
+  deleteDisabled?: boolean;
+  deleteDisabledReason?: string;
 };
 
 export type EditorMetadataCardInput = {
@@ -440,6 +445,8 @@ export function renderEditorCodePanels(input: EditorCodePanelsInput): string {
 }
 
 export function renderEditorLayout(input: EditorLayoutInput): string {
+  const deleteDisabled = input.snapshot.activeProfileId === input.editor.profileId;
+
   return `
       <div class="editor-layout-grid">
         <!-- Left Main Column: Config inputs / textareas -->
@@ -457,6 +464,8 @@ export function renderEditorLayout(input: EditorLayoutInput): string {
             readOnly: input.readOnly,
             existing: input.existing,
             saveDisabled: input.saveDisabled,
+            deleteDisabled,
+            deleteDisabledReason: deleteDisabled ? activeProfileDeleteMessage : "",
           })}
 
           <!-- Runtime panel (Quota metrics, speed tests) -->
@@ -485,6 +494,10 @@ export function renderEditorBasicInfoCard(input: EditorBasicInfoCardInput): stri
     input.existing &&
     input.editorProfile?.authTypeLabel === "第三方 API" &&
     Boolean(input.editor.profileId);
+  const deleteDisabled = input.busy || input.deleteDisabled;
+  const deleteTitle = input.deleteDisabledReason
+    ? `title="${escapeHtml(input.deleteDisabledReason)}"`
+    : "";
 
   return `
     <div class="sidebar-card">
@@ -550,7 +563,8 @@ export function renderEditorBasicInfoCard(input: EditorBasicInfoCardInput): stri
                       data-action="delete-profile"
                       data-id="${escapeHtml(input.editor.profileId)}"
                       data-name="${escapeHtml(input.editor.name)}"
-                      ${input.busy ? "disabled" : ""}
+                      ${deleteTitle}
+                      ${deleteDisabled ? "disabled" : ""}
                     >
                       删除
                     </button>

@@ -750,6 +750,8 @@ pub enum AppError {
 }
 
 const SESSION_RECOVERY_RECENT_LIMIT: usize = 50;
+const ACTIVE_PROFILE_DELETE_ERROR: &str =
+    "这是当前 Codex 正在使用的配置，不能直接删除。请先切换到其他配置后再删除。";
 
 pub struct ProfileManager {
     app_data_dir: PathBuf,
@@ -1267,6 +1269,13 @@ impl ProfileManager {
         let profile_dir = self.profiles_dir().join(profile_id);
         if !profile_dir.exists() {
             return Err(AppError::ProfileNotFound(profile_id.to_string()));
+        }
+
+        if self
+            .detect_active_profile()?
+            .is_some_and(|profile| profile.id == profile_id)
+        {
+            return Err(AppError::Message(ACTIVE_PROFILE_DELETE_ERROR.into()));
         }
 
         fs::remove_dir_all(profile_dir)?;
@@ -2694,34 +2703,24 @@ impl ProfileManager {
     }
 
     pub fn snapshot(&self) -> Result<AppSnapshot, AppError> {
-        let mut manager = self.clone_for_mutation();
-        manager.ensure_target_profile_registered()?;
         let default_target_dir = default_codex_target_dir()?;
-        let active_profile_id = manager.detect_active_profile()?.map(|profile| profile.id);
+        let active_profile_id = self.detect_active_profile()?.map(|profile| profile.id);
 
         Ok(AppSnapshot {
-            target_dir: manager.target_dir.to_string_lossy().to_string(),
-            using_default_target_dir: manager.target_dir == default_target_dir,
-            target_exists: manager.target_dir.exists(),
-            target_auth_exists: manager.target_auth_path().exists(),
-            target_config_exists: manager.target_config_path().exists(),
-            target_updated_at: manager.resolve_target_updated_at()?,
-            target_auth_type_label: manager.resolve_target_auth_type_label()?,
+            target_dir: self.target_dir.to_string_lossy().to_string(),
+            using_default_target_dir: self.target_dir == default_target_dir,
+            target_exists: self.target_dir.exists(),
+            target_auth_exists: self.target_auth_path().exists(),
+            target_config_exists: self.target_config_path().exists(),
+            target_updated_at: self.resolve_target_updated_at()?,
+            target_auth_type_label: self.resolve_target_auth_type_label()?,
             active_profile_id,
-            last_selected_profile_id: manager.state.last_selected_profile_id.clone(),
-            last_switch_profile_id: manager.state.last_switch_profile_id.clone(),
-            last_switched_at: manager.state.last_switched_at.clone(),
-            codex_usage_api_enabled: manager.state.codex_usage_api_enabled,
-            profiles: manager.list_profiles()?,
+            last_selected_profile_id: self.state.last_selected_profile_id.clone(),
+            last_switch_profile_id: self.state.last_switch_profile_id.clone(),
+            last_switched_at: self.state.last_switched_at.clone(),
+            codex_usage_api_enabled: self.state.codex_usage_api_enabled,
+            profiles: self.list_profiles()?,
         })
-    }
-
-    fn clone_for_mutation(&self) -> Self {
-        Self {
-            app_data_dir: self.app_data_dir.clone(),
-            target_dir: self.target_dir.clone(),
-            state: self.state.clone(),
-        }
     }
 
     fn ensure_storage_dirs(&self) -> Result<(), AppError> {
@@ -5215,10 +5214,10 @@ fn apply_third_party_websockets_default(
 
 fn managed_config_hash(auth_json: &str, contents: &str) -> Result<String, AppError> {
     let table = parse_toml_table(contents)?;
-    let serialized = toml::to_string(&toml::Value::Table(managed_config_table(
-        auth_json, &table,
-    )?))
-    .map_err(|error| AppError::Message(error.to_string()))?;
+    let mut managed = managed_config_table(auth_json, &table)?;
+    apply_third_party_websockets_default(auth_json, &mut managed)?;
+    let serialized = toml::to_string(&toml::Value::Table(managed))
+        .map_err(|error| AppError::Message(error.to_string()))?;
     Ok(sha256_bytes(serialized.as_bytes()))
 }
 

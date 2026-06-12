@@ -20,8 +20,31 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  release-preflight:
+    name: Release Preflight
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run frontend tests
+        run: npm test
+
   prepare-release:
     name: Prepare Release
+    needs: release-preflight
     runs-on: ubuntu-latest
     permissions:
       contents: write

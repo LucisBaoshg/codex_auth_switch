@@ -231,6 +231,32 @@ fn temp_manager() -> (TempDir, TempDir, ProfileManager) {
     (app_dir, target_dir, manager)
 }
 
+#[test]
+fn delete_profile_rejects_current_codex_profile() {
+    let (app_dir, _target_dir, mut manager) = temp_manager();
+    let profile = manager
+        .import_profile(ProfileInput {
+            name: "Active Codex".into(),
+            notes: "current runtime".into(),
+            auth_json: api_key_auth_json("sk-active"),
+            config_toml: third_party_config_toml("gpt-5"),
+        })
+        .expect("import active profile");
+
+    manager
+        .switch_profile(&profile.id)
+        .expect("switch profile into target dir");
+
+    let error = manager
+        .delete_profile(&profile.id)
+        .expect_err("active profile should not be deleted");
+
+    assert!(error
+        .to_string()
+        .contains("这是当前 Codex 正在使用的配置，不能直接删除"));
+    assert!(app_dir.path().join("profiles").join(&profile.id).exists());
+}
+
 fn write_session_state_root(root: &Path, label: &str) {
     fs::create_dir_all(root).expect("create session state root");
     fs::create_dir_all(root.join("sessions").join("2026")).expect("create sessions dir");
@@ -1112,7 +1138,7 @@ fn detect_active_profile_matches_target_file_contents() {
 }
 
 #[test]
-fn snapshot_auto_imports_current_target_profile_and_creates_marker() {
+fn snapshot_does_not_auto_import_current_target_profile() {
     let (app_dir, target_dir, manager) = temp_manager();
 
     fs::write(
@@ -1128,27 +1154,46 @@ fn snapshot_auto_imports_current_target_profile_and_creates_marker() {
 
     let snapshot = manager.snapshot().expect("snapshot");
 
-    assert_eq!(snapshot.profiles.len(), 1);
-    assert_eq!(snapshot.profiles[0].name, "tapcash");
-    assert_eq!(
-        snapshot.active_profile_id.as_deref(),
-        Some(snapshot.profiles[0].id.as_str())
-    );
-
-    let marker_path = target_dir.path().join("codex-auth-switch.json");
-    assert!(marker_path.exists());
-
-    let marker: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(marker_path).expect("read marker"))
-            .expect("parse marker");
-    assert_eq!(
-        marker.get("profileId").and_then(|value| value.as_str()),
-        Some(snapshot.profiles[0].id.as_str())
-    );
+    assert_eq!(snapshot.profiles.len(), 0);
+    assert_eq!(snapshot.active_profile_id, None);
+    assert!(!target_dir.path().join("codex-auth-switch.json").exists());
 
     let reloaded = ProfileManager::load_or_default(app_dir.path().to_path_buf()).expect("reload");
     let profiles = reloaded.list_profiles().expect("list profiles");
-    assert_eq!(profiles.len(), 1);
+    assert_eq!(profiles.len(), 0);
+}
+
+#[test]
+fn switch_profile_reuses_auto_registered_current_config_after_normalization() {
+    let (_app_dir, target_dir, mut manager) = temp_manager();
+    let current_auth = api_key_auth_json("sk-current");
+    let current_config = third_party_config_toml("gpt-4.1");
+    let next_profile = manager
+        .import_profile(ProfileInput {
+            name: "Next".into(),
+            notes: String::new(),
+            auth_json: api_key_auth_json("sk-next"),
+            config_toml: third_party_config_toml("gpt-5"),
+        })
+        .expect("import next profile");
+
+    assert!(!current_config.contains("supports_websockets"));
+    fs::write(target_dir.path().join("auth.json"), &current_auth).expect("seed auth");
+    fs::write(target_dir.path().join("config.toml"), &current_config).expect("seed config");
+
+    manager
+        .switch_profile(&next_profile.id)
+        .expect("first switch auto-registers current config");
+    assert_eq!(manager.list_profiles().expect("list after first switch").len(), 2);
+
+    fs::write(target_dir.path().join("auth.json"), &current_auth).expect("restore auth");
+    fs::write(target_dir.path().join("config.toml"), &current_config).expect("restore config");
+
+    manager
+        .switch_profile(&next_profile.id)
+        .expect("second switch should reuse auto-registered config");
+
+    assert_eq!(manager.list_profiles().expect("list after second switch").len(), 2);
 }
 
 #[test]
