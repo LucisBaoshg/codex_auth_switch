@@ -21,7 +21,8 @@ mod updates;
 pub use pac_proxy::{
     get_pac_proxy_status, pac_proxy_status_from_macos_services,
     pac_proxy_status_from_macos_services_with_selection, parse_macos_auto_proxy_status,
-    set_pac_proxy_enabled, set_pac_proxy_selected_services, unsupported_pac_proxy_status,
+    parse_windows_auto_config_url, set_pac_proxy_enabled, set_pac_proxy_selected_services,
+    unsupported_pac_proxy_status, windows_pac_proxy_status_from_auto_config_url,
     MacosAutoProxyStatus, PacProxyStatus, PAC_PROXY_URL,
 };
 pub use restart::{

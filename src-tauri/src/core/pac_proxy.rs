@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub const PAC_PROXY_URL: &str = "http://10.12.0.24/proxy.pac";
+const WINDOWS_PROXY_SCRIPT_SERVICE: &str = "Windows 设置脚本";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -92,6 +93,44 @@ pub fn pac_proxy_status_from_macos_services_with_selection(
         available_services,
         selected_services,
         services: active_services,
+        message: None,
+    }
+}
+
+pub fn parse_windows_auto_config_url(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("AutoConfigURL") {
+            return None;
+        }
+
+        let parts = trimmed.split_whitespace().collect::<Vec<_>>();
+        if parts.len() < 3 || parts[0] != "AutoConfigURL" {
+            return None;
+        }
+
+        let value = parts[2..].join(" ");
+        if value.trim().is_empty() {
+            None
+        } else {
+            Some(value)
+        }
+    })
+}
+
+pub fn windows_pac_proxy_status_from_auto_config_url(
+    auto_config_url: Option<String>,
+) -> PacProxyStatus {
+    let enabled = auto_config_url.as_deref().map(str::trim) == Some(PAC_PROXY_URL);
+    let service = WINDOWS_PROXY_SCRIPT_SERVICE.to_string();
+
+    PacProxyStatus {
+        supported: true,
+        enabled,
+        pac_url: PAC_PROXY_URL.into(),
+        available_services: vec![service.clone()],
+        selected_services: vec![service.clone()],
+        services: if enabled { vec![service] } else { Vec::new() },
         message: None,
     }
 }
@@ -233,12 +272,62 @@ fn platform_set_pac_proxy_selected_services(
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn platform_pac_proxy_status(_app_data_dir: &Path) -> Result<PacProxyStatus, AppError> {
+    Ok(windows_pac_proxy_status_from_auto_config_url(
+        windows_auto_config_url()?,
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn platform_set_pac_proxy_enabled(
+    app_data_dir: &Path,
+    enabled: bool,
+) -> Result<PacProxyStatus, AppError> {
+    if enabled {
+        run_windows_reg(&[
+            "add",
+            WINDOWS_INTERNET_SETTINGS_KEY,
+            "/v",
+            "AutoConfigURL",
+            "/t",
+            "REG_SZ",
+            "/d",
+            PAC_PROXY_URL,
+            "/f",
+        ])?;
+        windows_notify_proxy_settings_changed();
+    } else {
+        let current_url = windows_auto_config_url()?;
+        if current_url.as_deref().map(str::trim) == Some(PAC_PROXY_URL) {
+            run_windows_reg(&[
+                "delete",
+                WINDOWS_INTERNET_SETTINGS_KEY,
+                "/v",
+                "AutoConfigURL",
+                "/f",
+            ])?;
+            windows_notify_proxy_settings_changed();
+        }
+    }
+
+    platform_pac_proxy_status(app_data_dir)
+}
+
+#[cfg(target_os = "windows")]
+fn platform_set_pac_proxy_selected_services(
+    app_data_dir: &Path,
+    _selected_services: Vec<String>,
+) -> Result<PacProxyStatus, AppError> {
+    platform_pac_proxy_status(app_data_dir)
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 fn platform_pac_proxy_status(_app_data_dir: &Path) -> Result<PacProxyStatus, AppError> {
     Ok(unsupported_pac_proxy_status())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 fn platform_set_pac_proxy_enabled(
     _app_data_dir: &Path,
     _enabled: bool,
@@ -246,7 +335,7 @@ fn platform_set_pac_proxy_enabled(
     Ok(unsupported_pac_proxy_status())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 fn platform_set_pac_proxy_selected_services(
     _app_data_dir: &Path,
     _selected_services: Vec<String>,
@@ -340,4 +429,79 @@ fn run_networksetup(args: &[&str]) -> Result<String, AppError> {
     } else {
         message
     }))
+}
+
+#[cfg(target_os = "windows")]
+const WINDOWS_INTERNET_SETTINGS_KEY: &str =
+    r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings";
+
+#[cfg(target_os = "windows")]
+fn windows_auto_config_url() -> Result<Option<String>, AppError> {
+    let output = Command::new("reg")
+        .args([
+            "query",
+            WINDOWS_INTERNET_SETTINGS_KEY,
+            "/v",
+            "AutoConfigURL",
+        ])
+        .output()?;
+
+    if output.status.success() {
+        return Ok(parse_windows_auto_config_url(&String::from_utf8_lossy(
+            &output.stdout,
+        )));
+    }
+
+    Ok(None)
+}
+
+#[cfg(target_os = "windows")]
+fn run_windows_reg(args: &[&str]) -> Result<String, AppError> {
+    let output = Command::new("reg").args(args).output()?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let message = if stderr.is_empty() { stdout } else { stderr };
+    Err(AppError::Message(if message.is_empty() {
+        "reg 执行失败。".into()
+    } else {
+        message
+    }))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_notify_proxy_settings_changed() {
+    unsafe {
+        InternetSetOptionW(
+            std::ptr::null_mut(),
+            INTERNET_OPTION_SETTINGS_CHANGED,
+            std::ptr::null_mut(),
+            0,
+        );
+        InternetSetOptionW(
+            std::ptr::null_mut(),
+            INTERNET_OPTION_REFRESH,
+            std::ptr::null_mut(),
+            0,
+        );
+    }
+}
+
+#[cfg(target_os = "windows")]
+const INTERNET_OPTION_REFRESH: u32 = 37;
+#[cfg(target_os = "windows")]
+const INTERNET_OPTION_SETTINGS_CHANGED: u32 = 39;
+
+#[cfg(target_os = "windows")]
+#[link(name = "wininet")]
+extern "system" {
+    fn InternetSetOptionW(
+        h_internet: *mut std::ffi::c_void,
+        option: u32,
+        buffer: *mut std::ffi::c_void,
+        buffer_length: u32,
+    ) -> i32;
 }
