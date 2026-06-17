@@ -192,11 +192,13 @@ export function publicProfile(profile: StoredProfile): StoredProfile {
 }
 
 export async function publicProfileWithAuthType(profile: StoredProfile): Promise<StoredProfile> {
-  const authTypeLabel = profile.authTypeLabel ??
-    detectSharedProfileAuthType(
-      await readProfileFile(profile.id, "auth.json"),
-      await readProfileFile(profile.id, "config.toml"),
-    );
+  const derivedAuthTypeLabel = detectSharedProfileAuthType(
+    await readProfileFile(profile.id, "auth.json"),
+    await readProfileFile(profile.id, "config.toml"),
+  );
+  const authTypeLabel = derivedAuthTypeLabel === "未知"
+    ? profile.authTypeLabel ?? derivedAuthTypeLabel
+    : derivedAuthTypeLabel;
 
   return {
     ...publicProfile(profile),

@@ -804,31 +804,11 @@ function networkProfileLibraryCategory(
     return "official";
   }
 
-  return looksLikeThirdPartyNetworkProfile(profile) ? "thirdParty" : "official";
+  return "thirdParty";
 }
 
 function isThirdPartyNetworkAuthType(authTypeLabel: string | null | undefined): boolean {
   return authTypeLabel === "第三方 API" || authTypeLabel === "共生配置" || authTypeLabel === "API Key";
-}
-
-function looksLikeThirdPartyNetworkProfile(profile: Pick<NetworkProfile, "name" | "description">): boolean {
-  const text = `${profile.name} ${profile.description}`.toLowerCase();
-  const codeNamePattern = /(^|[^a-z0-9])code([^a-z0-9]|$)/i;
-  return [
-    "第三方",
-    "共生",
-    "symbiotic",
-    "api",
-    "apikey",
-    "api key",
-    "key",
-    "base_url",
-    "base url",
-    "openai_base_url",
-    "ylscode",
-    "ylsagi",
-    "claudex",
-  ].some((keyword) => text.includes(keyword.toLowerCase())) || codeNamePattern.test(text);
 }
 
 function sharingLibraryEmptyTitle(tab: SharingLibraryTab): string {

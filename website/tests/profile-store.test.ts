@@ -1,9 +1,13 @@
 import { describe, expect, test } from "vitest";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   canEditProfile,
   canAccessProfile,
   filterProfilesForPrincipal,
   normalizeSharedWith,
+  publicProfileWithAuthType,
   type ProfilePrincipal,
   type StoredProfile,
 } from "../src/lib/profile-store";
@@ -92,5 +96,34 @@ describe("desktop token hashing", () => {
 
     expect(hash).toBe(hashDesktopToken("cas_test_token"));
     expect(hash).not.toContain("cas_test_token");
+  });
+});
+
+describe("profile auth type labels", () => {
+  test("derives labels from current files instead of stale stored labels", async () => {
+    const previousDataDir = process.env.CODEX_PROFILE_DATA_DIR;
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "codex-profile-store-auth-type-"));
+    try {
+      process.env.CODEX_PROFILE_DATA_DIR = dataDir;
+      await fs.mkdir(path.join(dataDir, "files", "profile-1"), { recursive: true });
+      await fs.writeFile(
+        path.join(dataDir, "files", "profile-1", "auth.json"),
+        JSON.stringify({ OPENAI_API_KEY: "sk-test" }),
+      );
+      await fs.writeFile(
+        path.join(dataDir, "files", "profile-1", "config.toml"),
+        'model = "gpt-5.5"\nopenai_base_url = "https://muyuan.do"\n',
+      );
+
+      const result = await publicProfileWithAuthType(profile({ authTypeLabel: "官方 OAuth" }));
+
+      expect(result.authTypeLabel).toBe("第三方 API");
+    } finally {
+      if (previousDataDir === undefined) {
+        delete process.env.CODEX_PROFILE_DATA_DIR;
+      } else {
+        process.env.CODEX_PROFILE_DATA_DIR = previousDataDir;
+      }
+    }
   });
 });

@@ -496,6 +496,7 @@ test("renders enterprise library tab states and network cards", async () => {
         id: "network-a",
         name: "Shared <A>",
         description: "Use <safe> config",
+        authTypeLabel: "官方 OAuth",
       }),
       createNetworkProfile({
         id: "network-api",
@@ -535,7 +536,18 @@ test("renders enterprise library tab states and network cards", async () => {
     authRequired: false,
     loading: false,
     profiles: [
-      createNetworkProfile({ id: "network-a", name: "Shared <A>", description: "Use <safe> config" }),
+      createNetworkProfile({
+        id: "network-a",
+        name: "Shared <A>",
+        description: "Use <safe> config",
+        authTypeLabel: "官方 OAuth",
+      }),
+      createNetworkProfile({
+        id: "network-muyuan",
+        name: "muyuan.do",
+        description: "云端共享配置",
+        ownerDingUserId: "ding-c",
+      }),
       createNetworkProfile({
         id: "network-api",
         name: "YLS API",
@@ -559,6 +571,7 @@ test("renders enterprise library tab states and network cards", async () => {
     currentUser: createNetworkUser(),
     activeLibraryTab: "thirdParty",
   });
+  expect(thirdPartyHtml).toContain("muyuan.do");
   expect(thirdPartyHtml).toContain("YLS API");
   expect(thirdPartyHtml).toContain("伊莉思Code");
   expect(thirdPartyHtml).toContain("伊莉思Code-走代理模式");
