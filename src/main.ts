@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
+import { listen } from "@tauri-apps/api/event";
 import {
   renderAppShell,
 } from "./app-chrome-renderers";
@@ -102,7 +103,9 @@ import type {
   CodexUsageStatsSnapshot,
   InstallLocationStatus,
   LegacyThirdPartyMigrationResult,
+  PacProxyStatus,
   ProfileDocument,
+  ProfileSummary,
   ThirdPartyWebsocketsDefaultResult,
   UpdateCheckResult,
 } from "./desktop-types";
@@ -130,9 +133,11 @@ import {
   renderSharingCenterPage,
   renderSharedProfileEditUserPicker,
   renderShareUserPicker,
+  type SharingLibraryTab,
 } from "./sharing-center-renderers";
 import {
   createSharedProfileEditDraft,
+  resolveSharedProfileUpdateScope,
   resolveLocalShareFormState,
 } from "./sharing-center-state";
 import {
@@ -148,6 +153,11 @@ const desktopLoginPollIntervalMs =
 
 const isTauriRuntime = "__TAURI_INTERNALS__" in window;
 const appRoot = document.querySelector<HTMLDivElement>("#app");
+
+type NetworkDeleteResponse = {
+  status: number;
+  body: string;
+};
 
 if (!appRoot) {
   throw new Error("App root was not found.");
@@ -165,6 +175,15 @@ function networkUnauthorizedError(actionLabel: string): Error {
   return new Error(`${actionLabel}未通过服务端权限校验，已保留当前登录状态。请刷新共享中心或重新登录后再试。`);
 }
 
+function networkErrorMessageFromBody(body: string, fallback: string): string {
+  try {
+    const parsed = JSON.parse(body) as { error?: string };
+    return parsed.error || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 function formatErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -172,6 +191,8 @@ function formatErrorMessage(error: unknown): string {
 const state = createDesktopState(loadNetworkSharingSettings());
 
 let flashTimeoutId: number | null = null;
+const promptedRemoteUpdateKeys = new Set<string>();
+let remoteUpdateCheckInFlight = false;
 
 function setFlash(kind: FlashKind, text: string): void {
   state.flash = { kind, text };
@@ -297,6 +318,28 @@ async function desktopInvoke<T>(
   }
 
   return invoke<T>(command, args);
+}
+
+function remoteUpdatedAtFromNetworkProfile(profile: NetworkProfile): string | null {
+  return profile.contentUpdatedAt ?? profile.updatedAt ?? profile.createdAt ?? null;
+}
+
+async function persistRemoteMetadata(
+  profileId: string,
+  document: ProfileDocument,
+): Promise<AppSnapshot | null> {
+  const remoteProfileId = document.remoteProfileId?.trim();
+  if (!isTauriRuntime || !remoteProfileId) {
+    return null;
+  }
+
+  return desktopInvoke<AppSnapshot>("set_profile_remote_metadata", {
+    profileId,
+    remoteProfileId,
+    remoteContentVersion: document.remoteContentVersion ?? null,
+    remoteContentHash: document.remoteContentHash ?? null,
+    remoteUpdatedAt: document.remoteUpdatedAt ?? null,
+  });
 }
 
 async function refreshSnapshot(): Promise<void> {
@@ -795,6 +838,7 @@ async function fetchNetworkProfiles(): Promise<void> {
     if (!res.ok) throw new Error("加载网络共享配置失败");
     state.networkProfiles = await res.json();
     state.networkAuthRequired = false;
+    await checkActiveSharedProfileUpdate();
   } catch (error) {
     setFlash("error", error instanceof Error ? error.message : String(error));
   } finally {
@@ -911,6 +955,17 @@ function sameDingUserId(left: string | null | undefined, right: string | null | 
   return Boolean(left && right && left.trim().toLowerCase() === right.trim().toLowerCase());
 }
 
+function sameProfileName(left: string | null | undefined, right: string | null | undefined): boolean {
+  return Boolean(left && right && left.trim().toLowerCase() === right.trim().toLowerCase());
+}
+
+function findOwnedNetworkProfileForLocalProfile(profileId: string, profileName: string): NetworkProfile | null {
+  const ownedProfiles = state.networkProfiles.filter((profile) => isOwnNetworkProfile(profile, state.networkUser));
+  return ownedProfiles.find((profile) => profile.sourceProfileId === profileId) ??
+    ownedProfiles.find((profile) => !profile.sourceProfileId && sameProfileName(profile.name, profileName)) ??
+    null;
+}
+
 function selectShareTargetUsers(): ShareUserOption[] {
   return state.shareUsers.filter((user) => !sameDingUserId(user.dingUserId, state.networkUser?.dingUserId));
 }
@@ -1017,25 +1072,44 @@ async function deleteSharedProfile(profileId: string): Promise<void> {
     setFlash("error", "只能删除自己共享的配置。");
     return;
   }
-  if (!window.confirm(`确定删除「${profile.name}」吗？删除后其他人将无法再导入这套共享配置。`)) {
+  const confirmed = await nativeConfirm(
+    `确定删除「${profile.name}」吗？删除后其他人将无法再导入这套共享配置。`,
+    "删除",
+    true,
+  );
+  if (!confirmed) {
     return;
   }
 
   setBusy(true);
   try {
-    const headers = networkAuthHeaders(state.networkSharing);
-    const response = await fetch(`${networkProfilesApiUrl(state.networkSharing)}/${profile.id}`, {
-      method: "DELETE",
-      cache: "no-store",
-      ...(headers ? { headers } : {}),
-    });
+    const profileUrl = `${networkProfilesApiUrl(state.networkSharing)}/${profile.id}`;
+    if (isTauriRuntime) {
+      const result = await desktopInvoke<NetworkDeleteResponse>("delete_network_profile", {
+        url: profileUrl,
+        token: state.networkSharing.token.trim() || null,
+      });
+      if (result.status === 401) {
+        throw networkUnauthorizedError("删除共享配置");
+      }
+      if (result.status < 200 || result.status >= 300) {
+        throw new Error(networkErrorMessageFromBody(result.body, "删除共享配置失败"));
+      }
+    } else {
+      const headers = networkAuthHeaders(state.networkSharing);
+      const response = await fetch(profileUrl, {
+        method: "DELETE",
+        cache: "no-store",
+        ...(headers ? { headers } : {}),
+      });
 
-    if (response.status === 401) {
-      throw networkUnauthorizedError("删除共享配置");
-    }
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({})) as { error?: string };
-      throw new Error(body.error || "删除共享配置失败");
+      if (response.status === 401) {
+        throw networkUnauthorizedError("删除共享配置");
+      }
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(body.error || "删除共享配置失败");
+      }
     }
 
     if (state.sharedProfileEditDraft?.profileId === profile.id) {
@@ -1063,6 +1137,136 @@ async function loadSharingCenterData(): Promise<void> {
     return;
   }
   await Promise.all([fetchShareUsers(), fetchNetworkProfiles()]);
+}
+
+function remoteUpdateVersion(profile: NetworkProfile): string {
+  return typeof profile.contentVersion === "number" ? `v${profile.contentVersion}` : "最新版本";
+}
+
+function activeSharedProfileUpdateTarget(): { activeProfile: ProfileSummary; remoteProfile: NetworkProfile } | null {
+  const snapshot = state.snapshot;
+  if (!snapshot?.activeProfileId) {
+    return null;
+  }
+
+  const activeProfile = snapshot.profiles.find((profile) => profile.id === snapshot.activeProfileId);
+  const remoteProfileId = activeProfile?.remoteProfileId?.trim();
+  if (!activeProfile || !remoteProfileId) {
+    return null;
+  }
+
+  const remoteProfile = state.networkProfiles.find((profile) => profile.id === remoteProfileId);
+  if (!remoteProfile) {
+    return null;
+  }
+
+  const localVersion = activeProfile.remoteContentVersion;
+  const remoteVersion = remoteProfile.contentVersion;
+  if (typeof localVersion === "number" && typeof remoteVersion === "number" && remoteVersion > localVersion) {
+    return { activeProfile, remoteProfile };
+  }
+
+  const localHash = activeProfile.remoteContentHash?.trim();
+  const remoteHash = remoteProfile.contentHash?.trim();
+  if (localHash && remoteHash && localHash !== remoteHash) {
+    return { activeProfile, remoteProfile };
+  }
+
+  return null;
+}
+
+function remoteUpdatePromptKey(profile: NetworkProfile): string {
+  return [
+    profile.id,
+    profile.contentVersion ?? "",
+    profile.contentHash ?? "",
+    remoteUpdatedAtFromNetworkProfile(profile) ?? "",
+  ].join(":");
+}
+
+async function updateActiveSharedProfileFromCloud(
+  activeProfile: ProfileSummary,
+  remoteProfile: NetworkProfile,
+): Promise<void> {
+  state.busy = true;
+  state.busyDialog = {
+    title: "更新共享配置",
+    message: "正在下载最新共享配置并更新本地档案。",
+  };
+  render();
+
+  try {
+    const document = await fetchNetworkProfileDocument(remoteProfile.id);
+    const updateSnapshot = await desktopInvoke<AppSnapshot>("update_profile", {
+      profileId: activeProfile.id,
+      payload: profileInputFromDocument(document),
+    });
+    setSnapshot(updateSnapshot);
+
+    const metadataSnapshot = await persistRemoteMetadata(activeProfile.id, document);
+    if (metadataSnapshot) {
+      setSnapshot(metadataSnapshot);
+    }
+
+    state.busyDialog = {
+      title: "重新应用配置",
+      message: "正在让最新共享配置生效并准备重启 Codex。",
+    };
+    render();
+
+    const switchSnapshot = await desktopInvoke<AppSnapshot>("switch_profile", { profileId: activeProfile.id });
+    state.selectedProfileId = activeProfile.id;
+    setSnapshot(switchSnapshot);
+
+    state.busyDialog = {
+      title: "重启 Codex",
+      message: "配置已更新，正在重启 Codex。",
+    };
+    render();
+
+    await desktopInvoke("restart_codex");
+    setFlash("success", `已更新并重启 Codex：${document.name} ${remoteUpdateVersion(remoteProfile)}。`);
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    state.busy = false;
+    state.busyDialog = null;
+    render();
+  }
+}
+
+async function checkActiveSharedProfileUpdate(): Promise<void> {
+  if (!isTauriRuntime || remoteUpdateCheckInFlight) {
+    return;
+  }
+
+  const target = activeSharedProfileUpdateTarget();
+  if (!target) {
+    return;
+  }
+
+  const promptKey = remoteUpdatePromptKey(target.remoteProfile);
+  if (promptedRemoteUpdateKeys.has(promptKey)) {
+    return;
+  }
+  promptedRemoteUpdateKeys.add(promptKey);
+
+  remoteUpdateCheckInFlight = true;
+  try {
+    const version = remoteUpdateVersion(target.remoteProfile);
+    const confirmed = await nativeConfirm(
+      `共享配置「${target.remoteProfile.name}」有新版本 ${version}。\n当前 Codex 正在使用这套配置，是否立即更新并重启 Codex？`,
+      "更新并重启",
+      false,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    await updateActiveSharedProfileFromCloud(target.activeProfile, target.remoteProfile);
+  } finally {
+    remoteUpdateCheckInFlight = false;
+  }
 }
 
 async function openNetworkSsoLogin(): Promise<void> {
@@ -1168,7 +1372,11 @@ async function fetchNetworkProfileDocument(networkProfileId: string): Promise<Pr
     notes: profileData.description || "从网络资源库获取的共享配置",
     authTypeLabel: "远程资源",
     createdAt: profileData.createdAt,
-    updatedAt: profileData.createdAt,
+    updatedAt: profileData.updatedAt ?? profileData.createdAt,
+    remoteProfileId: profileData.id,
+    remoteContentVersion: profileData.contentVersion ?? null,
+    remoteContentHash: profileData.contentHash ?? null,
+    remoteUpdatedAt: remoteUpdatedAtFromNetworkProfile(profileData),
     authJson,
     configToml,
     loadedFromTarget: false,
@@ -1197,6 +1405,10 @@ async function downloadAndApplyNetworkProfile(networkProfileId: string, profileN
       const snapshot = await desktopInvoke<AppSnapshot>("import_profile", { payload });
       const targetProfileId = snapshot.profiles[0]?.id;
       if (targetProfileId) {
+        const metadataSnapshot = await persistRemoteMetadata(targetProfileId, document);
+        if (metadataSnapshot) {
+          setSnapshot(metadataSnapshot);
+        }
         const afterSwitchSnap = await desktopInvoke<AppSnapshot>("switch_profile", { profileId: targetProfileId });
         state.selectedProfileId = targetProfileId;
         setSnapshot(afterSwitchSnap);
@@ -1254,9 +1466,17 @@ async function importNetworkProfileDocument(
   }
 
   const snapshot = await desktopInvoke<AppSnapshot>("import_profile", { payload });
-  const importedProfile = snapshot.profiles[0] ?? null;
+  let importedProfile = snapshot.profiles[0] ?? null;
   state.selectedProfileId = importedProfile?.id ?? null;
   setSnapshot(snapshot);
+
+  if (importedProfile) {
+    const metadataSnapshot = await persistRemoteMetadata(importedProfile.id, document);
+    if (metadataSnapshot) {
+      setSnapshot(metadataSnapshot);
+      importedProfile = metadataSnapshot.profiles.find((profile) => profile.id === importedProfile?.id) ?? importedProfile;
+    }
+  }
 
   if (options.openEditor && importedProfile) {
     applyEditorDocument({
@@ -1265,6 +1485,10 @@ async function importNetworkProfileDocument(
       name: importedProfile.name,
       notes: importedProfile.notes,
       authTypeLabel: importedProfile.authTypeLabel,
+      remoteProfileId: importedProfile.remoteProfileId ?? document.remoteProfileId ?? null,
+      remoteContentVersion: importedProfile.remoteContentVersion ?? document.remoteContentVersion ?? null,
+      remoteContentHash: importedProfile.remoteContentHash ?? document.remoteContentHash ?? null,
+      remoteUpdatedAt: importedProfile.remoteUpdatedAt ?? document.remoteUpdatedAt ?? null,
       createdAt: importedProfile.createdAt,
       updatedAt: importedProfile.updatedAt,
       loadedFromTarget: false,
@@ -1304,6 +1528,10 @@ async function importCurrentNetworkProfileFromEditor(): Promise<void> {
       authTypeLabel: "远程资源",
       createdAt: state.editor.createdAt ?? new Date().toISOString(),
       updatedAt: state.editor.updatedAt ?? state.editor.createdAt ?? new Date().toISOString(),
+      remoteProfileId: state.editor.remoteProfileId,
+      remoteContentVersion: state.editor.remoteContentVersion,
+      remoteContentHash: state.editor.remoteContentHash,
+      remoteUpdatedAt: state.editor.remoteUpdatedAt,
       authJson: state.editor.authJson,
       configToml: state.editor.configToml,
       loadedFromTarget: false,
@@ -1331,11 +1559,6 @@ async function shareLocalProfileToNetwork(): Promise<void> {
     setFlash("error", "请先使用钉钉 SSO 登录企业共享中心。");
     return;
   }
-  if (state.shareDraft.visibility === "selected" && normalizedSelectedUserIds.length === 0) {
-    setFlash("error", "请选择至少一位共享对象，或切换为全部员工可见。");
-    return;
-  }
-
   const summary = state.snapshot?.profiles.find((profile) => profile.id === profileId);
   if (!summary) {
     setFlash("error", "找不到要共享的本地配置。");
@@ -1347,24 +1570,51 @@ async function shareLocalProfileToNetwork(): Promise<void> {
     const document = isTauriRuntime
       ? await desktopInvoke<ProfileDocument>("get_profile_document", { profileId })
       : createMockProfileDocument(summary);
-    const formData = new FormData();
-    formData.append("name", document.name);
-    formData.append("description", document.notes || "");
-    formData.append("visibility", state.shareDraft.visibility);
-    formData.append(
-      "sharedWith",
-      JSON.stringify(state.shareDraft.visibility === "selected" ? normalizedSelectedUserIds : []),
+    const existingProfile = findOwnedNetworkProfileForLocalProfile(profileId, document.name);
+    const { visibility, sharedWith } = resolveSharedProfileUpdateScope(
+      existingProfile,
+      state.shareDraft.visibility,
+      normalizedSelectedUserIds,
     );
-    formData.append("file1", new File([document.authJson], "auth.json", { type: "application/json" }));
-    formData.append("file2", new File([document.configToml], "config.toml", { type: "text/plain" }));
-
+    if (visibility === "selected" && sharedWith.length === 0) {
+      setFlash("error", "请选择至少一位共享对象，或切换为全部员工可见。");
+      return;
+    }
     const headers = networkAuthHeaders(state.networkSharing);
-    const response = await fetch(networkProfilesApiUrl(state.networkSharing), {
-      method: "POST",
-      cache: "no-store",
-      ...(headers ? { headers } : {}),
-      body: formData,
-    });
+    const response = existingProfile
+      ? await fetch(`${networkProfilesApiUrl(state.networkSharing)}/${existingProfile.id}`, {
+          method: "POST",
+          cache: "no-store",
+          headers: {
+            "Content-Type": "application/json",
+            ...(headers ?? {}),
+          },
+          body: JSON.stringify({
+            name: document.name,
+            description: document.notes || "",
+            visibility,
+            sharedWith,
+            sourceProfileId: profileId,
+            authContent: document.authJson,
+            configContent: document.configToml,
+          }),
+        })
+      : await fetch(networkProfilesApiUrl(state.networkSharing), {
+          method: "POST",
+          cache: "no-store",
+          ...(headers ? { headers } : {}),
+          body: (() => {
+            const formData = new FormData();
+            formData.append("name", document.name);
+            formData.append("description", document.notes || "");
+            formData.append("visibility", visibility);
+            formData.append("sharedWith", JSON.stringify(sharedWith));
+            formData.append("sourceProfileId", profileId);
+            formData.append("file1", new File([document.authJson], "auth.json", { type: "application/json" }));
+            formData.append("file2", new File([document.configToml], "config.toml", { type: "text/plain" }));
+            return formData;
+          })(),
+        });
 
     if (response.status === 401) {
       throw networkUnauthorizedError("共享配置");
@@ -1373,8 +1623,14 @@ async function shareLocalProfileToNetwork(): Promise<void> {
       const body = await response.json().catch(() => ({})) as { error?: string };
       throw new Error(body.error || "共享配置失败");
     }
+    const updatedProfile = await response.json().catch(() => null) as Partial<NetworkProfile> | null;
+    if (existingProfile && (!updatedProfile?.contentHash || typeof updatedProfile.contentVersion !== "number")) {
+      throw new Error("企业共享库服务端尚未升级，授权文件没有同步成功。请先部署新版共享中心后端。");
+    }
 
-    setFlash("success", `已共享「${document.name}」到企业共享中心。`);
+    setFlash("success", existingProfile
+      ? `已同步「${document.name}」的授权信息到企业共享中心。`
+      : `已共享「${document.name}」到企业共享中心。`);
     await fetchNetworkProfiles();
   } catch (error) {
     setFlash("error", error instanceof Error ? error.message : String(error));
@@ -1487,6 +1743,134 @@ function startAutoUpdateChecker(): void {
   setInterval(() => {
     void autoCheckForUpdate();
   }, 8 * 60 * 60 * 1000);
+}
+
+function startPacProxyStatusListener(): void {
+  const tauriInternals = (window as Window & {
+    __TAURI_INTERNALS__?: { transformCallback?: unknown };
+  }).__TAURI_INTERNALS__;
+  if (!isTauriRuntime || typeof tauriInternals?.transformCallback !== "function") {
+    return;
+  }
+
+  void listen<PacProxyStatus>("pac-proxy-status-changed", (event) => {
+    state.pacProxy = event.payload;
+    render();
+    setFlash(
+      "success",
+      event.payload.enabled ? "已从系统菜单栏开启 PAC 内网加速。" : "已从系统菜单栏关闭 PAC 内网加速。",
+    );
+  });
+}
+
+function previewPacProxyStatus(enabled: boolean = false): PacProxyStatus {
+  const availableServices = ["Ethernet", "Wi-Fi", "iPhone USB"];
+  const selectedServices = ["Ethernet", "Wi-Fi"];
+  return {
+    supported: true,
+    enabled,
+    pacUrl: "http://10.12.0.24/proxy.pac",
+    availableServices,
+    selectedServices,
+    services: enabled ? selectedServices : [],
+    message: "当前是浏览器预览模式，不会修改系统代理。",
+  };
+}
+
+async function loadPacProxyStatus(options: { silent?: boolean } = {}): Promise<void> {
+  state.pacProxyLoading = true;
+  render();
+
+  try {
+    if (!isTauriRuntime) {
+      state.pacProxy = previewPacProxyStatus(false);
+      return;
+    }
+
+    state.pacProxy = await desktopInvoke<PacProxyStatus>("get_pac_proxy_status");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    state.pacProxy = {
+      ...state.pacProxy,
+      supported: false,
+      enabled: false,
+      message,
+    };
+    if (!options.silent) {
+      setFlash("error", `读取 PAC 内网加速状态失败：${message}`);
+    }
+  } finally {
+    state.pacProxyLoading = false;
+    render();
+  }
+}
+
+async function togglePacProxy(): Promise<void> {
+  if (state.pacProxyLoading) {
+    return;
+  }
+
+  const enabled = !state.pacProxy.enabled;
+  state.pacProxyLoading = true;
+  render();
+
+  try {
+    if (!isTauriRuntime) {
+      state.pacProxy = previewPacProxyStatus(enabled);
+    } else {
+      state.pacProxy = await desktopInvoke<PacProxyStatus>("set_pac_proxy_enabled", {
+        enabled,
+      });
+    }
+
+    setFlash(
+      "success",
+      enabled ? "已开启 PAC 内网加速。" : "已关闭 PAC 内网加速。",
+    );
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+    if (isTauriRuntime) {
+      await loadPacProxyStatus({ silent: true });
+    }
+  } finally {
+    state.pacProxyLoading = false;
+    render();
+  }
+}
+
+async function setPacProxySelectedServices(selectedServices: string[]): Promise<void> {
+  if (selectedServices.length === 0) {
+    setFlash("error", "请至少选择一个生效网络服务。");
+    render();
+    return;
+  }
+
+  state.pacProxyLoading = true;
+  render();
+
+  try {
+    if (!isTauriRuntime) {
+      state.pacProxy = {
+        ...state.pacProxy,
+        selectedServices,
+        services: state.pacProxy.enabled ? selectedServices : [],
+      };
+    } else {
+      state.pacProxy = await desktopInvoke<PacProxyStatus>("set_pac_proxy_selected_services", {
+        selectedServices,
+      });
+    }
+
+    setFlash("success", "已保存 PAC 生效网络服务。");
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+    if (isTauriRuntime) {
+      await loadPacProxyStatus({ silent: true });
+    }
+  } finally {
+    state.pacProxyLoading = false;
+    render();
+  }
 }
 
 async function setCodexUsageApiEnabled(enabled: boolean): Promise<void> {
@@ -1829,6 +2213,7 @@ function renderSharingCenterView(snapshot: AppSnapshot): string {
       loading: state.networkLoading,
       profiles: state.networkProfiles,
       currentUser: state.networkUser,
+      activeLibraryTab: state.sharingLibraryTab,
     });
   }
 
@@ -1875,6 +2260,8 @@ function render(): void {
         state.pendingActions,
         writeThirdPartyWebsocketsDefaultsActionKey,
       ),
+      pacProxy: state.pacProxy,
+      pacProxyLoading: state.pacProxyLoading,
     });
   } else if (state.view === "sessions") {
     content = renderSessionsPage(selectSessionRenderState(state));
@@ -2320,6 +2707,31 @@ function bindEvents(): void {
       state.editor.thirdParty.oauthProfileId = (event.currentTarget as HTMLSelectElement).value;
     });
 
+  document
+    .querySelectorAll<HTMLInputElement>('[data-action="toggle-pac-proxy-service"]')
+    .forEach((input) => {
+      input.addEventListener("change", async (event) => {
+        const checkbox = event.currentTarget as HTMLInputElement;
+        const selectedServices = new Set(state.pacProxy.selectedServices);
+        if (checkbox.checked) {
+          selectedServices.add(checkbox.value);
+        } else {
+          selectedServices.delete(checkbox.value);
+        }
+
+        const normalized = state.pacProxy.availableServices.filter((service) =>
+          selectedServices.has(service),
+        );
+        if (normalized.length === 0) {
+          checkbox.checked = true;
+          setFlash("error", "请至少选择一个生效网络服务。");
+          return;
+        }
+
+        await setPacProxySelectedServices(normalized);
+      });
+    });
+
   document.querySelectorAll<HTMLButtonElement>("[data-action]").forEach((button) => {
     button.addEventListener("click", async () => {
       const action = button.dataset.action;
@@ -2350,6 +2762,8 @@ function bindEvents(): void {
           state.view = "settings";
           render();
         }
+      } else if (action === "toggle-pac-proxy") {
+        await togglePacProxy();
       } else if (action === "save-network-sharing-settings") {
         saveNetworkSharingSettings(state.networkSharing);
         state.networkAuthRequired = !state.networkSharing.token.trim();
@@ -2397,6 +2811,9 @@ function bindEvents(): void {
         if (!state.networkProfiles.length && state.networkSharing.token.trim()) {
           await loadSharingCenterData();
         }
+      } else if (action === "sharing-library-tab" && button.dataset.libraryTab) {
+        state.sharingLibraryTab = button.dataset.libraryTab as SharingLibraryTab;
+        render();
       } else if (action === "edit-shared-profile-users" && button.dataset.id) {
         beginEditSharedProfile(button.dataset.id);
       } else if (action === "cancel-edit-shared-profile") {
@@ -2800,4 +3217,6 @@ if (state.networkSharing.token.trim()) {
 }
 void loadAppVersion();
 void refreshSnapshot();
+void loadPacProxyStatus({ silent: true });
+startPacProxyStatusListener();
 startAutoUpdateChecker();

@@ -432,7 +432,13 @@ fn write_recovery_session_index(root: &Path, entries: &[(&str, &str, i64)]) {
 }
 
 fn seed_recovery_database(root: &Path, threads: &[RecoveryThreadSeed]) {
-    let db_path = root.join("state_5.sqlite");
+    seed_recovery_database_at(&root.join("state_5.sqlite"), threads);
+}
+
+fn seed_recovery_database_at(db_path: &Path, threads: &[RecoveryThreadSeed]) {
+    if let Some(parent) = db_path.parent() {
+        fs::create_dir_all(parent).expect("create recovery db parent");
+    }
     let conn = Connection::open(&db_path).expect("open recovery db");
     conn.execute_batch(
         "CREATE TABLE threads (
@@ -1184,7 +1190,13 @@ fn switch_profile_reuses_auto_registered_current_config_after_normalization() {
     manager
         .switch_profile(&next_profile.id)
         .expect("first switch auto-registers current config");
-    assert_eq!(manager.list_profiles().expect("list after first switch").len(), 2);
+    assert_eq!(
+        manager
+            .list_profiles()
+            .expect("list after first switch")
+            .len(),
+        2
+    );
 
     fs::write(target_dir.path().join("auth.json"), &current_auth).expect("restore auth");
     fs::write(target_dir.path().join("config.toml"), &current_config).expect("restore config");
@@ -1193,7 +1205,13 @@ fn switch_profile_reuses_auto_registered_current_config_after_normalization() {
         .switch_profile(&next_profile.id)
         .expect("second switch should reuse auto-registered config");
 
-    assert_eq!(manager.list_profiles().expect("list after second switch").len(), 2);
+    assert_eq!(
+        manager
+            .list_profiles()
+            .expect("list after second switch")
+            .len(),
+        2
+    );
 }
 
 #[test]
@@ -1732,6 +1750,107 @@ fn switch_profile_repairs_active_session_provider_when_model_provider_changes() 
     let rollout = fs::read_to_string(&rollout_path).expect("read rollout");
     assert!(rollout.contains(r#""model_provider":"openai""#));
     assert_eq!(file_mtime_millis(&rollout_path), 1_000);
+}
+
+#[test]
+fn list_codex_sessions_prefers_new_sqlite_state_directory() {
+    let (_app_dir, target_dir, manager) = temp_manager();
+
+    let root_rollout_path = target_dir
+        .path()
+        .join("sessions")
+        .join("2026")
+        .join("root.jsonl");
+    write_provider_repair_rollout(&root_rollout_path, "root-thread", "openai");
+    seed_recovery_database(
+        target_dir.path(),
+        &[RecoveryThreadSeed {
+            id: "root-thread".into(),
+            cwd: "/tmp/root".into(),
+            title: "Root Thread".into(),
+            rollout_path: root_rollout_path,
+            updated_at_ms: 1_000,
+            has_user_event: true,
+            archived: false,
+            model_provider: "openai".into(),
+        }],
+    );
+
+    let sqlite_rollout_path = target_dir
+        .path()
+        .join("sessions")
+        .join("2026")
+        .join("sqlite.jsonl");
+    write_provider_repair_rollout(&sqlite_rollout_path, "sqlite-thread", "ylscode");
+    seed_recovery_database_at(
+        &target_dir.path().join("sqlite").join("state_5.sqlite"),
+        &[RecoveryThreadSeed {
+            id: "sqlite-thread".into(),
+            cwd: "/tmp/sqlite".into(),
+            title: "SQLite Thread".into(),
+            rollout_path: sqlite_rollout_path,
+            updated_at_ms: 2_000,
+            has_user_event: true,
+            archived: false,
+            model_provider: "ylscode".into(),
+        }],
+    );
+
+    let sessions = manager.list_codex_sessions().expect("list sessions");
+
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].id, "sqlite-thread");
+    assert_eq!(sessions[0].model_provider.as_deref(), Some("ylscode"));
+}
+
+#[test]
+fn switch_symbiotic_profile_repairs_provider_in_new_sqlite_state_directory() {
+    let (_app_dir, target_dir, mut manager) = temp_manager();
+
+    let profile = manager
+        .import_profile(ProfileInput {
+            name: "YLS OAuth".into(),
+            notes: String::new(),
+            auth_json: oauth_auth_json("team@example.com", "user-sym", "acct-sym"),
+            config_toml: symbiotic_third_party_config_toml("gpt-5"),
+        })
+        .expect("import profile");
+
+    let rollout_path = target_dir
+        .path()
+        .join("sessions")
+        .join("2026")
+        .join("symbiotic-sqlite.jsonl");
+    write_provider_repair_rollout(&rollout_path, "symbiotic-sqlite", "openai");
+    set_file_mtime(&rollout_path, file_time_from_millis(1_000)).expect("set rollout mtime");
+    seed_recovery_database_at(
+        &target_dir.path().join("sqlite").join("state_5.sqlite"),
+        &[RecoveryThreadSeed {
+            id: "symbiotic-sqlite".into(),
+            cwd: "/tmp/symbiotic-sqlite".into(),
+            title: "Symbiotic SQLite".into(),
+            rollout_path: rollout_path.clone(),
+            updated_at_ms: 1_000,
+            has_user_event: true,
+            archived: false,
+            model_provider: "openai".into(),
+        }],
+    );
+
+    manager.switch_profile(&profile.id).expect("switch profile");
+
+    let conn = Connection::open(target_dir.path().join("sqlite").join("state_5.sqlite"))
+        .expect("open sqlite state db");
+    let provider = conn
+        .query_row(
+            "SELECT model_provider FROM threads WHERE id = ?1",
+            ["symbiotic-sqlite"],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("read provider");
+    assert_eq!(provider, "ylscode");
+    let rollout = fs::read_to_string(&rollout_path).expect("read rollout");
+    assert!(rollout.contains(r#""model_provider":"ylscode""#));
 }
 
 #[test]
@@ -2371,7 +2490,11 @@ fn restart_codex_has_cross_platform_process_plan() {
 fn test_get_codex_session_messages_parsing() {
     let (_app_dir, target_dir, manager) = temp_manager();
 
-    let rollout_path = target_dir.path().join("sessions").join("2026").join("test_thread.jsonl");
+    let rollout_path = target_dir
+        .path()
+        .join("sessions")
+        .join("2026")
+        .join("test_thread.jsonl");
     fs::create_dir_all(rollout_path.parent().unwrap()).unwrap();
 
     // Write different session event payload formats
@@ -2438,7 +2561,7 @@ fn test_get_codex_session_messages_parsing() {
             "type": "message",
             "role": "assistant",
             "content": "done"
-        })
+        }),
     ];
 
     let mut content = String::new();

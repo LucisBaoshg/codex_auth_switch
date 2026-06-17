@@ -5,7 +5,7 @@ import {
   createProfile,
   filterProfilesForPrincipal,
   normalizeProfileVisibility,
-  publicProfile,
+  publicProfileWithAuthType,
   readProfiles,
 } from "@/lib/profile-store";
 import { sanitizeSharedConfigToml } from "@/lib/shared-profile-config";
@@ -21,7 +21,9 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers: noStoreHeaders });
   }
 
-  const profiles = filterProfilesForPrincipal(await readProfiles(), principal).map(publicProfile);
+  const profiles = await Promise.all(
+    filterProfilesForPrincipal(await readProfiles(), principal).map(publicProfileWithAuthType),
+  );
   return NextResponse.json(profiles, { headers: noStoreHeaders });
 }
 
@@ -37,6 +39,7 @@ export async function POST(req: NextRequest) {
     const description = formData.get("description") as string;
     const visibility = normalizeProfileVisibility(formData.get("visibility") as string | null, formData.get("sharedWith") as string | null);
     const sharedWith = formData.get("sharedWith") as string;
+    const sourceProfileId = formData.get("sourceProfileId") as string | null;
     const file1 = formData.get("file1") as File | null;
     const file2 = formData.get("file2") as File | null;
 
@@ -59,11 +62,12 @@ export async function POST(req: NextRequest) {
       description,
       visibility,
       sharedWith: resolvedSharedWith,
+      sourceProfileId: sourceProfileId?.trim() || undefined,
       authContent: await file1.text(),
       configContent: sanitizeSharedConfigToml(await file2.text()),
     }, principal);
 
-    return NextResponse.json(publicProfile(newProfile), { status: 201, headers: noStoreHeaders });
+    return NextResponse.json(await publicProfileWithAuthType(newProfile), { status: 201, headers: noStoreHeaders });
   } catch (error) {
     console.error("Upload Error:", error);
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500, headers: noStoreHeaders });

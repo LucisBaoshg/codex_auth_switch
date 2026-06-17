@@ -209,7 +209,9 @@ impl TestServer {
                             ),
                         };
 
-                        if path.contains("usage") && request.contains("Authorization: Bearer access-token-stale") {
+                        if path.contains("usage")
+                            && request.contains("Authorization: Bearer access-token-stale")
+                        {
                             status = "401 Unauthorized".to_string();
                             content_type = "application/json".to_string();
                             body = "{\"error\": \"Unauthorized\"}".to_string();

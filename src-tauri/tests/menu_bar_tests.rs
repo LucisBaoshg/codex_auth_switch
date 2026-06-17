@@ -1,10 +1,11 @@
 use chrono::{TimeZone, Utc};
 use codex_auth_switch_lib::core::{
-    AppSnapshot, CodexUsageCredits, CodexUsageSnapshot, CodexUsageWindow, ProfileSummary,
-    ThirdPartyUsageQuotaSnapshot, ThirdPartyUsageSnapshot,
+    AppSnapshot, CodexUsageCredits, CodexUsageSnapshot, CodexUsageWindow, PacProxyStatus,
+    ProfileSummary, ThirdPartyUsageQuotaSnapshot, ThirdPartyUsageSnapshot, PAC_PROXY_URL,
 };
 use codex_auth_switch_lib::menu_bar::{
-    menu_bar_action_labels, menu_bar_refresh_target, menu_bar_usage_status, MenuBarRefreshKind,
+    menu_bar_action_labels, menu_bar_pac_proxy_label, menu_bar_refresh_target,
+    menu_bar_usage_status, MenuBarRefreshKind,
 };
 
 fn usage_window(used_percent: f64, minutes: i64) -> CodexUsageWindow {
@@ -72,6 +73,10 @@ fn profile(id: &str, name: &str, usage: Option<CodexUsageSnapshot>) -> ProfileSu
         model_provider_name: None,
         model_provider_base_url: None,
         model_provider_wire_api: None,
+        remote_profile_id: None,
+        remote_content_version: None,
+        remote_content_hash: None,
+        remote_updated_at: None,
         created_at: Utc.with_ymd_and_hms(2026, 5, 6, 9, 0, 0).unwrap(),
         updated_at: Utc.with_ymd_and_hms(2026, 5, 6, 9, 0, 0).unwrap(),
         auth_hash: format!("{id}-auth"),
@@ -298,9 +303,37 @@ fn menu_bar_actions_exclude_enhanced_launch() {
     let labels = menu_bar_action_labels();
 
     assert_eq!(labels[0], ("menu-bar-refresh-usage", "刷新额度"));
-    assert_eq!(labels[1], ("menu-bar-show-window", "打开主窗口"));
-    assert_eq!(labels[2], ("menu-bar-quit", "退出"));
+    assert_eq!(
+        labels[1],
+        ("menu-bar-toggle-pac-proxy", "开启 PAC 内网加速")
+    );
+    assert_eq!(labels[2], ("menu-bar-show-window", "打开主窗口"));
+    assert_eq!(labels[3], ("menu-bar-quit", "退出"));
     assert!(!labels
         .iter()
         .any(|(id, label)| { *id == "menu-bar-wake-pet" || label.contains("增强启动") }));
+}
+
+#[test]
+fn menu_bar_pac_proxy_label_reflects_current_status() {
+    let enabled = PacProxyStatus {
+        supported: true,
+        enabled: true,
+        pac_url: PAC_PROXY_URL.into(),
+        available_services: vec!["Ethernet".into(), "Wi-Fi".into()],
+        selected_services: vec!["Wi-Fi".into()],
+        services: vec!["Wi-Fi".into()],
+        message: None,
+    };
+    assert_eq!(
+        menu_bar_pac_proxy_label(&enabled),
+        "关闭 PAC 内网加速"
+    );
+
+    let disabled = PacProxyStatus {
+        enabled: false,
+        services: Vec::new(),
+        ..enabled
+    };
+    assert_eq!(menu_bar_pac_proxy_label(&disabled), "开启 PAC 内网加速");
 }

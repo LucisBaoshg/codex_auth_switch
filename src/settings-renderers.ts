@@ -1,5 +1,6 @@
 import { escapeHtml } from "./html-utils";
 import type { NetworkSharingSettings } from "./network-sharing";
+import type { PacProxyStatus } from "./desktop-types";
 
 export type SettingsPageInput = {
   networkSharing: NetworkSharingSettings;
@@ -9,7 +10,98 @@ export type SettingsPageInput = {
   busy: boolean;
   migratingLegacyThirdParty: boolean;
   writingThirdPartyWebsocketsDefaults: boolean;
+  pacProxy?: PacProxyStatus;
+  pacProxyLoading?: boolean;
 };
+
+function fallbackPacProxyStatus(): PacProxyStatus {
+  return {
+    supported: false,
+    enabled: false,
+    pacUrl: "http://10.12.0.24/proxy.pac",
+    availableServices: [],
+    selectedServices: [],
+    services: [],
+    message: "PAC 状态尚未加载。",
+  };
+}
+
+function renderPacProxyServiceOptions(pacProxy: PacProxyStatus, disabled: boolean): string {
+  if (!pacProxy.supported || pacProxy.availableServices.length === 0) {
+    return "";
+  }
+
+  const selected = new Set(pacProxy.selectedServices);
+  const options = pacProxy.availableServices
+    .map((service) => `
+              <label class="pac-service-option">
+                <input
+                  type="checkbox"
+                  data-action="toggle-pac-proxy-service"
+                  value="${escapeHtml(service)}"${selected.has(service) ? " checked" : ""}
+                  ${disabled ? "disabled" : ""}
+                />
+                <span>${escapeHtml(service)}</span>
+              </label>
+    `)
+    .join("");
+
+  return `
+          <div class="pac-service-options" data-role="pac-service-options">
+            <span>生效网络服务</span>
+            <div class="pac-service-option-grid">
+              ${options}
+            </div>
+          </div>
+  `;
+}
+
+function renderPacProxySettings(input: SettingsPageInput): string {
+  const pacProxy = input.pacProxy ?? fallbackPacProxyStatus();
+  const loading = Boolean(input.pacProxyLoading);
+  const disabled = input.busy || loading || !pacProxy.supported;
+  const stateClass = pacProxy.enabled ? "is-on" : "is-off";
+  const statusText = loading
+    ? "切换中..."
+    : pacProxy.supported
+      ? pacProxy.enabled
+        ? "已开启"
+        : "未开启"
+      : "未开启";
+  const actionTitle = pacProxy.enabled ? "关闭 PAC 内网加速" : "开启 PAC 内网加速";
+  const serviceText = pacProxy.enabled && pacProxy.services.length > 0
+    ? `生效网络服务：${pacProxy.services.join("、")}`
+    : "开启后会写入系统自动代理配置；关闭时只关闭匹配此地址的 PAC。";
+
+  return `
+        <div class="card" data-role="pac-proxy-settings">
+          <div class="card-head pac-settings-head">
+            <div class="pac-settings-copy">
+              <h3>PAC 内网加速</h3>
+              <p class="card-note">公司内网与国内网站直连，国外工作网站按 PAC 规则自动加速。</p>
+            </div>
+            <button
+              class="pac-toggle-switch ${stateClass}"
+              data-action="toggle-pac-proxy"
+              aria-pressed="${pacProxy.enabled ? "true" : "false"}"
+              title="${escapeHtml(actionTitle)}"
+              ${disabled ? "disabled" : ""}
+            >
+              <span class="pac-toggle-track" aria-hidden="true">
+                <span class="pac-toggle-thumb"></span>
+              </span>
+              <span>${escapeHtml(statusText)}</span>
+            </button>
+          </div>
+          <div class="pac-url-box">
+            <span>自动代理配置地址</span>
+            <strong>${escapeHtml(pacProxy.pacUrl)}</strong>
+          </div>
+          ${renderPacProxyServiceOptions(pacProxy, disabled)}
+          <p class="card-note pac-settings-message">${escapeHtml(pacProxy.message ?? serviceText)}</p>
+        </div>
+  `;
+}
 
 export function renderSettingsPage(input: SettingsPageInput): string {
   return `
@@ -19,6 +111,7 @@ export function renderSettingsPage(input: SettingsPageInput): string {
       </header>
 
       <div class="grid-container" style="max-width: 760px;">
+        ${renderPacProxySettings(input)}
         <div class="card">
           <div class="card-head">
             <h3>企业共享库</h3>

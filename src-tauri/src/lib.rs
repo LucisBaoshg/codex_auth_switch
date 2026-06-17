@@ -3,21 +3,31 @@ pub mod menu_bar;
 
 use crate::core::{
     check_for_update, check_install_location as resolve_install_location,
-    install_update as perform_install_update, restart_codex_app, AppSnapshot, CodexMessage,
-    CodexSessionInfo, CodexUsageStatsFilter, CodexUsageStatsSnapshot, InstallLocationStatus,
-    LegacyThirdPartyMigrationResult, ModelProviderSummary, ProfileDocument, ProfileInput,
-    ProfileManager, SessionRecoveryReport, SessionRepairResult, ThirdPartyWebsocketsDefaultResult,
-    UpdateCheckResult, UpdateInstallRequest,
+    get_pac_proxy_status as read_pac_proxy_status, install_update as perform_install_update,
+    restart_codex_app, set_pac_proxy_enabled as write_pac_proxy_enabled,
+    set_pac_proxy_selected_services as write_pac_proxy_selected_services, AppSnapshot,
+    CodexMessage, CodexSessionInfo, CodexUsageStatsFilter, CodexUsageStatsSnapshot,
+    InstallLocationStatus, LegacyThirdPartyMigrationResult, ModelProviderSummary, PacProxyStatus,
+    ProfileDocument, ProfileInput, ProfileManager, SessionRecoveryReport, SessionRepairResult,
+    ThirdPartyWebsocketsDefaultResult, UpdateCheckResult, UpdateInstallRequest,
 };
 use crate::menu_bar::{
-    install_menu_bar, menu_bar_refresh_target, sync_menu_bar_usage, MenuBarRefreshKind,
+    install_menu_bar, menu_bar_refresh_target, sync_menu_bar_pac_proxy, sync_menu_bar_usage,
+    MenuBarRefreshKind,
 };
+use chrono::{DateTime, Utc};
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
-use tauri::{AppHandle, Listener, Manager};
+use tauri::{AppHandle, Emitter, Listener, Manager};
 
 const MENU_BAR_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+
+#[derive(serde::Serialize)]
+struct NetworkDeleteResponse {
+    status: u16,
+    body: String,
+}
 
 fn manager_from_app(app: &AppHandle) -> Result<ProfileManager, String> {
     let app_data_dir = app
@@ -112,6 +122,60 @@ fn update_profile(
         .update_profile(&profile_id, payload)
         .map_err(|error| error.to_string())?;
     snapshot_and_sync(&app, &manager)
+}
+
+#[tauri::command]
+fn set_profile_remote_metadata(
+    app: AppHandle,
+    profile_id: String,
+    remote_profile_id: String,
+    remote_content_version: Option<u64>,
+    remote_content_hash: Option<String>,
+    remote_updated_at: Option<DateTime<Utc>>,
+) -> Result<AppSnapshot, String> {
+    let manager = manager_from_app(&app)?;
+    manager
+        .set_profile_remote_metadata(
+            &profile_id,
+            remote_profile_id,
+            remote_content_version,
+            remote_content_hash,
+            remote_updated_at,
+        )
+        .map_err(|error| error.to_string())?;
+    snapshot_and_sync(&app, &manager)
+}
+
+#[tauri::command]
+fn delete_network_profile(
+    url: String,
+    token: Option<String>,
+) -> Result<NetworkDeleteResponse, String> {
+    let parsed = url::Url::parse(&url).map_err(|error| error.to_string())?;
+    match parsed.scheme() {
+        "http" | "https" => (),
+        scheme => return Err(format!("unsupported URL scheme: {scheme}")),
+    }
+
+    let mut request = ureq::delete(parsed.as_str()).set("User-Agent", "codex-auth-switch");
+    if let Some(token) = token {
+        let token = token.trim();
+        if !token.is_empty() {
+            request = request.set("Authorization", &format!("Bearer {token}"));
+        }
+    }
+
+    match request.call() {
+        Ok(response) => Ok(NetworkDeleteResponse {
+            status: response.status(),
+            body: response.into_string().unwrap_or_default(),
+        }),
+        Err(ureq::Error::Status(status, response)) => Ok(NetworkDeleteResponse {
+            status,
+            body: response.into_string().unwrap_or_default(),
+        }),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 #[tauri::command]
@@ -354,6 +418,42 @@ fn check_install_location() -> Result<InstallLocationStatus, String> {
 }
 
 #[tauri::command]
+fn get_pac_proxy_status(app: AppHandle) -> Result<PacProxyStatus, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    read_pac_proxy_status(app_data_dir).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_pac_proxy_enabled(app: AppHandle, enabled: bool) -> Result<PacProxyStatus, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    let status =
+        write_pac_proxy_enabled(app_data_dir, enabled).map_err(|error| error.to_string())?;
+    sync_menu_bar_pac_proxy(&app, &status).map_err(|error| error.to_string())?;
+    Ok(status)
+}
+
+#[tauri::command]
+fn set_pac_proxy_selected_services(
+    app: AppHandle,
+    selected_services: Vec<String>,
+) -> Result<PacProxyStatus, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    let status = write_pac_proxy_selected_services(app_data_dir, selected_services)
+        .map_err(|error| error.to_string())?;
+    sync_menu_bar_pac_proxy(&app, &status).map_err(|error| error.to_string())?;
+    Ok(status)
+}
+
+#[tauri::command]
 async fn list_codex_sessions(app: AppHandle) -> Result<Vec<CodexSessionInfo>, String> {
     run_blocking_manager_task(app, move |manager| {
         manager
@@ -442,6 +542,28 @@ fn spawn_menu_bar_usage_refresher(app: AppHandle) {
         });
     });
 
+    let pac_app = app.clone();
+    app.listen("menu-bar-toggle-pac-proxy-requested", move |_| {
+        let app = pac_app.clone();
+        tauri::async_runtime::spawn(async move {
+            let result = (|| -> Result<PacProxyStatus, String> {
+                let app_data_dir = app
+                    .path()
+                    .app_data_dir()
+                    .map_err(|error| error.to_string())?;
+                let current = read_pac_proxy_status(app_data_dir.clone())
+                    .map_err(|error| error.to_string())?;
+                let status = write_pac_proxy_enabled(app_data_dir, !current.enabled)
+                    .map_err(|error| error.to_string())?;
+                sync_menu_bar_pac_proxy(&app, &status).map_err(|error| error.to_string())?;
+                Ok(status)
+            })();
+            if let Ok(status) = result {
+                let _ = app.emit("pac-proxy-status-changed", status);
+            }
+        });
+    });
+
     tauri::async_runtime::spawn({
         let app = app.clone();
         async move {
@@ -477,6 +599,8 @@ pub fn run() {
             get_target_profile_input,
             get_profile_document,
             update_profile,
+            set_profile_remote_metadata,
+            delete_network_profile,
             switch_profile,
             delete_profile,
             set_target_dir,
@@ -496,6 +620,9 @@ pub fn run() {
             check_update,
             install_update,
             check_install_location,
+            get_pac_proxy_status,
+            set_pac_proxy_enabled,
+            set_pac_proxy_selected_services,
             list_codex_sessions,
             refresh_codex_usage_stats,
             get_codex_session_messages,

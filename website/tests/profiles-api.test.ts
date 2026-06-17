@@ -47,7 +47,10 @@ test("creates shared profiles from a desktop bearer token", async () => {
     ownerDingUserId: "Ding-A",
     ownerName: "Alice",
     visibility: "public",
+    contentVersion: 1,
   }));
+  expect(body.contentHash).toMatch(/^[a-f0-9]{64}$/);
+  expect(body.contentUpdatedAt).toBe(body.updatedAt);
 });
 
 test("stores only share-safe config.toml content from desktop uploads", async () => {
@@ -98,6 +101,47 @@ test("stores only share-safe config.toml content from desktop uploads", async ()
   expect(storedConfig).not.toContain("[desktop]");
   expect(storedConfig).not.toContain("[projects");
   expect(storedConfig).not.toContain("private");
+});
+
+test("returns derived auth type labels for symbiotic shared profiles", async () => {
+  await useTempDataDir("codex-profiles-auth-type-test-");
+  const { token } = await createDesktopToken({
+    dingUserId: "Ding-A",
+    name: "Alice",
+    active: true,
+  });
+
+  const formData = new FormData();
+  formData.append("name", "伊莉思Code");
+  formData.append("description", "lancer.he@gmail.com 账号 $100/天");
+  formData.append("visibility", "public");
+  formData.append("sharedWith", "[]");
+  formData.append(
+    "file1",
+    new File(['{"auth_mode":"chatgpt","tokens":{"access_token":"oauth"}}'], "auth.json", { type: "application/json" }),
+  );
+  formData.append("file2", new File([[
+    'model_provider = "ylscode"',
+    'model = "gpt-5.5"',
+    '[model_providers.ylscode]',
+    'base_url = "https://code.ylsagi.com/codex"',
+    'experimental_bearer_token = "provider-token"',
+    'requires_openai_auth = true',
+  ].join("\n")], "config.toml", { type: "text/plain" }));
+
+  const response = await createSharedProfile(
+    new NextRequest("http://localhost/codex/api/profiles", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+      },
+      body: formData,
+    }),
+  );
+  const body = await response.json();
+
+  expect(response.status).toBe(201);
+  expect(body.authTypeLabel).toBe("共生配置");
 });
 
 test("updates shared profile recipients from a desktop bearer token", async () => {
@@ -161,7 +205,85 @@ test("updates shared profile recipients from a desktop bearer token", async () =
   expect(response.status).toBe(200);
   expect(body.sharedWith).toEqual(["Ding-B"]);
   expect(body.visibility).toBe("selected");
+  expect(body.contentVersion).toBe(1);
   expect(storedProfiles[0].sharedWith).toEqual(["Ding-B"]);
+  expect(storedProfiles[0].contentVersion).toBe(1);
+});
+
+test("updates shared profile files from a desktop bearer token", async () => {
+  const dataDir = await useTempDataDir("codex-profiles-file-update-test-");
+  const fs = await import("node:fs/promises");
+  const path = await import("node:path");
+  await fs.mkdir(path.join(dataDir, "files", "profile-1"), { recursive: true });
+  await fs.writeFile(path.join(dataDir, "files", "profile-1", "auth.json"), '{"auth_mode":"chatgpt","tokens":{"access_token":"old"}}');
+  await fs.writeFile(path.join(dataDir, "files", "profile-1", "config.toml"), 'model = "gpt-5"\nnotify = ["local"]');
+  await fs.writeFile(path.join(dataDir, "known-users.json"), JSON.stringify([
+    {
+      dingUserId: "Ding-B",
+      name: "Bob",
+      active: true,
+      firstSeenAt: "2026-06-04T10:00:00.000Z",
+      lastSeenAt: "2026-06-04T10:00:00.000Z",
+    },
+  ]));
+  await fs.writeFile(path.join(dataDir, "profiles.json"), JSON.stringify([
+    {
+      id: "profile-1",
+      name: "ChatGPT Pro",
+      description: "shared auth",
+      createdAt: "2026-06-04T10:00:00.000Z",
+      updatedAt: "2026-06-04T10:00:00.000Z",
+      files: ["auth.json", "config.toml"],
+      contentVersion: 1,
+      contentHash: "old-content-hash",
+      contentUpdatedAt: "2026-06-04T10:00:00.000Z",
+      ownerDingUserId: "Ding-A",
+      ownerName: "Alice",
+      visibility: "selected",
+      sharedWith: ["Ding-B"],
+      sourceProfileId: "local-profile-1",
+    },
+  ]));
+  const { token } = await createDesktopToken({
+    dingUserId: "Ding-A",
+    name: "Alice",
+    active: true,
+  });
+
+  const response = await updateSharedProfile(
+    new NextRequest("http://localhost/codex/api/profiles/profile-1", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        name: "ChatGPT Pro",
+        description: "shared auth",
+        visibility: "selected",
+        sharedWith: ["Ding-B"],
+        sourceProfileId: "local-profile-1",
+        authContent: '{"auth_mode":"chatgpt","tokens":{"access_token":"new"}}',
+        configContent: 'model = "gpt-5.5"\nnotify = ["local"]',
+      }),
+    }),
+    { params: Promise.resolve({ id: "profile-1" }) },
+  );
+  const body = await response.json();
+  const storedAuth = await fs.readFile(path.join(dataDir, "files", "profile-1", "auth.json"), "utf-8");
+  const storedConfig = await fs.readFile(path.join(dataDir, "files", "profile-1", "config.toml"), "utf-8");
+  const storedProfiles = JSON.parse(await fs.readFile(path.join(dataDir, "profiles.json"), "utf-8"));
+
+  expect(response.status).toBe(200);
+  expect(body.sourceProfileId).toBe("local-profile-1");
+  expect(body.contentVersion).toBe(2);
+  expect(body.contentHash).toMatch(/^[a-f0-9]{64}$/);
+  expect(body.contentHash).not.toBe("old-content-hash");
+  expect(new Date(body.updatedAt).getTime()).toBeGreaterThan(new Date("2026-06-04T10:00:00.000Z").getTime());
+  expect(storedAuth).toContain('"access_token":"new"');
+  expect(storedConfig).toContain('model = "gpt-5.5"');
+  expect(storedConfig).not.toContain("notify");
+  expect(storedProfiles[0].sourceProfileId).toBe("local-profile-1");
+  expect(storedProfiles[0].contentVersion).toBe(2);
 });
 
 test("deletes an owned shared profile and removes its stored files", async () => {
@@ -206,6 +328,7 @@ test("deletes an owned shared profile and removes its stored files", async () =>
     .catch(() => false);
 
   expect(response.status).toBe(200);
+  expect(response.headers.get("Access-Control-Allow-Methods")).toContain("DELETE");
   expect(body).toEqual({ ok: true });
   expect(storedProfiles).toEqual([]);
   expect(fileFolderExists).toBe(false);

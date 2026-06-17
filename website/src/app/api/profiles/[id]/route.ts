@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { noStoreHeaders, optionsResponse } from "@/lib/api-response";
 import { principalFromRequest } from "@/lib/auth";
-import { deleteProfile, getVisibleProfile, normalizeProfileVisibility, publicProfile, updateProfileMetadata } from "@/lib/profile-store";
+import { deleteProfile, getVisibleProfile, normalizeProfileVisibility, publicProfileWithAuthType, updateProfileMetadata } from "@/lib/profile-store";
+import { sanitizeSharedConfigToml } from "@/lib/shared-profile-config";
 import { readKnownUsers, resolveSharedWithForVisibility } from "@/lib/user-store";
 
 export async function OPTIONS() {
@@ -26,7 +27,7 @@ export async function GET(
       return NextResponse.json({ error: "Profile not found" }, { status: 404, headers: noStoreHeaders });
     }
 
-    return NextResponse.json(publicProfile(profile), { headers: noStoreHeaders });
+    return NextResponse.json(await publicProfileWithAuthType(profile), { headers: noStoreHeaders });
   } catch (error) {
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500, headers: noStoreHeaders });
   }
@@ -68,7 +69,15 @@ export async function POST(
   }
 
   try {
-    const { name, description, visibility: rawVisibility, sharedWith } = await request.json();
+    const {
+      name,
+      description,
+      visibility: rawVisibility,
+      sharedWith,
+      sourceProfileId,
+      authContent,
+      configContent,
+    } = await request.json();
     const visibility = normalizeProfileVisibility(rawVisibility, sharedWith);
     let resolvedSharedWith: string[];
     try {
@@ -84,13 +93,16 @@ export async function POST(
       description,
       visibility,
       sharedWith: resolvedSharedWith,
+      sourceProfileId,
+      authContent: authContent === undefined ? undefined : String(authContent),
+      configContent: configContent === undefined ? undefined : sanitizeSharedConfigToml(String(configContent)),
     });
 
     if (!updated) {
       return NextResponse.json({ error: "Profile not found" }, { status: 404, headers: noStoreHeaders });
     }
 
-    return NextResponse.json(publicProfile(updated), { headers: noStoreHeaders });
+    return NextResponse.json(await publicProfileWithAuthType(updated), { headers: noStoreHeaders });
   } catch (error) {
     console.error("Error updating profile:", error);
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500, headers: noStoreHeaders });

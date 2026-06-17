@@ -16,11 +16,11 @@ export function nativeConfirm(message: string, okText = "确定", isDanger = fal
     overlay.appendChild(box);
     document.body.appendChild(overlay);
 
-    document.getElementById("btn-cancel")!.onclick = () => {
+    box.querySelector<HTMLButtonElement>("#btn-cancel")!.onclick = () => {
       document.body.removeChild(overlay);
       resolve(false);
     };
-    document.getElementById("btn-ok")!.onclick = () => {
+    box.querySelector<HTMLButtonElement>("#btn-ok")!.onclick = () => {
       document.body.removeChild(overlay);
       resolve(true);
     };

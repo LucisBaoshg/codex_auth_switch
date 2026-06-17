@@ -341,6 +341,43 @@ test("renders own sharing tab as local profile tabs with inline share controls",
   expect(html).toContain("disabled");
 });
 
+test("renders private owned cloud profiles without shared wording", async () => {
+  expect(existsSync(join(root, "src/sharing-center-renderers.ts"))).toBe(true);
+  const { renderOwnSharingTab } = await import(renderersImportPath);
+  const profile = createProfile({ name: "Private Cloud", notes: "Local notes" });
+  const ownedProfile = createNetworkProfile({
+    id: "network-private-a",
+    name: "Private Cloud",
+    visibility: "private",
+    sharedWith: [],
+  });
+
+  const html = renderOwnSharingTab({
+    profiles: [profile],
+    authRequired: false,
+    busy: false,
+    currentUser: createNetworkUser(),
+    shareDraft: createDraft({ profileId: profile.id }),
+    localShareForm: {
+      selectedProfile: profile,
+      profileIdToPersist: profile.id,
+      selectedUserCount: 0,
+      selectedShareDisabled: true,
+      shareSummary: "请选择共享对象",
+    },
+    shareUserPickerHtml: "<div data-role=\"share-user-list\">picker</div>",
+    ownedProfilesLoading: false,
+    ownedProfiles: [ownedProfile],
+    editDraft: createEditDraft({ profileId: "network-private-a", visibility: "private" }),
+    editUserPickerHtml: "",
+  });
+
+  expect(html).toContain("1 个云端配置");
+  expect(html).toContain("云端私有 · 仅自己可见");
+  expect(html).toContain('local-profile-tab-status private');
+  expect(html).not.toContain("已共享 · 仅自己可见");
+});
+
 test("renders owned shared profiles panel states and cards", async () => {
   expect(existsSync(join(root, "src/sharing-center-renderers.ts"))).toBe(true);
   const { renderOwnedSharedProfiles } = await import(renderersImportPath);
@@ -365,7 +402,7 @@ test("renders owned shared profiles panel states and cards", async () => {
       editDraft: null,
       editUserPickerHtml: "",
     }),
-  ).toContain("正在加载我已共享的配置");
+  ).toContain("正在加载我的云端配置");
 
   expect(
     renderOwnedSharedProfiles({
@@ -376,7 +413,7 @@ test("renders owned shared profiles panel states and cards", async () => {
       editDraft: null,
       editUserPickerHtml: "",
     }),
-  ).toContain("还没有共享配置");
+  ).toContain("还没有云端配置");
 
   const html = renderOwnedSharedProfiles({
     authRequired: false,
@@ -387,7 +424,7 @@ test("renders owned shared profiles panel states and cards", async () => {
     editUserPickerHtml: "",
   });
 
-  expect(html).toContain("我已共享的配置");
+  expect(html).toContain("我的云端配置");
   expect(html).toContain("Shared &lt;A&gt;");
   expect(html).toContain("指定 2 人");
   expect(html).toContain('data-action="edit-shared-profile-users"');
@@ -426,6 +463,7 @@ test("renders enterprise library tab states and network cards", async () => {
     loading: false,
     profiles: [],
     currentUser: null,
+    activeLibraryTab: "official",
   });
   expect(authHtml).toContain('data-role="network-profile-library"');
   expect(authHtml).toContain("需要登录企业共享库");
@@ -436,6 +474,7 @@ test("renders enterprise library tab states and network cards", async () => {
     loading: true,
     profiles: [],
     currentUser: null,
+    activeLibraryTab: "official",
   });
   expect(loadingHtml).toContain("正在获取云端共享配置");
 
@@ -444,6 +483,7 @@ test("renders enterprise library tab states and network cards", async () => {
     loading: false,
     profiles: [],
     currentUser: null,
+    activeLibraryTab: "official",
   });
   expect(emptyHtml).toContain("云端共享库为空");
   expect(emptyHtml).toContain('data-action="refresh-network-in-editor"');
@@ -457,15 +497,82 @@ test("renders enterprise library tab states and network cards", async () => {
         name: "Shared <A>",
         description: "Use <safe> config",
       }),
+      createNetworkProfile({
+        id: "network-api",
+        name: "YLS API",
+        description: "第三方 API",
+        ownerDingUserId: "ding-c",
+      }),
+      createNetworkProfile({
+        id: "network-private",
+        name: "Private Own",
+        description: "private",
+        visibility: "private",
+        sharedWith: [],
+      }),
     ],
     currentUser: createNetworkUser(),
+    activeLibraryTab: "official",
   });
 
-  expect(cardHtml).toContain("可用云端共享配置 (1)");
+  expect(cardHtml).toContain("官网 OAuth");
+  expect(cardHtml).toContain("第三方 API");
+  expect(cardHtml).toContain("自己可见");
+  expect(cardHtml).toContain('data-action="sharing-library-tab"');
   expect(cardHtml).toContain("Shared &lt;A&gt;");
   expect(cardHtml).toContain("Use &lt;safe&gt; config");
   expect(cardHtml).toContain("我共享的配置");
   expect(cardHtml).toContain("指定 2 人");
+  expect(cardHtml).toContain("更新: 2026年6月5日");
+  expect(cardHtml).not.toContain("YLS API");
+  expect(cardHtml).not.toContain("Private Own");
+  expect(cardHtml).not.toContain("可用云端共享配置");
+  expect(cardHtml).not.toContain("☁️ 远程");
   expect(cardHtml).toContain('data-action="view-network-profile-details"');
   expect(cardHtml).toContain('data-action="import-network-profile-to-editor"');
+
+  const thirdPartyHtml = renderEnterpriseLibraryTab({
+    authRequired: false,
+    loading: false,
+    profiles: [
+      createNetworkProfile({ id: "network-a", name: "Shared <A>", description: "Use <safe> config" }),
+      createNetworkProfile({
+        id: "network-api",
+        name: "YLS API",
+        description: "第三方 API",
+        ownerDingUserId: "ding-c",
+      }),
+      createNetworkProfile({
+        id: "network-symbiotic",
+        name: "伊莉思Code",
+        description: "lancer.he@gmail.com 账号 $100/天",
+        authTypeLabel: "共生配置",
+        ownerDingUserId: "ding-c",
+      }),
+      createNetworkProfile({
+        id: "network-legacy-code",
+        name: "伊莉思Code-走代理模式",
+        description: "lancer.he@gmail.com 账号 $100/天",
+        ownerDingUserId: "ding-c",
+      }),
+    ],
+    currentUser: createNetworkUser(),
+    activeLibraryTab: "thirdParty",
+  });
+  expect(thirdPartyHtml).toContain("YLS API");
+  expect(thirdPartyHtml).toContain("伊莉思Code");
+  expect(thirdPartyHtml).toContain("伊莉思Code-走代理模式");
+  expect(thirdPartyHtml).not.toContain("Shared &lt;A&gt;");
+
+  const emptyPrivateHtml = renderEnterpriseLibraryTab({
+    authRequired: false,
+    loading: false,
+    profiles: [
+      createNetworkProfile({ id: "network-a", name: "Shared <A>", description: "Use <safe> config" }),
+    ],
+    currentUser: createNetworkUser(),
+    activeLibraryTab: "private",
+  });
+  expect(emptyPrivateHtml).toContain("没有自己可见的配置");
+  expect(emptyPrivateHtml).not.toContain("Shared &lt;A&gt;");
 });

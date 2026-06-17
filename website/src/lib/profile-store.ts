@@ -1,4 +1,5 @@
 import { promises as fs } from "fs";
+import { createHash } from "crypto";
 import path from "path";
 import { getDataDir } from "./data-paths";
 
@@ -20,9 +21,14 @@ export type StoredProfile = {
   id: string;
   name: string;
   description: string;
+  authTypeLabel?: string;
   createdAt: string;
   updatedAt?: string;
   files: string[];
+  sourceProfileId?: string;
+  contentVersion?: number;
+  contentHash?: string;
+  contentUpdatedAt?: string;
   ownerDingUserId?: string;
   ownerName?: string | null;
   ownerMobile?: string | null;
@@ -37,11 +43,56 @@ export type ProfileInput = {
   description?: string;
   visibility?: ProfileVisibility;
   sharedWith?: string | string[];
+  sourceProfileId?: string;
   authContent: string;
   configContent: string;
 };
 
 const profilesFileName = "profiles.json";
+
+export function detectSharedProfileAuthType(authContent: string, configContent: string): string {
+  let auth: Record<string, unknown> = {};
+  try {
+    auth = JSON.parse(authContent) as Record<string, unknown>;
+  } catch {
+    return "未知";
+  }
+
+  const hasOfficialTokens =
+    auth.auth_mode === "chatgpt" ||
+    typeof auth.tokens === "object" ||
+    typeof auth.refresh_token === "string" ||
+    typeof auth.id_token === "string" ||
+    typeof auth.access_token === "string";
+  const hasOpenAiApiKey = typeof auth.OPENAI_API_KEY === "string" && auth.OPENAI_API_KEY.trim().length > 0;
+  const hasModelProviders = /^\s*\[\s*model_providers(?:\.[^\]]+)?\s*\]/m.test(configContent);
+  const hasProviderBaseUrl = /^\s*base_url\s*=/m.test(configContent) || /^\s*openai_base_url\s*=/m.test(configContent);
+  const hasSymbioticProvider =
+    /^\s*requires_openai_auth\s*=\s*true\s*$/m.test(configContent) ||
+    /^\s*experimental_bearer_token\s*=/m.test(configContent);
+
+  if (hasOfficialTokens && (hasSymbioticProvider || hasModelProviders)) return "共生配置";
+  if (hasOfficialTokens) return "官方 OAuth";
+  if (hasOpenAiApiKey && (hasProviderBaseUrl || hasModelProviders)) return "第三方 API";
+  if (hasOpenAiApiKey) return "API Key";
+  return "未知";
+}
+
+export function sharedProfileContentHash(authContent: string, configContent: string): string {
+  return createHash("sha256")
+    .update(authContent)
+    .update("\0")
+    .update(configContent)
+    .digest("hex");
+}
+
+async function readProfileFile(profileId: string, filename: string): Promise<string> {
+  try {
+    return await fs.readFile(path.join(profileFilesDir(), profileId, filename), "utf-8");
+  } catch {
+    return "";
+  }
+}
 
 export function normalizeSharedWith(input: string | string[] | null | undefined): string[] {
   const raw = Array.isArray(input) ? input : parseSharedWithString(input);
@@ -140,6 +191,19 @@ export function publicProfile(profile: StoredProfile): StoredProfile {
   };
 }
 
+export async function publicProfileWithAuthType(profile: StoredProfile): Promise<StoredProfile> {
+  const authTypeLabel = profile.authTypeLabel ??
+    detectSharedProfileAuthType(
+      await readProfileFile(profile.id, "auth.json"),
+      await readProfileFile(profile.id, "config.toml"),
+    );
+
+  return {
+    ...publicProfile(profile),
+    authTypeLabel,
+  };
+}
+
 export function profilesFilePath() {
   return path.join(getDataDir(), profilesFileName);
 }
@@ -180,6 +244,7 @@ export async function createProfile(input: ProfileInput, principal: ProfilePrinc
 
   const id = Date.now().toString();
   const now = new Date().toISOString();
+  const contentHash = sharedProfileContentHash(input.authContent, input.configContent);
   const profileFolder = path.join(profileFilesDir(), id);
   await fs.mkdir(profileFolder, { recursive: true });
   await fs.writeFile(path.join(profileFolder, "auth.json"), input.authContent);
@@ -189,9 +254,14 @@ export async function createProfile(input: ProfileInput, principal: ProfilePrinc
     id,
     name: input.name,
     description: input.description || "",
+    authTypeLabel: detectSharedProfileAuthType(input.authContent, input.configContent),
     createdAt: now,
     updatedAt: now,
     files: ["auth.json", "config.toml"],
+    sourceProfileId: input.sourceProfileId?.trim() || undefined,
+    contentVersion: 1,
+    contentHash,
+    contentUpdatedAt: now,
     ownerDingUserId: principal.dingUserId,
     ownerName: principal.name,
     ownerMobile: principal.mobile,
@@ -208,7 +278,15 @@ export async function createProfile(input: ProfileInput, principal: ProfilePrinc
 export async function updateProfileMetadata(
   id: string,
   principal: ProfilePrincipal,
-  updates: { name?: string; description?: string; visibility?: ProfileVisibility; sharedWith?: string | string[] },
+  updates: {
+    name?: string;
+    description?: string;
+    visibility?: ProfileVisibility;
+    sharedWith?: string | string[];
+    sourceProfileId?: string;
+    authContent?: string;
+    configContent?: string;
+  },
 ) {
   const profiles = await readProfiles();
   const index = profiles.findIndex((profile) => profile.id === id);
@@ -221,6 +299,9 @@ export async function updateProfileMetadata(
   if (updates.description !== undefined) {
     profiles[index].description = updates.description;
   }
+  if (updates.sourceProfileId !== undefined) {
+    profiles[index].sourceProfileId = updates.sourceProfileId.trim() || undefined;
+  }
   if (updates.sharedWith !== undefined) {
     profiles[index].sharedWith = normalizeSharedWith(updates.sharedWith);
   }
@@ -232,7 +313,45 @@ export async function updateProfileMetadata(
   if (profiles[index].visibility === "public" || profiles[index].visibility === "private") {
     profiles[index].sharedWith = [];
   }
-  profiles[index].updatedAt = new Date().toISOString();
+
+  const now = new Date().toISOString();
+  const profileFolder = path.join(profileFilesDir(), profiles[index].id);
+  const hasContentUpdate = updates.authContent !== undefined || updates.configContent !== undefined;
+
+  if (hasContentUpdate) {
+    const previousAuth = await readProfileFile(profiles[index].id, "auth.json");
+    const previousConfig = await readProfileFile(profiles[index].id, "config.toml");
+    const nextAuth = updates.authContent ?? previousAuth;
+    const nextConfig = updates.configContent ?? previousConfig;
+    const previousHash = profiles[index].contentHash ?? sharedProfileContentHash(previousAuth, previousConfig);
+    const nextHash = sharedProfileContentHash(nextAuth, nextConfig);
+
+    if (nextHash !== previousHash) {
+      profiles[index].contentVersion = (profiles[index].contentVersion ?? 1) + 1;
+      profiles[index].contentUpdatedAt = now;
+    } else if (!profiles[index].contentVersion) {
+      profiles[index].contentVersion = 1;
+    }
+    profiles[index].contentHash = nextHash;
+    profiles[index].authTypeLabel = detectSharedProfileAuthType(nextAuth, nextConfig);
+  } else {
+    profiles[index].contentVersion = profiles[index].contentVersion ?? 1;
+    profiles[index].authTypeLabel = profiles[index].authTypeLabel ??
+      detectSharedProfileAuthType(
+        await readProfileFile(profiles[index].id, "auth.json"),
+        await readProfileFile(profiles[index].id, "config.toml"),
+      );
+  }
+
+  if (updates.authContent !== undefined) {
+    await fs.mkdir(profileFolder, { recursive: true });
+    await fs.writeFile(path.join(profileFolder, "auth.json"), updates.authContent);
+  }
+  if (updates.configContent !== undefined) {
+    await fs.mkdir(profileFolder, { recursive: true });
+    await fs.writeFile(path.join(profileFolder, "config.toml"), updates.configContent);
+  }
+  profiles[index].updatedAt = now;
 
   await writeProfiles(profiles);
   return profiles[index];

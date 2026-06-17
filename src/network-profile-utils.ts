@@ -4,9 +4,14 @@ export type NetworkProfile = {
   id: string;
   name: string;
   description: string;
+  authTypeLabel?: string;
   createdAt: string;
   updatedAt?: string;
   files: string[];
+  sourceProfileId?: string;
+  contentVersion?: number;
+  contentHash?: string;
+  contentUpdatedAt?: string;
   ownerDingUserId?: string;
   ownerName?: string;
   ownerMobile?: string;

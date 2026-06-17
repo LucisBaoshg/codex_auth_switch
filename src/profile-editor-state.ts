@@ -11,6 +11,10 @@ export type EditorState = {
   notes: string;
   authJson: string;
   configToml: string;
+  remoteProfileId: string | null;
+  remoteContentVersion: number | null;
+  remoteContentHash: string | null;
+  remoteUpdatedAt: string | null;
   thirdParty: ThirdPartyConfigDraft;
   createdAt: string | null;
   updatedAt: string | null;
@@ -48,6 +52,10 @@ export function createEditorState(mode: EditorMode = "new"): EditorState {
     configToml: `default_model = "gpt-5"
 theme = "system"
 `,
+    remoteProfileId: null,
+    remoteContentVersion: null,
+    remoteContentHash: null,
+    remoteUpdatedAt: null,
     thirdParty: {
       template: "standaloneThirdParty",
       oauthProfileId: "",
@@ -100,6 +108,10 @@ export function createEditorFromInput(mode: EditorMode, input: ProfileInput): Ed
     notes: input.notes,
     authJson: input.authJson,
     configToml: input.configToml,
+    remoteProfileId: null,
+    remoteContentVersion: null,
+    remoteContentHash: null,
+    remoteUpdatedAt: null,
     thirdParty: template.thirdParty,
     createdAt: null,
     updatedAt: null,
@@ -119,6 +131,10 @@ export function createEditorFromDocument(document: ProfileDocument): EditorState
     notes: document.notes,
     authJson: document.authJson,
     configToml: document.configToml,
+    remoteProfileId: document.remoteProfileId ?? null,
+    remoteContentVersion: document.remoteContentVersion ?? null,
+    remoteContentHash: document.remoteContentHash ?? null,
+    remoteUpdatedAt: document.remoteUpdatedAt ?? null,
     thirdParty: template.thirdParty,
     createdAt: document.createdAt,
     updatedAt: document.updatedAt,
@@ -172,6 +188,10 @@ export function createSymbioticEditorFromDocument(
     notes: document.notes || "",
     authJson: "",
     configToml: "",
+    remoteProfileId: null,
+    remoteContentVersion: null,
+    remoteContentHash: null,
+    remoteUpdatedAt: null,
     thirdParty: {
       template: "symbioticThirdParty",
       oauthProfileId,

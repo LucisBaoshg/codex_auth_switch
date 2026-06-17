@@ -14,9 +14,16 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 use uuid::Uuid;
 
+mod pac_proxy;
 mod restart;
 mod updates;
 
+pub use pac_proxy::{
+    get_pac_proxy_status, pac_proxy_status_from_macos_services,
+    pac_proxy_status_from_macos_services_with_selection, parse_macos_auto_proxy_status,
+    set_pac_proxy_enabled, set_pac_proxy_selected_services, unsupported_pac_proxy_status,
+    MacosAutoProxyStatus, PacProxyStatus, PAC_PROXY_URL,
+};
 pub use restart::{
     codex_restart_plan_for_platform, restart_codex_app, restart_codex_script, CodexRestartPlatform,
 };
@@ -248,6 +255,14 @@ pub struct ProfileSummary {
     pub model_provider_base_url: Option<String>,
     #[serde(default)]
     pub model_provider_wire_api: Option<String>,
+    #[serde(default)]
+    pub remote_profile_id: Option<String>,
+    #[serde(default)]
+    pub remote_content_version: Option<u64>,
+    #[serde(default)]
+    pub remote_content_hash: Option<String>,
+    #[serde(default)]
+    pub remote_updated_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub auth_hash: String,
@@ -276,6 +291,14 @@ pub struct ProfileDocument {
     pub model_provider_base_url: Option<String>,
     #[serde(default)]
     pub model_provider_wire_api: Option<String>,
+    #[serde(default)]
+    pub remote_profile_id: Option<String>,
+    #[serde(default)]
+    pub remote_content_version: Option<u64>,
+    #[serde(default)]
+    pub remote_content_hash: Option<String>,
+    #[serde(default)]
+    pub remote_updated_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub auth_json: String,
@@ -493,6 +516,14 @@ struct RemoteProfileRecord {
     #[serde(default)]
     description: String,
     #[serde(default)]
+    updated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    content_version: Option<u64>,
+    #[serde(default)]
+    content_hash: Option<String>,
+    #[serde(default)]
+    content_updated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
     files: Vec<String>,
 }
 
@@ -524,6 +555,12 @@ struct ProfileMetadata {
     pub notes: String,
     #[serde(default)]
     pub remote_profile_id: Option<String>,
+    #[serde(default)]
+    pub remote_content_version: Option<u64>,
+    #[serde(default)]
+    pub remote_content_hash: Option<String>,
+    #[serde(default)]
+    pub remote_updated_at: Option<DateTime<Utc>>,
     #[serde(default = "unknown_auth_type_label")]
     pub auth_type_label: String,
     #[serde(default)]
@@ -886,6 +923,9 @@ impl ProfileManager {
                 metadata.name,
                 metadata.notes,
                 metadata.remote_profile_id.clone(),
+                metadata.remote_content_version,
+                metadata.remote_content_hash.clone(),
+                metadata.remote_updated_at,
                 metadata.created_at,
                 Utc::now(),
                 &auth_json,
@@ -963,6 +1003,9 @@ impl ProfileManager {
                 metadata.name.clone(),
                 metadata.notes.clone(),
                 metadata.remote_profile_id.clone(),
+                metadata.remote_content_version,
+                metadata.remote_content_hash.clone(),
+                metadata.remote_updated_at,
                 metadata.created_at,
                 Utc::now(),
                 &auth_json,
@@ -1013,6 +1056,9 @@ impl ProfileManager {
             profile_id,
             name.to_string(),
             input.notes.trim().to_string(),
+            None,
+            None,
+            None,
             None,
             now,
             now,
@@ -1105,6 +1151,10 @@ impl ProfileManager {
             model_provider_name: metadata.model_provider_name,
             model_provider_base_url: metadata.model_provider_base_url,
             model_provider_wire_api: metadata.model_provider_wire_api,
+            remote_profile_id: metadata.remote_profile_id,
+            remote_content_version: metadata.remote_content_version,
+            remote_content_hash: metadata.remote_content_hash,
+            remote_updated_at: metadata.remote_updated_at,
             created_at: metadata.created_at,
             updated_at: metadata.updated_at,
             auth_json,
@@ -1167,6 +1217,9 @@ impl ProfileManager {
             name.to_string(),
             input.notes.trim().to_string(),
             existing_metadata.remote_profile_id.clone(),
+            existing_metadata.remote_content_version,
+            existing_metadata.remote_content_hash.clone(),
+            existing_metadata.remote_updated_at,
             existing_metadata.created_at,
             Utc::now(),
             &fs::read_to_string(profile_dir.join("auth.json"))?,
@@ -1188,6 +1241,33 @@ impl ProfileManager {
                 updated_at: Utc::now(),
             })?;
         }
+        Ok(ProfileSummary::from(metadata))
+    }
+
+    pub fn set_profile_remote_metadata(
+        &self,
+        profile_id: &str,
+        remote_profile_id: String,
+        remote_content_version: Option<u64>,
+        remote_content_hash: Option<String>,
+        remote_updated_at: Option<DateTime<Utc>>,
+    ) -> Result<ProfileSummary, AppError> {
+        let remote_profile_id = remote_profile_id.trim();
+        if remote_profile_id.is_empty() {
+            return Err(AppError::Message(
+                "Remote profile id cannot be empty.".into(),
+            ));
+        }
+
+        let profile_dir = self.profile_dir(profile_id)?;
+        let mut metadata = self.read_profile_metadata(&profile_dir)?;
+        metadata.remote_profile_id = Some(remote_profile_id.to_string());
+        metadata.remote_content_version = remote_content_version;
+        metadata.remote_content_hash = remote_content_hash
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        metadata.remote_updated_at = remote_updated_at;
+        self.write_profile_metadata(&profile_dir, &metadata)?;
         Ok(ProfileSummary::from(metadata))
     }
 
@@ -1253,6 +1333,17 @@ impl ProfileManager {
                     imported += 1;
                     self.import_remote_profile(&detail.id, payload)?
                 };
+            let remote_updated_at = detail
+                .content_updated_at
+                .clone()
+                .or_else(|| detail.updated_at.clone());
+            let profile = self.set_profile_remote_metadata(
+                &profile.id,
+                detail.id.clone(),
+                detail.content_version,
+                detail.content_hash.clone(),
+                remote_updated_at,
+            )?;
 
             synced_profiles.push(profile);
         }
@@ -1354,7 +1445,8 @@ impl ProfileManager {
         }
 
         if let Err(error) = backfill_zero_costs(&conn) {
-            sync.errors.push(format!("Failed to backfill usage costs: {error}"));
+            sync.errors
+                .push(format!("Failed to backfill usage costs: {error}"));
         }
 
         self.read_codex_usage_stats_snapshot(&conn, sync, filter)
@@ -1544,7 +1636,10 @@ impl ProfileManager {
                     });
                 }
             } else if event_type == Some("call") || event_type == Some("function_call") {
-                let name = target_obj.get("name").and_then(|v| v.as_str()).unwrap_or_default();
+                let name = target_obj
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
                 let args = target_obj
                     .get("arguments")
                     .map(|v| {
@@ -2888,6 +2983,9 @@ impl ProfileManager {
         name: String,
         notes: String,
         remote_profile_id: Option<String>,
+        remote_content_version: Option<u64>,
+        remote_content_hash: Option<String>,
+        remote_updated_at: Option<DateTime<Utc>>,
         created_at: DateTime<Utc>,
         updated_at: DateTime<Utc>,
         auth_json: &str,
@@ -2902,6 +3000,9 @@ impl ProfileManager {
             name,
             notes,
             remote_profile_id,
+            remote_content_version,
+            remote_content_hash,
+            remote_updated_at,
             auth_type_label: detect_auth_type_label(auth_json, config_toml)?,
             model_provider_id: provider
                 .as_ref()
@@ -2972,6 +3073,9 @@ impl ProfileManager {
             existing_metadata.name,
             existing_metadata.notes,
             existing_metadata.remote_profile_id.clone(),
+            existing_metadata.remote_content_version,
+            existing_metadata.remote_content_hash.clone(),
+            existing_metadata.remote_updated_at,
             existing_metadata.created_at,
             Utc::now(),
             auth_json,
@@ -3090,7 +3194,8 @@ impl ProfileManager {
         let summary = read_codex_usage_stats_summary(conn, &normalized_filter)?;
         let trends = read_codex_usage_stats_trends(conn, &normalized_filter)?;
         let model_breakdown = read_codex_usage_stats_breakdown(conn, &normalized_filter, "model")?;
-        let effort_breakdown = read_codex_usage_stats_breakdown(conn, &normalized_filter, "effort")?;
+        let effort_breakdown =
+            read_codex_usage_stats_breakdown(conn, &normalized_filter, "effort")?;
         let available_models = read_codex_usage_stats_distinct_values(conn, "model")?;
         let available_efforts = read_codex_usage_stats_distinct_values(conn, "effort")?;
         let logs = read_codex_usage_stats_logs(conn, &normalized_filter)?;
@@ -3240,6 +3345,10 @@ impl From<ProfileMetadata> for ProfileSummary {
             model_provider_name: value.model_provider_name,
             model_provider_base_url: value.model_provider_base_url,
             model_provider_wire_api: value.model_provider_wire_api,
+            remote_profile_id: value.remote_profile_id,
+            remote_content_version: value.remote_content_version,
+            remote_content_hash: value.remote_content_hash,
+            remote_updated_at: value.remote_updated_at,
             created_at: value.created_at,
             updated_at: value.updated_at,
             auth_hash: value.auth_hash,
@@ -3584,25 +3693,79 @@ fn update_session_meta_payload_provider(
 }
 
 fn primary_state_database_path(target_dir: &Path) -> Option<PathBuf> {
-    fs::read_dir(target_dir)
-        .ok()?
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !name.starts_with("state_") || !name.ends_with(".sqlite") {
-                return None;
-            }
-
-            let version = name
-                .strip_prefix("state_")
-                .and_then(|value| value.strip_suffix(".sqlite"))
-                .and_then(|value| value.parse::<u32>().ok())
-                .unwrap_or(0);
-
-            Some((version, name, entry.path()))
+    let roots = [target_dir.to_path_buf(), target_dir.join("sqlite")];
+    roots
+        .iter()
+        .filter_map(|root| fs::read_dir(root).ok())
+        .flat_map(|entries| entries.flatten())
+        .filter_map(|entry| state_database_candidate(entry.path()))
+        .max_by(|left, right| {
+            left.has_threads
+                .cmp(&right.has_threads)
+                .then_with(|| left.latest_thread_ms.cmp(&right.latest_thread_ms))
+                .then_with(|| left.version.cmp(&right.version))
+                .then_with(|| left.name.cmp(&right.name))
         })
-        .max_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)))
-        .map(|(_, _, path)| path)
+        .map(|candidate| candidate.path)
+}
+
+#[derive(Debug)]
+struct StateDatabaseCandidate {
+    path: PathBuf,
+    name: String,
+    version: u32,
+    has_threads: bool,
+    latest_thread_ms: Option<i64>,
+}
+
+fn state_database_candidate(path: PathBuf) -> Option<StateDatabaseCandidate> {
+    let name = path.file_name()?.to_string_lossy().to_string();
+    if !name.starts_with("state_") || !name.ends_with(".sqlite") {
+        return None;
+    }
+
+    let version = name
+        .strip_prefix("state_")
+        .and_then(|value| value.strip_suffix(".sqlite"))
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0);
+    let latest_thread_ms = latest_thread_updated_ms(&path);
+    Some(StateDatabaseCandidate {
+        path,
+        name,
+        version,
+        has_threads: latest_thread_ms.is_some(),
+        latest_thread_ms,
+    })
+}
+
+fn latest_thread_updated_ms(path: &Path) -> Option<i64> {
+    let conn = open_valid_state_database(path)?;
+    let columns = thread_table_columns(&conn).ok()?;
+    if !columns.iter().any(|column| column == "id") {
+        return None;
+    }
+
+    if columns.iter().any(|column| column == "updated_at_ms") {
+        return conn
+            .query_row("SELECT MAX(updated_at_ms) FROM threads", [], |row| {
+                row.get::<_, Option<i64>>(0)
+            })
+            .ok()
+            .flatten();
+    }
+
+    if columns.iter().any(|column| column == "updated_at") {
+        return conn
+            .query_row("SELECT MAX(updated_at) FROM threads", [], |row| {
+                row.get::<_, Option<i64>>(0)
+            })
+            .ok()
+            .flatten()
+            .map(|seconds| seconds * 1_000);
+    }
+
+    None
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -3770,10 +3933,7 @@ fn import_codex_usage_file(
             }
             Some("turn_context") => {
                 if let Some(payload) = value.get("payload") {
-                    if let Some(raw_model) = payload
-                        .get("model")
-                        .and_then(|model| model.as_str())
-                    {
+                    if let Some(raw_model) = payload.get("model").and_then(|model| model.as_str()) {
                         if !raw_model.trim().is_empty() {
                             model = normalize_codex_usage_model(raw_model);
                             provider = extract_codex_usage_provider(raw_model);
@@ -3976,7 +4136,11 @@ fn extract_codex_usage_provider(model: &str) -> String {
     }
 
     let lower = trimmed.to_ascii_lowercase();
-    if lower.starts_with("gpt-") || lower.starts_with("o1-") || lower.starts_with("o3-") || lower.starts_with("text-davinci") {
+    if lower.starts_with("gpt-")
+        || lower.starts_with("o1-")
+        || lower.starts_with("o3-")
+        || lower.starts_with("text-davinci")
+    {
         "openai".to_string()
     } else if lower.starts_with("claude-") {
         "anthropic".to_string()
@@ -4265,7 +4429,7 @@ fn backfill_zero_costs(conn: &Connection) -> Result<(), rusqlite::Error> {
         conn.execute("BEGIN TRANSACTION", [])?;
         {
             let mut update_stmt = conn.prepare_cached(
-                "UPDATE codex_usage_logs SET total_cost_usd = ?1 WHERE request_id = ?2"
+                "UPDATE codex_usage_logs SET total_cost_usd = ?1 WHERE request_id = ?2",
             )?;
             for update in updates {
                 update_stmt.execute(rusqlite::params![update.cost, update.request_id])?;

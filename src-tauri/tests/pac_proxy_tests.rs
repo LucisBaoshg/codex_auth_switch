@@ -1,0 +1,96 @@
+use codex_auth_switch_lib::core::{
+    pac_proxy_status_from_macos_services, pac_proxy_status_from_macos_services_with_selection,
+    parse_macos_auto_proxy_status, PacProxyStatus, PAC_PROXY_URL,
+};
+
+#[test]
+fn parses_macos_auto_proxy_status_output() {
+    let status =
+        parse_macos_auto_proxy_status("Wi-Fi", "URL: http://10.12.0.24/proxy.pac\nEnabled: Yes\n");
+
+    assert_eq!(status.service, "Wi-Fi");
+    assert_eq!(status.url.as_deref(), Some(PAC_PROXY_URL));
+    assert!(status.enabled);
+}
+
+#[test]
+fn marks_pac_proxy_enabled_when_managed_url_is_active() {
+    let status = pac_proxy_status_from_macos_services(vec![
+        parse_macos_auto_proxy_status("Wi-Fi", "URL: http://10.12.0.24/proxy.pac\nEnabled: Yes\n"),
+        parse_macos_auto_proxy_status(
+            "USB 10/100/1000 LAN",
+            "URL: http://example.test/other.pac\nEnabled: No\n",
+        ),
+    ]);
+
+    assert_eq!(
+        status,
+        PacProxyStatus {
+            supported: true,
+            enabled: true,
+            pac_url: PAC_PROXY_URL.into(),
+            available_services: vec!["Wi-Fi".into(), "USB 10/100/1000 LAN".into()],
+            selected_services: vec!["Wi-Fi".into(), "USB 10/100/1000 LAN".into()],
+            services: vec!["Wi-Fi".into()],
+            message: None,
+        }
+    );
+}
+
+#[test]
+fn marks_pac_proxy_disabled_when_url_is_not_active() {
+    let status = pac_proxy_status_from_macos_services(vec![
+        parse_macos_auto_proxy_status("Wi-Fi", "URL: http://10.12.0.24/proxy.pac\nEnabled: No\n"),
+        parse_macos_auto_proxy_status(
+            "Ethernet",
+            "URL: http://example.test/other.pac\nEnabled: Yes\n",
+        ),
+    ]);
+
+    assert!(!status.enabled);
+    assert_eq!(status.services, Vec::<String>::new());
+    assert_eq!(status.pac_url, PAC_PROXY_URL);
+}
+
+#[test]
+fn selected_services_limit_the_effective_pac_proxy_status() {
+    let status = pac_proxy_status_from_macos_services_with_selection(
+        vec![
+            parse_macos_auto_proxy_status(
+                "Ethernet",
+                "URL: http://10.12.0.24/proxy.pac\nEnabled: Yes\n",
+            ),
+            parse_macos_auto_proxy_status(
+                "Wi-Fi",
+                "URL: http://10.12.0.24/proxy.pac\nEnabled: Yes\n",
+            ),
+            parse_macos_auto_proxy_status(
+                "iPhone USB",
+                "URL: http://10.12.0.24/proxy.pac\nEnabled: No\n",
+            ),
+        ],
+        vec!["Wi-Fi".into(), "Missing".into()],
+    );
+
+    assert!(status.enabled);
+    assert_eq!(
+        status.available_services,
+        vec!["Ethernet", "Wi-Fi", "iPhone USB"]
+    );
+    assert_eq!(status.selected_services, vec!["Wi-Fi"]);
+    assert_eq!(status.services, vec!["Wi-Fi"]);
+}
+
+#[test]
+fn stale_selected_services_fall_back_to_available_services() {
+    let status = pac_proxy_status_from_macos_services_with_selection(
+        vec![parse_macos_auto_proxy_status(
+            "Wi-Fi",
+            "URL: http://10.12.0.24/proxy.pac\nEnabled: Yes\n",
+        )],
+        vec!["Old USB".into()],
+    );
+
+    assert_eq!(status.selected_services, vec!["Wi-Fi"]);
+    assert_eq!(status.services, vec!["Wi-Fi"]);
+}

@@ -154,6 +154,10 @@ fn sync_remote_profiles_imports_and_updates_existing_remote_profiles() {
             "name": "Tapcash Main",
             "description": "first version",
             "createdAt": "2026-03-24T00:00:00Z",
+            "updatedAt": "2026-03-24T00:05:00Z",
+            "contentVersion": 1,
+            "contentHash": "hash-v1",
+            "contentUpdatedAt": "2026-03-24T00:05:00Z",
             "files": ["auth.json", "config.toml"]
         }),
     );
@@ -172,6 +176,16 @@ fn sync_remote_profiles_imports_and_updates_existing_remote_profiles() {
     assert_eq!(first_sync.imported, 1);
     assert_eq!(first_sync.updated, 0);
     assert_eq!(first_sync.profiles.len(), 1);
+    assert_eq!(
+        first_sync.profiles[0].remote_profile_id.as_deref(),
+        Some("remote-1")
+    );
+    assert_eq!(first_sync.profiles[0].remote_content_version, Some(1));
+    assert_eq!(
+        first_sync.profiles[0].remote_content_hash.as_deref(),
+        Some("hash-v1")
+    );
+    assert!(first_sync.profiles[0].remote_updated_at.is_some());
 
     let imported = manager.list_profiles().expect("list profiles");
     assert_eq!(imported.len(), 1);
@@ -180,6 +194,16 @@ fn sync_remote_profiles_imports_and_updates_existing_remote_profiles() {
         .expect("load imported document");
     assert_eq!(imported_document.name, "Tapcash Main");
     assert_eq!(imported_document.notes, "first version");
+    assert_eq!(
+        imported_document.remote_profile_id.as_deref(),
+        Some("remote-1")
+    );
+    assert_eq!(imported_document.remote_content_version, Some(1));
+    assert_eq!(
+        imported_document.remote_content_hash.as_deref(),
+        Some("hash-v1")
+    );
+    assert!(imported_document.remote_updated_at.is_some());
     assert!(imported_document.auth_json.contains("sk-remote-1"));
 
     server.set_json(
@@ -189,6 +213,10 @@ fn sync_remote_profiles_imports_and_updates_existing_remote_profiles() {
             "name": "Tapcash Main Updated",
             "description": "second version",
             "createdAt": "2026-03-24T00:00:00Z",
+            "updatedAt": "2026-03-24T01:00:00Z",
+            "contentVersion": 2,
+            "contentHash": "hash-v2",
+            "contentUpdatedAt": "2026-03-24T01:00:00Z",
             "files": ["auth.json", "config.toml"]
         }),
     );
@@ -209,11 +237,30 @@ fn sync_remote_profiles_imports_and_updates_existing_remote_profiles() {
 
     let updated_profiles = manager.list_profiles().expect("list profiles after update");
     assert_eq!(updated_profiles.len(), 1);
+    assert_eq!(
+        updated_profiles[0].remote_profile_id.as_deref(),
+        Some("remote-1")
+    );
+    assert_eq!(updated_profiles[0].remote_content_version, Some(2));
+    assert_eq!(
+        updated_profiles[0].remote_content_hash.as_deref(),
+        Some("hash-v2")
+    );
+    assert!(updated_profiles[0].remote_updated_at.is_some());
     let updated_document = manager
         .get_profile_document(&updated_profiles[0].id)
         .expect("load updated document");
     assert_eq!(updated_document.name, "Tapcash Main Updated");
     assert_eq!(updated_document.notes, "second version");
+    assert_eq!(
+        updated_document.remote_profile_id.as_deref(),
+        Some("remote-1")
+    );
+    assert_eq!(updated_document.remote_content_version, Some(2));
+    assert_eq!(
+        updated_document.remote_content_hash.as_deref(),
+        Some("hash-v2")
+    );
     assert!(updated_document.auth_json.contains("sk-remote-2"));
     assert!(updated_document.config_toml.contains("gpt-5.5"));
 }

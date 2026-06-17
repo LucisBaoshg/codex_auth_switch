@@ -3,6 +3,7 @@ import type {
   AppSnapshot,
   CodexUsageStatsFilter,
   CodexUsageStatsSnapshot,
+  PacProxyStatus,
   UpdateCheckResult,
 } from "./desktop-types";
 import type { FlashKind } from "./html-utils";
@@ -32,7 +33,7 @@ import type {
 } from "./session-renderers";
 import type { CleanupFilter } from "./session-cleanup-renderers";
 import type { CodexMessage, CodexSessionInfo } from "./session-utils";
-import type { SharingCenterTab } from "./sharing-center-renderers";
+import type { SharingCenterTab, SharingLibraryTab } from "./sharing-center-renderers";
 
 export type ViewMode =
   | "cards"
@@ -56,6 +57,7 @@ export type DesktopState = {
   flash: { kind: FlashKind; text: string } | null;
   activeTab: "local" | "network";
   sharingCenterTab: SharingCenterTab;
+  sharingLibraryTab: SharingLibraryTab;
   profileLayout: ProfileLayoutMode;
   networkProfiles: NetworkProfile[];
   networkLoading: boolean;
@@ -87,7 +89,21 @@ export type DesktopState = {
   usageStatsLoading: boolean;
   usageStatsError: string | null;
   usageStatsActiveTab: "logs" | "trends" | "breakdowns";
+  pacProxy: PacProxyStatus;
+  pacProxyLoading: boolean;
 };
+
+export function createDefaultPacProxyStatus(): PacProxyStatus {
+  return {
+    supported: false,
+    enabled: false,
+    pacUrl: "http://10.12.0.24/proxy.pac",
+    availableServices: [],
+    selectedServices: [],
+    services: [],
+    message: "PAC 状态尚未加载。",
+  };
+}
 
 function defaultUsageStatsFilter(): CodexUsageStatsFilter {
   const endDate = new Date().toISOString().slice(0, 10);
@@ -113,6 +129,7 @@ export function createDesktopState(networkSharing: NetworkSharingSettings): Desk
     flash: null,
     activeTab: "local",
     sharingCenterTab: "own",
+    sharingLibraryTab: "official",
     profileLayout: "list",
     networkProfiles: [],
     networkLoading: false,
@@ -144,6 +161,8 @@ export function createDesktopState(networkSharing: NetworkSharingSettings): Desk
     usageStatsLoading: false,
     usageStatsError: null,
     usageStatsActiveTab: "logs",
+    pacProxy: createDefaultPacProxyStatus(),
+    pacProxyLoading: false,
   };
 }
 

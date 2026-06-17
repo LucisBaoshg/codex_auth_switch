@@ -56,6 +56,9 @@ test("renders app shell with navigation, update status, content and overlays", a
   expect(html).toContain('data-action="nav-profiles"');
   expect(html).toContain('nav-item active" data-action="nav-profiles"');
   expect(html).toContain('data-action="nav-usage-stats"');
+  expect(html).not.toContain('data-role="sidebar-pac-proxy-toggle"');
+  expect(html).not.toContain('data-action="toggle-pac-proxy"');
+  expect(html).not.toContain("PAC 内网加速");
   expect(html).toContain("Codex 助手");
   expect(html).toContain('data-role="login-status"');
   expect(html).toContain('data-role="update-entry"');

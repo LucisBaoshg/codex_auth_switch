@@ -127,30 +127,45 @@ fn codex_usage_stats_backfills_zero_costs() {
     drop(conn);
 
     let snapshot = manager.refresh_codex_usage_stats().expect("refresh stats");
-    assert!(snapshot.sync.errors.is_empty(), "Errors: {:?}", snapshot.sync.errors);
+    assert!(
+        snapshot.sync.errors.is_empty(),
+        "Errors: {:?}",
+        snapshot.sync.errors
+    );
 
     assert_eq!(snapshot.logs.len(), 5);
-    let log1 = snapshot.logs.iter().find(|l| l.request_id == "req-1").unwrap();
+    let log1 = snapshot
+        .logs
+        .iter()
+        .find(|l| l.request_id == "req-1")
+        .unwrap();
     assert_eq!(log1.provider, "openai");
-    let log2 = snapshot.logs.iter().find(|l| l.request_id == "req-2").unwrap();
+    let log2 = snapshot
+        .logs
+        .iter()
+        .find(|l| l.request_id == "req-2")
+        .unwrap();
     assert_eq!(log2.provider, "unknown");
 
     let conn = rusqlite::Connection::open(&db_path).expect("reopen test db");
 
-    let (cost1, provider1): (String, String) = conn.query_row(
-        "SELECT total_cost_usd, provider FROM codex_usage_logs WHERE request_id = 'req-1'",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    ).expect("query cost 1");
+    let (cost1, provider1): (String, String) = conn
+        .query_row(
+            "SELECT total_cost_usd, provider FROM codex_usage_logs WHERE request_id = 'req-1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("query cost 1");
     assert_eq!(cost1, "0.900000");
     assert_eq!(provider1, "openai");
 
-    let (cost2, provider2): (String, String) = conn.query_row(
-        "SELECT total_cost_usd, provider FROM codex_usage_logs WHERE request_id = 'req-2'",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    ).expect("query cost 2");
+    let (cost2, provider2): (String, String) = conn
+        .query_row(
+            "SELECT total_cost_usd, provider FROM codex_usage_logs WHERE request_id = 'req-2'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("query cost 2");
     assert_eq!(cost2, "0.000000");
     assert_eq!(provider2, "unknown");
 }
-

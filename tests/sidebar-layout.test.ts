@@ -2020,6 +2020,277 @@ test("shares a local profile to selected known SSO users from the sharing center
   expect(profilePostBodies[0].get("sharedWith")).toBe(JSON.stringify(["Ding-B"]));
 });
 
+test("re-sharing an owned local profile updates the existing enterprise shared profile files", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+  localStorage.setItem("codex-auth-switch.networkProfileToken", "cas_test_token");
+
+  const snapshot = {
+    targetDir: "/Users/example/.codex",
+    usingDefaultTargetDir: true,
+    targetExists: true,
+    targetAuthExists: true,
+    targetConfigExists: true,
+    targetUpdatedAt: "2026-06-05T00:00:00Z",
+    targetAuthTypeLabel: "官方 OAuth",
+    activeProfileId: "local-chatgpt-pro",
+    lastSelectedProfileId: "local-chatgpt-pro",
+    lastSwitchProfileId: "local-chatgpt-pro",
+    lastSwitchedAt: "2026-06-05T00:00:00Z",
+    codexUsageApiEnabled: false,
+    profiles: [
+      {
+        id: "local-chatgpt-pro",
+        name: "ChatGPT Pro",
+        notes: "自动从当前 Codex 配置生成",
+        authTypeLabel: "官方 OAuth",
+        createdAt: "2026-06-04T10:00:00Z",
+        updatedAt: "2026-06-05T08:00:00Z",
+        authHash: "auth-new",
+        configHash: "config-new",
+        codexUsage: null,
+        thirdPartyLatency: null,
+        thirdPartyUsage: null,
+      },
+    ],
+  };
+  const remoteProfiles = [
+    {
+      id: "remote-owned",
+      name: "ChatGPT Pro",
+      description: "自动从当前 Codex 配置生成",
+      createdAt: "2026-06-04T10:00:00Z",
+      updatedAt: "2026-06-04T10:00:00Z",
+      files: ["auth.json", "config.toml"],
+      ownerDingUserId: "Ding-A",
+      ownerName: "Alice",
+      visibility: "selected",
+      sharedWith: ["Ding-B"],
+      sourceProfileId: "local-chatgpt-pro",
+    },
+  ];
+  const updateBodies: Record<string, unknown>[] = [];
+
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "load_snapshot") return snapshot;
+    if (command === "get_profile_document") {
+      return {
+        id: "local-chatgpt-pro",
+        name: "ChatGPT Pro",
+        notes: "自动从当前 Codex 配置生成",
+        authTypeLabel: "官方 OAuth",
+        createdAt: "2026-06-04T10:00:00Z",
+        updatedAt: "2026-06-05T08:00:00Z",
+        authJson: '{"auth_mode":"chatgpt","tokens":{"access_token":"new-token"}}',
+        configToml: 'model = "gpt-5.5"\n',
+        loadedFromTarget: true,
+        hasTargetChanges: true,
+      };
+    }
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = input.toString();
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/auth/me") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ user: { dingUserId: "Ding-A", name: "Alice", mobile: "13900000001" } }),
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/users") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ users: [{ dingUserId: "Ding-B", label: "Bob", mobile: "13900000002" }] }),
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-owned" && init?.method === "POST") {
+      updateBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ...remoteProfiles[0],
+          updatedAt: "2026-06-05T08:00:00Z",
+          contentVersion: 2,
+          contentHash: "new-content-hash",
+        }),
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => remoteProfiles,
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  await import("../src/main");
+  await flushUi();
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="nav-sharing"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  await flushUi();
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="share-local-profile"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  await flushUi();
+  await flushUi();
+
+  expect(fetchMock).not.toHaveBeenCalledWith(
+    "https://codex-helper.ite.tool4seller.com/codex/api/profiles",
+    expect.objectContaining({ method: "POST" }),
+  );
+  expect(updateBodies).toHaveLength(1);
+  expect(updateBodies[0]).toEqual(expect.objectContaining({
+    name: "ChatGPT Pro",
+    description: "自动从当前 Codex 配置生成",
+    visibility: "selected",
+    sharedWith: ["Ding-B"],
+    sourceProfileId: "local-chatgpt-pro",
+    authContent: '{"auth_mode":"chatgpt","tokens":{"access_token":"new-token"}}',
+    configContent: 'model = "gpt-5.5"\n',
+  }));
+});
+
+test("re-sharing warns when the enterprise backend does not return content version metadata", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+  localStorage.setItem("codex-auth-switch.networkProfileToken", "cas_test_token");
+
+  const snapshot = {
+    targetDir: "/Users/example/.codex",
+    usingDefaultTargetDir: true,
+    targetExists: true,
+    targetAuthExists: true,
+    targetConfigExists: true,
+    targetUpdatedAt: "2026-06-05T00:00:00Z",
+    targetAuthTypeLabel: "官方 OAuth",
+    activeProfileId: "local-chatgpt-pro",
+    lastSelectedProfileId: "local-chatgpt-pro",
+    lastSwitchProfileId: "local-chatgpt-pro",
+    lastSwitchedAt: "2026-06-05T00:00:00Z",
+    codexUsageApiEnabled: false,
+    profiles: [
+      {
+        id: "local-chatgpt-pro",
+        name: "ChatGPT Pro",
+        notes: "自动从当前 Codex 配置生成",
+        authTypeLabel: "官方 OAuth",
+        createdAt: "2026-06-04T10:00:00Z",
+        updatedAt: "2026-06-05T08:00:00Z",
+        authHash: "auth-new",
+        configHash: "config-new",
+        codexUsage: null,
+        thirdPartyLatency: null,
+        thirdPartyUsage: null,
+      },
+    ],
+  };
+  const remoteProfiles = [
+    {
+      id: "remote-owned",
+      name: "ChatGPT Pro",
+      description: "自动从当前 Codex 配置生成",
+      createdAt: "2026-06-04T10:00:00Z",
+      updatedAt: "2026-06-04T10:00:00Z",
+      files: ["auth.json", "config.toml"],
+      ownerDingUserId: "Ding-A",
+      ownerName: "Alice",
+      visibility: "selected",
+      sharedWith: ["Ding-B"],
+    },
+  ];
+
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "load_snapshot") return snapshot;
+    if (command === "get_profile_document") {
+      return {
+        id: "local-chatgpt-pro",
+        name: "ChatGPT Pro",
+        notes: "自动从当前 Codex 配置生成",
+        authTypeLabel: "官方 OAuth",
+        createdAt: "2026-06-04T10:00:00Z",
+        updatedAt: "2026-06-05T08:00:00Z",
+        authJson: '{"auth_mode":"chatgpt","tokens":{"access_token":"new-token"}}',
+        configToml: 'model = "gpt-5.5"\n',
+        loadedFromTarget: true,
+        hasTargetChanges: true,
+      };
+    }
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = input.toString();
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/auth/me") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ user: { dingUserId: "Ding-A", name: "Alice" } }),
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/users") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ users: [{ dingUserId: "Ding-B", label: "Bob" }] }),
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-owned" && init?.method === "POST") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ...remoteProfiles[0], updatedAt: "2026-06-17T02:55:02Z" }),
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => remoteProfiles,
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  await import("../src/main");
+  await flushUi();
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="nav-sharing"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  await flushUi();
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="share-local-profile"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  await flushUi();
+  await flushUi();
+
+  expect(document.body.textContent).toContain("企业共享库服务端尚未升级");
+});
+
 test("edits recipients for an owned shared profile and shows its share count in the library tab", async () => {
   localStorage.setItem("codex-auth-switch.networkProfileToken", "cas_test_token");
 
@@ -2264,8 +2535,6 @@ test("keeps SSO signed in when editing shared recipients receives an unauthorize
 
 test("deletes an owned shared profile from the sharing center management list", async () => {
   localStorage.setItem("codex-auth-switch.networkProfileToken", "cas_test_token");
-  const confirmMock = vi.fn(() => true);
-  vi.stubGlobal("confirm", confirmMock);
 
   let remoteProfiles = [
     {
@@ -2339,10 +2608,13 @@ test("deletes an owned shared profile from the sharing center management list", 
     .querySelector<HTMLButtonElement>('[data-action="delete-shared-profile"][data-id="remote-owned"]')
     ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   await flushUi();
+
+  expect(document.body.textContent).toContain("确定删除「ChatGPT Pro」吗？删除后其他人将无法再导入这套共享配置。");
+  document.querySelector<HTMLButtonElement>("#btn-ok")?.click();
+  await flushUi();
   await flushUi();
   await flushUi();
 
-  expect(confirmMock).toHaveBeenCalledWith("确定删除「ChatGPT Pro」吗？删除后其他人将无法再导入这套共享配置。");
   expect(fetchMock).toHaveBeenCalledWith(
     "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-owned",
     expect.objectContaining({
@@ -2354,6 +2626,132 @@ test("deletes an owned shared profile from the sharing center management list", 
   );
   expect(document.querySelector('[data-role="local-share-form"]')?.textContent).toContain("未共享");
   expect(document.body.textContent).toContain("已删除共享配置");
+});
+
+test("deletes an owned shared profile through native desktop networking", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+  localStorage.setItem("codex-auth-switch.networkProfileToken", "cas_test_token");
+
+  const snapshot = {
+    targetDir: "/Users/example/.codex",
+    usingDefaultTargetDir: true,
+    targetExists: true,
+    targetAuthExists: true,
+    targetConfigExists: true,
+    targetUpdatedAt: "2026-06-04T10:00:00Z",
+    targetAuthTypeLabel: "官方 OAuth",
+    activeProfileId: null,
+    lastSelectedProfileId: null,
+    lastSwitchProfileId: null,
+    lastSwitchedAt: null,
+    codexUsageApiEnabled: false,
+    profiles: [
+      {
+        id: "local-owned",
+        name: "ChatGPT Pro",
+        notes: "自动从当前 Codex 配置生成",
+        authTypeLabel: "官方 OAuth",
+        createdAt: "2026-06-04T10:00:00Z",
+        updatedAt: "2026-06-04T10:00:00Z",
+        authHash: "auth",
+        configHash: "config",
+        codexUsage: null,
+        thirdPartyLatency: null,
+        thirdPartyUsage: null,
+      },
+    ],
+  };
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "load_snapshot") {
+      return snapshot;
+    }
+    if (command === "delete_network_profile") {
+      return { status: 200, body: "" };
+    }
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  let remoteProfiles = [
+    {
+      id: "remote-owned",
+      name: "ChatGPT Pro",
+      description: "自动从当前 Codex 配置生成",
+      createdAt: "2026-06-04T10:00:00Z",
+      updatedAt: "2026-06-04T10:00:00Z",
+      files: ["auth.json", "config.toml"],
+      sourceProfileId: "local-owned",
+      ownerDingUserId: "Ding-A",
+      ownerName: "Alice",
+      visibility: "public",
+      sharedWith: [],
+    },
+  ];
+  const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    const url = input.toString();
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/auth/me") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ user: { dingUserId: "Ding-A", name: "Alice", mobile: "13900000001" } }),
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/users") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ users: [] }),
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles") {
+      const profiles = remoteProfiles;
+      remoteProfiles = [];
+      return {
+        ok: true,
+        status: 200,
+        json: async () => profiles,
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  await import("../src/main");
+  await flushUi();
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="nav-sharing"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  await flushUi();
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="select-share-profile-tab"][data-owned-id="remote-owned"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="delete-shared-profile"][data-id="remote-owned"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  document.querySelector<HTMLButtonElement>("#btn-ok")?.click();
+  await flushUi();
+  await flushUi();
+  await flushUi();
+
+  expect(invokeMock).toHaveBeenCalledWith("delete_network_profile", {
+    url: "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-owned",
+    token: "cas_test_token",
+  });
+  expect(fetchMock).not.toHaveBeenCalledWith(
+    "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-owned",
+    expect.anything(),
+  );
+  expect(document.querySelector('[data-role="local-share-form"]')?.textContent).toContain("未共享");
 });
 
 test("preserves sharing center scroll position for in-page recipient changes", async () => {
@@ -2495,6 +2893,12 @@ test("opens network shared profile details in readonly mode without browser cach
   await flushUi();
   await flushUi();
   await flushUi();
+  await flushUi();
+  await flushUi();
+  await flushUi();
+  await flushUi();
+  await flushUi();
+  await flushUi();
 
   expect(document.querySelector('[data-page="editor"]')).not.toBeNull();
   expect(document.querySelector<HTMLInputElement>("#editor-name")?.disabled).toBe(true);
@@ -2572,6 +2976,16 @@ test("imports a network shared profile detail as an editable local profile", asy
           authJson: '{"token":"remote-token"}',
           configToml: 'model = "gpt-5.4"\n',
         },
+      });
+      return importedSnapshot;
+    }
+    if (command === "set_profile_remote_metadata") {
+      expect(args).toEqual({
+        profileId: "local-imported-1",
+        remoteProfileId: "remote-1",
+        remoteContentVersion: null,
+        remoteContentHash: null,
+        remoteUpdatedAt: "2026-04-16T00:00:00Z",
       });
       return importedSnapshot;
     }
@@ -2676,6 +3090,8 @@ test("imports a network shared profile detail as an editable local profile", asy
     ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   await flushUi();
   await flushUi();
+  await flushUi();
+  await flushUi();
 
   expect(invokeMock).toHaveBeenCalledWith("import_profile", {
     payload: {
@@ -2685,6 +3101,13 @@ test("imports a network shared profile detail as an editable local profile", asy
       configToml: 'model = "gpt-5.4"\n',
     },
   });
+  expect(invokeMock).toHaveBeenCalledWith("set_profile_remote_metadata", {
+    profileId: "local-imported-1",
+    remoteProfileId: "remote-1",
+    remoteContentVersion: null,
+    remoteContentHash: null,
+    remoteUpdatedAt: "2026-04-16T00:00:00Z",
+  });
 
   document
     .querySelector<HTMLButtonElement>('[data-action="nav-profiles"]')
@@ -2692,6 +3115,197 @@ test("imports a network shared profile detail as an editable local profile", asy
   await flushUi();
 
   expect(document.querySelector('[data-role="profile-row"]')?.textContent).toContain("Team Shared");
+});
+
+test("prompts to update and restarts Codex when the active shared profile has a newer cloud version", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+  localStorage.setItem("codex-auth-switch.networkProfileToken", "cas_test_token");
+
+  const initialSnapshot = {
+    targetDir: "/Users/example/.codex",
+    usingDefaultTargetDir: true,
+    targetExists: true,
+    targetAuthExists: true,
+    targetConfigExists: true,
+    targetUpdatedAt: "2026-06-04T10:00:00Z",
+    targetAuthTypeLabel: "第三方 API",
+    activeProfileId: "local-shared-1",
+    lastSelectedProfileId: "local-shared-1",
+    lastSwitchProfileId: "local-shared-1",
+    lastSwitchedAt: "2026-06-04T10:00:00Z",
+    codexUsageApiEnabled: false,
+    profiles: [
+      {
+        id: "local-shared-1",
+        name: "Team Shared",
+        notes: "团队共享配置",
+        authTypeLabel: "第三方 API",
+        createdAt: "2026-06-04T09:00:00Z",
+        updatedAt: "2026-06-04T10:00:00Z",
+        authHash: "auth-old",
+        configHash: "config-old",
+        remoteProfileId: "remote-1",
+        remoteContentVersion: 1,
+        remoteContentHash: "old-content",
+        remoteUpdatedAt: "2026-06-04T10:00:00Z",
+        codexUsage: null,
+        thirdPartyLatency: null,
+        thirdPartyUsage: null,
+      },
+    ],
+  };
+  const updatedSnapshot = {
+    ...initialSnapshot,
+    profiles: [
+      {
+        ...initialSnapshot.profiles[0],
+        updatedAt: "2026-06-05T08:00:00Z",
+        authHash: "auth-new",
+        configHash: "config-new",
+        remoteContentVersion: 2,
+        remoteContentHash: "new-content",
+        remoteUpdatedAt: "2026-06-05T08:00:00Z",
+      },
+    ],
+  };
+
+  invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+    if (command === "load_snapshot") return initialSnapshot;
+    if (command === "update_profile") {
+      expect(args).toEqual({
+        profileId: "local-shared-1",
+        payload: {
+          name: "Team Shared",
+          notes: "团队共享配置",
+          authJson: '{"token":"new-cloud-token"}',
+          configToml: 'model = "gpt-5.5"\n',
+        },
+      });
+      return updatedSnapshot;
+    }
+    if (command === "set_profile_remote_metadata") {
+      expect(args).toEqual({
+        profileId: "local-shared-1",
+        remoteProfileId: "remote-1",
+        remoteContentVersion: 2,
+        remoteContentHash: "new-content",
+        remoteUpdatedAt: "2026-06-05T08:00:00Z",
+      });
+      return updatedSnapshot;
+    }
+    if (command === "switch_profile") {
+      expect(args).toEqual({ profileId: "local-shared-1" });
+      return updatedSnapshot;
+    }
+    if (command === "restart_codex") return undefined;
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    const url = input.toString();
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/auth/me") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ user: { dingUserId: "Ding-B", name: "Bob" } }),
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/users") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ users: [] }),
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => [
+          {
+            id: "remote-1",
+            name: "Team Shared",
+            description: "团队共享配置",
+            createdAt: "2026-06-04T09:00:00Z",
+            updatedAt: "2026-06-05T08:00:00Z",
+            contentVersion: 2,
+            contentHash: "new-content",
+            contentUpdatedAt: "2026-06-05T08:00:00Z",
+            files: ["auth.json", "config.toml"],
+            ownerDingUserId: "Ding-A",
+            visibility: "public",
+            sharedWith: [],
+          },
+        ],
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-1") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          id: "remote-1",
+          name: "Team Shared",
+          description: "团队共享配置",
+          createdAt: "2026-06-04T09:00:00Z",
+          updatedAt: "2026-06-05T08:00:00Z",
+          contentVersion: 2,
+          contentHash: "new-content",
+          contentUpdatedAt: "2026-06-05T08:00:00Z",
+          files: ["auth.json", "config.toml"],
+        }),
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-1/auth.json") {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => '{"token":"new-cloud-token"}',
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-1/config.toml") {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => 'model = "gpt-5.5"\n',
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  await import("../src/main");
+  await flushUi();
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="nav-sharing"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  await flushUi();
+  await flushUi();
+
+  expect(document.body.textContent).toContain("Team Shared");
+  expect(document.body.textContent).toContain("v2");
+  document.querySelector<HTMLButtonElement>("#btn-ok")?.click();
+  await flushUi();
+  await flushUi();
+  await flushUi();
+  await flushUi();
+  await flushUi();
+  await flushUi();
+  await flushUi();
+  await flushUi();
+  await flushUi();
+
+  expect(invokeMock).toHaveBeenCalledWith("update_profile", expect.objectContaining({ profileId: "local-shared-1" }));
+  expect(invokeMock).toHaveBeenCalledWith("set_profile_remote_metadata", expect.objectContaining({ profileId: "local-shared-1" }));
+  expect(invokeMock).toHaveBeenCalledWith("switch_profile", { profileId: "local-shared-1" });
+  expect(invokeMock).toHaveBeenCalledWith("restart_codex", undefined);
+  expect(document.body.textContent).toContain("已更新并重启 Codex");
 });
 
 test("deletes a saved profile after confirmation", async () => {

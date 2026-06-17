@@ -15,6 +15,10 @@ export type ProfileSummary = {
   modelProviderName?: string | null;
   modelProviderBaseUrl?: string | null;
   modelProviderWireApi?: string | null;
+  remoteProfileId?: string | null;
+  remoteContentVersion?: number | null;
+  remoteContentHash?: string | null;
+  remoteUpdatedAt?: string | null;
   createdAt: string;
   updatedAt: string;
   authHash: string;
@@ -35,6 +39,10 @@ export type ProfileDocument = {
   modelProviderName?: string | null;
   modelProviderBaseUrl?: string | null;
   modelProviderWireApi?: string | null;
+  remoteProfileId?: string | null;
+  remoteContentVersion?: number | null;
+  remoteContentHash?: string | null;
+  remoteUpdatedAt?: string | null;
   createdAt: string;
   updatedAt: string;
   authJson: string;
@@ -162,6 +170,16 @@ export type UpdateCheckResult = {
   sha256: string;
   size: number;
   canInstall: boolean;
+};
+
+export type PacProxyStatus = {
+  supported: boolean;
+  enabled: boolean;
+  pacUrl: string;
+  availableServices: string[];
+  selectedServices: string[];
+  services: string[];
+  message: string | null;
 };
 
 export type InstallLocationStatus = {

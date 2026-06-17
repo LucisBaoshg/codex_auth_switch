@@ -17,6 +17,7 @@ import type { LocalShareFormState } from "./sharing-center-state";
 import { formatDateTime } from "./usage-formatters";
 
 export type SharingCenterTab = "own" | "library";
+export type SharingLibraryTab = "official" | "thirdParty" | "private";
 
 export type ShareUserCheckboxListInput = {
   users: ShareUserOption[];
@@ -85,7 +86,24 @@ export type EnterpriseLibraryTabInput = {
   loading: boolean;
   profiles: NetworkProfile[];
   currentUser: NetworkUserPrincipal | null;
+  activeLibraryTab: SharingLibraryTab;
 };
+
+function normalizedProfileName(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function findOwnedProfileForLocalProfile(
+  profile: Pick<ProfileSummary, "id" | "name">,
+  ownedProfiles: readonly NetworkProfile[],
+): NetworkProfile | null {
+  return ownedProfiles.find((ownedProfile) => ownedProfile.sourceProfileId === profile.id) ??
+    ownedProfiles.find((ownedProfile) =>
+      !ownedProfile.sourceProfileId &&
+      normalizedProfileName(ownedProfile.name) === normalizedProfileName(profile.name),
+    ) ??
+    null;
+}
 
 export function renderShareUserCheckboxList(input: ShareUserCheckboxListInput): string {
   if (input.loading) {
@@ -197,8 +215,9 @@ export function renderSharingCenterPage(input: SharingCenterPageInput): string {
 
 export function renderLocalShareForm(input: LocalShareFormInput): string {
   const selectedProfile = input.localShareForm.selectedProfile;
-  const ownedProfilesByName = new Map(input.ownedProfiles.map((profile) => [profile.name, profile]));
-  const matchedOwnedProfile = selectedProfile ? ownedProfilesByName.get(selectedProfile.name) ?? null : null;
+  const matchedOwnedProfile = selectedProfile
+    ? findOwnedProfileForLocalProfile(selectedProfile, input.ownedProfiles)
+    : null;
   const activeOwnedProfile =
     input.ownedProfiles.find((profile) => profile.id === input.editDraft?.profileId) ?? null;
   const showSharedEditor = Boolean(activeOwnedProfile);
@@ -210,12 +229,12 @@ export function renderLocalShareForm(input: LocalShareFormInput): string {
           <h3>共享我的本地配置</h3>
           <p>选择一张配置卡片，直接发布或修改它在企业共享库中的可见范围。</p>
         </div>
-        <span class="sharing-section-badge">${input.ownedProfiles.length} 个已共享</span>
+        <span class="sharing-section-badge">${input.ownedProfiles.length} 个云端配置</span>
       </div>
 
       <div class="local-profile-tab-grid" data-role="local-profile-tabs">
         ${input.profiles.map((profile) => {
-            const ownedProfile = ownedProfilesByName.get(profile.name) ?? null;
+            const ownedProfile = findOwnedProfileForLocalProfile(profile, input.ownedProfiles);
             const selected = !showSharedEditor && profile.id === selectedProfile?.id;
             const editing = Boolean(ownedProfile && input.editDraft?.profileId === ownedProfile.id);
             return renderLocalProfileTabCard({
@@ -227,7 +246,11 @@ export function renderLocalShareForm(input: LocalShareFormInput): string {
             });
         }).join("")}
         ${input.ownedProfiles
-          .filter((ownedProfile) => !input.profiles.some((profile) => profile.name === ownedProfile.name))
+          .filter((ownedProfile) =>
+            !input.profiles.some((profile) =>
+              findOwnedProfileForLocalProfile(profile, [ownedProfile])?.id === ownedProfile.id,
+            ),
+          )
           .map((ownedProfile) => renderRemoteOnlyProfileTabCard({
             profile: ownedProfile,
             currentUser: input.currentUser,
@@ -238,7 +261,7 @@ export function renderLocalShareForm(input: LocalShareFormInput): string {
       </div>
 
       ${input.ownedProfilesLoading && !input.authRequired ? `
-        <div class="sharing-inline-note">正在加载我已共享的配置...</div>
+        <div class="sharing-inline-note">正在加载我的云端配置...</div>
       ` : ""}
 
       <div class="sharing-config-editor-panel">
@@ -287,7 +310,7 @@ function renderLocalProfileTabCard(input: {
   selected: boolean;
   busy: boolean;
 }): string {
-  const scopeLabel = input.ownedProfile ? sharingScopeLabelForCurrentUser(input.ownedProfile, input.currentUser) : "";
+  const status = input.ownedProfile ? ownedNetworkProfileStatus(input.ownedProfile, input.currentUser) : null;
 
   return `
     <button
@@ -303,8 +326,8 @@ function renderLocalProfileTabCard(input: {
         <small>${escapeHtml(input.profile.notes || input.profile.authTypeLabel || "本地配置")}</small>
         <em>更新: ${formatDateTime(input.profile.updatedAt)}</em>
       </span>
-      <span class="local-profile-tab-status ${input.ownedProfile ? "shared" : ""}">
-        ${input.ownedProfile ? `已共享 · ${escapeHtml(scopeLabel)}` : "未共享"}
+      <span class="local-profile-tab-status ${status?.className ?? ""}">
+        ${status ? escapeHtml(status.label) : "未共享"}
       </span>
     </button>
   `;
@@ -316,6 +339,8 @@ function renderRemoteOnlyProfileTabCard(input: {
   selected: boolean;
   busy: boolean;
 }): string {
+  const status = ownedNetworkProfileStatus(input.profile, input.currentUser);
+
   return `
     <button
       class="local-profile-tab-card ${input.selected ? "active" : ""}"
@@ -329,8 +354,8 @@ function renderRemoteOnlyProfileTabCard(input: {
         <small>${escapeHtml(input.profile.description || "云端共享配置")}</small>
         <em>更新: ${formatDateTime(input.profile.updatedAt || input.profile.createdAt)}</em>
       </span>
-      <span class="local-profile-tab-status shared">
-        已共享 · ${escapeHtml(sharingScopeLabelForCurrentUser(input.profile, input.currentUser))}
+      <span class="local-profile-tab-status ${status.className}">
+        ${escapeHtml(status.label)}
       </span>
     </button>
   `;
@@ -420,8 +445,15 @@ function renderSharedProfileSummary(profile: NetworkProfile, input: LocalShareFo
     <div class="sharing-shared-summary">
       <div>
         <strong>${escapeHtml(profile.name)}</strong>
-        <span>${escapeHtml(sharingScopeLabelForCurrentUser(profile, input.currentUser))} · 点击配置卡片可直接修改共享情况。</span>
+        <span>${escapeHtml(sharingScopeLabelForCurrentUser(profile, input.currentUser))}</span>
       </div>
+      <button
+        class="button button-primary"
+        data-action="share-local-profile"
+        ${input.busy ? "disabled" : ""}
+      >
+        同步授权信息
+      </button>
       <button
         class="button button-secondary"
         data-action="edit-shared-profile-users"
@@ -429,6 +461,14 @@ function renderSharedProfileSummary(profile: NetworkProfile, input: LocalShareFo
         ${input.busy ? "disabled" : ""}
       >
         修改共享情况
+      </button>
+      <button
+        class="button button-danger"
+        data-action="delete-shared-profile"
+        data-id="${escapeHtml(profile.id)}"
+        ${input.busy ? "disabled" : ""}
+      >
+        删除
       </button>
     </div>
   `;
@@ -447,7 +487,7 @@ function renderInlineSharedProfileEditor(profile: NetworkProfile, input: LocalSh
       <div class="sharing-inline-editor-head">
         <div>
           <strong>${escapeHtml(profile.name)}</strong>
-          <span>已共享 · ${escapeHtml(sharingScopeLabelForCurrentUser(profile, input.currentUser))}</span>
+          <span>${escapeHtml(ownedNetworkProfileStatus(profile, input.currentUser).label)}</span>
         </div>
         <button class="button button-danger" data-action="delete-shared-profile" data-id="${escapeHtml(profile.id)}" ${input.busy ? "disabled" : ""}>
           删除
@@ -502,7 +542,7 @@ export function renderOwnedSharedProfiles(input: OwnedSharedProfilesInput): stri
       <section class="card shared-profiles-panel" data-role="owned-shared-profiles">
         <div class="empty-state" style="padding:28px;">
           <div class="busy-dialog-spinner" style="margin: 0 auto 12px auto; width: 24px; height: 24px;"></div>
-          <p>正在加载我已共享的配置...</p>
+          <p>正在加载我的云端配置...</p>
         </div>
       </section>
     `;
@@ -512,16 +552,16 @@ export function renderOwnedSharedProfiles(input: OwnedSharedProfilesInput): stri
     <section class="card shared-profiles-panel" data-role="owned-shared-profiles">
       <div class="sharing-section-head">
         <div>
-          <h3>我已共享的配置</h3>
-          <p>管理自己发布到企业共享库的配置和可见人员。</p>
+          <h3>我的云端配置</h3>
+          <p>管理自己发布到企业共享库的配置、可见范围和可见人员。</p>
         </div>
         <span class="sharing-section-badge">${input.profiles.length} 个</span>
       </div>
 
       ${input.profiles.length === 0 ? `
         <div class="empty-state" style="padding:24px;margin-top:16px;">
-          <h3>还没有共享配置</h3>
-          <p>上方共享成功后，会出现在这里。</p>
+          <h3>还没有云端配置</h3>
+          <p>上方发布成功后，会出现在这里。</p>
         </div>
       ` : `
         <div class="shared-profile-list">
@@ -608,24 +648,21 @@ function renderOwnedSharedProfileCard(
 export function renderEnterpriseLibraryTab(input: EnterpriseLibraryTabInput): string {
   return `
     <section class="card sharing-library-panel" data-role="network-profile-library" style="min-height:360px;">
-      <div class="card-head">
-        <h3>企业共享库</h3>
-      </div>
-      <p class="card-note">这里展示您有权限查看和导入的云端共享配置。自己共享的配置会标出当前共享范围。</p>
-      <div style="margin-top:16px;">
-        ${input.authRequired ? `
-          <div class="empty-state" data-role="network-auth-prompt" style="padding:28px;">
-            <h3>需要登录企业共享库</h3>
-            <p>完成钉钉 SSO 登录后，客户端会自动连接企业共享库。</p>
-            <button class="button button-primary" data-action="open-network-sso-login" style="margin-top:12px;">钉钉 SSO 登录</button>
-          </div>
-        ` : renderNetworkProfileLibrarySection(input)}
-      </div>
+      ${input.authRequired ? `
+        <div class="empty-state" data-role="network-auth-prompt" style="padding:28px;">
+          <h3>需要登录企业共享库</h3>
+          <button class="button button-primary" data-action="open-network-sso-login" style="margin-top:12px;">钉钉 SSO 登录</button>
+        </div>
+      ` : renderNetworkProfileLibrarySection(input)}
     </section>
   `;
 }
 
 function renderNetworkProfileLibrarySection(input: EnterpriseLibraryTabInput): string {
+  const groups = groupNetworkProfilesForLibrary(input.profiles, input.currentUser);
+  const activeTab = input.activeLibraryTab;
+  const activeProfiles = groups[activeTab];
+
   if (input.loading) {
     return `
       <div class="empty-state" style="border:none;background:transparent;padding:48px 0;">
@@ -635,12 +672,14 @@ function renderNetworkProfileLibrarySection(input: EnterpriseLibraryTabInput): s
     `;
   }
 
+  const tabsHtml = renderSharingLibraryCategoryTabs(activeTab, groups);
+
   if (input.profiles.length === 0) {
     return `
+      ${tabsHtml}
       <div class="empty-state">
         <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--text-muted);margin-bottom:12px;"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"></path></svg>
         <h3>云端共享库为空</h3>
-        <p>目前还没有任何云端共享的配置文件。</p>
         <button class="button button-secondary" data-action="refresh-network-in-editor" style="margin-top:12px;">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
           重新加载
@@ -649,16 +688,52 @@ function renderNetworkProfileLibrarySection(input: EnterpriseLibraryTabInput): s
     `;
   }
 
+  if (activeProfiles.length === 0) {
+    return `
+      ${tabsHtml}
+      <div class="empty-state" style="padding:36px 0;">
+        <h3>${escapeHtml(sharingLibraryEmptyTitle(activeTab))}</h3>
+      </div>
+    `;
+  }
+
   return `
-    <div class="network-section-header" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
-      <h3 style="font-size:1.1rem; font-weight:700; color:var(--text-main); margin:0;">可用云端共享配置 (${input.profiles.length})</h3>
+    ${tabsHtml}
+    <div class="card-grid" style="grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; margin-bottom: 24px;">
+      ${activeProfiles.map((profile) => renderNetworkProfileLibraryCard(profile, input.currentUser)).join("")}
+    </div>
+  `;
+}
+
+function renderSharingLibraryCategoryTabs(
+  activeTab: SharingLibraryTab,
+  groups: Record<SharingLibraryTab, NetworkProfile[]>,
+): string {
+  const tabs: Array<{ value: SharingLibraryTab; label: string }> = [
+    { value: "official", label: "官网 OAuth" },
+    { value: "thirdParty", label: "第三方 API" },
+    { value: "private", label: "自己可见" },
+  ];
+
+  return `
+    <div class="library-category-bar">
+      <div class="segmented library-category-tabs" data-role="library-category-tabs">
+        ${tabs.map((tab) => `
+          <button
+            class="tab-btn ${activeTab === tab.value ? "active" : ""}"
+            data-action="sharing-library-tab"
+            data-library-tab="${tab.value}"
+            type="button"
+          >
+            <span>${tab.label}</span>
+            <strong>${groups[tab.value].length}</strong>
+          </button>
+        `).join("")}
+      </div>
       <button class="button button-secondary" data-action="refresh-network-in-editor" style="padding:4px 10px; font-size:0.8rem; height:28px; display:inline-flex; align-items:center; gap:4px;">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
-        <span>刷新列表</span>
+        <span>刷新</span>
       </button>
-    </div>
-    <div class="card-grid" style="grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; margin-bottom: 24px;">
-      ${input.profiles.map((profile) => renderNetworkProfileLibraryCard(profile, input.currentUser)).join("")}
     </div>
   `;
 }
@@ -672,7 +747,6 @@ function renderNetworkProfileLibraryCard(
       <div>
         <div class="card-head" style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px; margin-bottom:8px;">
           <h4 style="font-size:1rem; font-weight:700; color:var(--text-main); margin:0;" title="${escapeHtml(profile.name)}">${escapeHtml(profile.name)}</h4>
-          <span class="pill pill-type" style="font-size:0.7rem; padding: 2px 6px; color:var(--text-muted); border-color:var(--border-light); background:var(--bg-page); flex-shrink: 0;">☁️ 远程</span>
         </div>
         <p style="font-size:0.85rem; color:var(--text-muted); margin: 0 0 12px 0; display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;text-overflow:ellipsis;line-height:1.4;">${escapeHtml(profile.description || "云端共享配置")}</p>
         ${isOwnNetworkProfile(profile, currentUser) ? `
@@ -683,7 +757,7 @@ function renderNetworkProfileLibraryCard(
         ` : ""}
       </div>
       <div style="display:flex; justify-content:space-between; align-items:center; border-top:1px solid var(--border-light); padding-top:12px; margin-top:auto;">
-        <span style="font-size:0.75rem; color:var(--text-muted);">更新: ${formatDateTime(profile.createdAt).split(" ")[0]}</span>
+        <span style="font-size:0.75rem; color:var(--text-muted);">更新: ${formatDateTime(profile.updatedAt || profile.createdAt).split(" ")[0]}</span>
         <div style="display:flex; gap:8px;">
           <button class="button button-ghost" data-action="view-network-profile-details" data-id="${escapeHtml(profile.id)}" style="padding: 4px 8px; font-size: 0.8rem; height: 28px;">
             详情
@@ -696,6 +770,71 @@ function renderNetworkProfileLibraryCard(
       </div>
     </article>
   `;
+}
+
+function groupNetworkProfilesForLibrary(
+  profiles: readonly NetworkProfile[],
+  currentUser: NetworkUserPrincipal | null,
+): Record<SharingLibraryTab, NetworkProfile[]> {
+  return profiles.reduce<Record<SharingLibraryTab, NetworkProfile[]>>(
+    (groups, profile) => {
+      groups[networkProfileLibraryCategory(profile, currentUser)].push(profile);
+      return groups;
+    },
+    {
+      official: [],
+      thirdParty: [],
+      private: [],
+    },
+  );
+}
+
+function networkProfileLibraryCategory(
+  profile: NetworkProfile,
+  currentUser: NetworkUserPrincipal | null,
+): SharingLibraryTab {
+  if (isOwnNetworkProfile(profile, currentUser) && networkProfileVisibility(profile) === "private") {
+    return "private";
+  }
+
+  if (isThirdPartyNetworkAuthType(profile.authTypeLabel)) {
+    return "thirdParty";
+  }
+  if (profile.authTypeLabel === "官方 OAuth") {
+    return "official";
+  }
+
+  return looksLikeThirdPartyNetworkProfile(profile) ? "thirdParty" : "official";
+}
+
+function isThirdPartyNetworkAuthType(authTypeLabel: string | null | undefined): boolean {
+  return authTypeLabel === "第三方 API" || authTypeLabel === "共生配置" || authTypeLabel === "API Key";
+}
+
+function looksLikeThirdPartyNetworkProfile(profile: Pick<NetworkProfile, "name" | "description">): boolean {
+  const text = `${profile.name} ${profile.description}`.toLowerCase();
+  const codeNamePattern = /(^|[^a-z0-9])code([^a-z0-9]|$)/i;
+  return [
+    "第三方",
+    "共生",
+    "symbiotic",
+    "api",
+    "apikey",
+    "api key",
+    "key",
+    "base_url",
+    "base url",
+    "openai_base_url",
+    "ylscode",
+    "ylsagi",
+    "claudex",
+  ].some((keyword) => text.includes(keyword.toLowerCase())) || codeNamePattern.test(text);
+}
+
+function sharingLibraryEmptyTitle(tab: SharingLibraryTab): string {
+  if (tab === "thirdParty") return "没有第三方 API 配置";
+  if (tab === "private") return "没有自己可见的配置";
+  return "没有官网 OAuth 配置";
 }
 
 function sameDingUserId(left: string | null | undefined, right: string | null | undefined): boolean {
@@ -719,4 +858,23 @@ function sharingScopeLabelForCurrentUser(
 
   const sharedCount = sharedUserIdsExcludingCurrentUser(profile, currentUser).length;
   return sharedCount > 0 ? `指定 ${sharedCount} 人` : "未指定共享对象";
+}
+
+function ownedNetworkProfileStatus(
+  profile: Pick<NetworkProfile, "visibility" | "sharedWith">,
+  currentUser: NetworkUserPrincipal | null,
+): { label: string; className: string } {
+  const visibility = networkProfileVisibility(profile);
+  const scopeLabel = sharingScopeLabelForCurrentUser(profile, currentUser);
+  if (visibility === "private") {
+    return {
+      label: "云端私有 · 仅自己可见",
+      className: "private",
+    };
+  }
+
+  return {
+    label: `已共享 · ${scopeLabel}`,
+    className: "shared",
+  };
 }
