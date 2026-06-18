@@ -1,7 +1,8 @@
 use codex_auth_switch_lib::core::{
     pac_proxy_status_from_macos_services, pac_proxy_status_from_macos_services_with_selection,
     parse_macos_auto_proxy_status, parse_windows_auto_config_url,
-    windows_pac_proxy_status_from_auto_config_url, PacProxyStatus, PAC_PROXY_URL,
+    windows_pac_proxy_status_from_auto_config_url, windows_registry_command_creation_flags,
+    PacProxyStatus, PAC_PROXY_URL,
 };
 
 #[test]
@@ -140,4 +141,9 @@ fn marks_windows_pac_proxy_disabled_when_url_is_missing_or_external() {
         assert_eq!(status.pac_url, PAC_PROXY_URL);
         assert_eq!(status.message, None);
     }
+}
+
+#[test]
+fn windows_registry_commands_are_created_without_a_console_window() {
+    assert_eq!(windows_registry_command_creation_flags(), 0x08000000);
 }

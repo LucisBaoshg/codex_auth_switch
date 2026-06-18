@@ -1,10 +1,13 @@
 use super::AppError;
 use serde::{Deserialize, Serialize};
 use std::fs;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub const PAC_PROXY_URL: &str = "http://10.12.0.24/proxy.pac";
+const WINDOWS_CREATE_NO_WINDOW: u32 = 0x08000000;
 const WINDOWS_PROXY_SCRIPT_SERVICE: &str = "Windows 设置脚本";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -133,6 +136,10 @@ pub fn windows_pac_proxy_status_from_auto_config_url(
         services: if enabled { vec![service] } else { Vec::new() },
         message: None,
     }
+}
+
+pub fn windows_registry_command_creation_flags() -> u32 {
+    WINDOWS_CREATE_NO_WINDOW
 }
 
 pub fn unsupported_pac_proxy_status() -> PacProxyStatus {
@@ -437,14 +444,13 @@ const WINDOWS_INTERNET_SETTINGS_KEY: &str =
 
 #[cfg(target_os = "windows")]
 fn windows_auto_config_url() -> Result<Option<String>, AppError> {
-    let output = Command::new("reg")
-        .args([
-            "query",
-            WINDOWS_INTERNET_SETTINGS_KEY,
-            "/v",
-            "AutoConfigURL",
-        ])
-        .output()?;
+    let output = windows_reg_command(&[
+        "query",
+        WINDOWS_INTERNET_SETTINGS_KEY,
+        "/v",
+        "AutoConfigURL",
+    ])
+    .output()?;
 
     if output.status.success() {
         return Ok(parse_windows_auto_config_url(&String::from_utf8_lossy(
@@ -457,7 +463,7 @@ fn windows_auto_config_url() -> Result<Option<String>, AppError> {
 
 #[cfg(target_os = "windows")]
 fn run_windows_reg(args: &[&str]) -> Result<String, AppError> {
-    let output = Command::new("reg").args(args).output()?;
+    let output = windows_reg_command(args).output()?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).to_string());
     }
@@ -470,6 +476,14 @@ fn run_windows_reg(args: &[&str]) -> Result<String, AppError> {
     } else {
         message
     }))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_reg_command(args: &[&str]) -> Command {
+    let mut command = Command::new("reg");
+    command.args(args);
+    command.creation_flags(windows_registry_command_creation_flags());
+    command
 }
 
 #[cfg(target_os = "windows")]

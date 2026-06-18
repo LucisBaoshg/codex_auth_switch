@@ -23,7 +23,7 @@ pub use pac_proxy::{
     pac_proxy_status_from_macos_services_with_selection, parse_macos_auto_proxy_status,
     parse_windows_auto_config_url, set_pac_proxy_enabled, set_pac_proxy_selected_services,
     unsupported_pac_proxy_status, windows_pac_proxy_status_from_auto_config_url,
-    MacosAutoProxyStatus, PacProxyStatus, PAC_PROXY_URL,
+    windows_registry_command_creation_flags, MacosAutoProxyStatus, PacProxyStatus, PAC_PROXY_URL,
 };
 pub use restart::{
     codex_restart_plan_for_platform, restart_codex_app, restart_codex_script, CodexRestartPlatform,
