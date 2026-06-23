@@ -56,6 +56,10 @@ import {
   type ShareVisibility,
 } from "./network-profile-utils";
 import {
+  sharedAuthWriteBackBase,
+  shouldWriteBackSharedAuth,
+} from "./network-auth-sync";
+import {
   renderNetworkAccountSettings,
   renderSidebarLoginStatus,
 } from "./network-account-renderers";
@@ -154,7 +158,7 @@ const desktopLoginPollIntervalMs =
 const isTauriRuntime = "__TAURI_INTERNALS__" in window;
 const appRoot = document.querySelector<HTMLDivElement>("#app");
 
-type NetworkDeleteResponse = {
+type NetworkHttpResponse = {
   status: number;
   body: string;
 };
@@ -184,6 +188,66 @@ function networkErrorMessageFromBody(body: string, fallback: string): string {
   }
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function parseNetworkJson<T>(body: string, fallback: string): T {
+  try {
+    return JSON.parse(body) as T;
+  } catch {
+    throw new Error(fallback);
+  }
+}
+
+async function networkHttpRequest(
+  method: "GET" | "POST",
+  url: string,
+  actionLabel: string,
+  options: {
+    token?: string | null;
+    body?: string | null;
+    contentType?: string;
+  } = {},
+): Promise<NetworkHttpResponse> {
+  const token = options.token?.trim() || null;
+  const body = options.body ?? null;
+  if (isTauriRuntime) {
+    try {
+      return await desktopInvoke<NetworkHttpResponse>("network_request", {
+        method,
+        url,
+        token,
+        body,
+      });
+    } catch (error) {
+      throw new Error(`${actionLabel}请求失败：${errorMessage(error)}`);
+    }
+  }
+
+  try {
+    const headers: HeadersInit = {};
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+    if (body !== null) {
+      headers["Content-Type"] = options.contentType ?? "application/json";
+    }
+    const response = await fetch(url, {
+      method,
+      cache: "no-store",
+      ...(Object.keys(headers).length > 0 ? { headers } : {}),
+      ...(body !== null ? { body } : {}),
+    });
+    return {
+      status: response.status,
+      body: await response.text(),
+    };
+  } catch (error) {
+    throw new Error(`${actionLabel}请求失败：${errorMessage(error)}`);
+  }
+}
+
 function formatErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -193,6 +257,7 @@ const state = createDesktopState(loadNetworkSharingSettings());
 let flashTimeoutId: number | null = null;
 const promptedRemoteUpdateKeys = new Set<string>();
 let remoteUpdateCheckInFlight = false;
+let sharedAuthWriteBackInFlight = false;
 
 function setFlash(kind: FlashKind, text: string): void {
   state.flash = { kind, text };
@@ -838,6 +903,7 @@ async function fetchNetworkProfiles(): Promise<void> {
     if (!res.ok) throw new Error("加载网络共享配置失败");
     state.networkProfiles = await res.json();
     state.networkAuthRequired = false;
+    await syncActiveSharedAuthWriteBack();
     await checkActiveSharedProfileUpdate();
   } catch (error) {
     setFlash("error", error instanceof Error ? error.message : String(error));
@@ -1085,7 +1151,7 @@ async function deleteSharedProfile(profileId: string): Promise<void> {
   try {
     const profileUrl = `${networkProfilesApiUrl(state.networkSharing)}/${profile.id}`;
     if (isTauriRuntime) {
-      const result = await desktopInvoke<NetworkDeleteResponse>("delete_network_profile", {
+      const result = await desktopInvoke<NetworkHttpResponse>("delete_network_profile", {
         url: profileUrl,
         token: state.networkSharing.token.trim() || null,
       });
@@ -1173,6 +1239,88 @@ function activeSharedProfileUpdateTarget(): { activeProfile: ProfileSummary; rem
   }
 
   return null;
+}
+
+async function syncActiveSharedAuthWriteBack(): Promise<void> {
+  if (!isTauriRuntime || sharedAuthWriteBackInFlight || !hasNetworkAccessToken(state.networkSharing)) {
+    return;
+  }
+
+  const snapshot = state.snapshot;
+  const activeProfile = snapshot?.profiles.find((profile) => profile.id === snapshot.activeProfileId);
+  const remoteProfileId = activeProfile?.remoteProfileId?.trim();
+  if (!activeProfile || !remoteProfileId) {
+    return;
+  }
+
+  const remoteProfile = state.networkProfiles.find((profile) => profile.id === remoteProfileId);
+  if (!shouldWriteBackSharedAuth(activeProfile, remoteProfile)) {
+    return;
+  }
+
+  sharedAuthWriteBackInFlight = true;
+  try {
+    const document = await desktopInvoke<ProfileDocument>("get_profile_document", { profileId: activeProfile.id });
+    if (!document.loadedFromTarget || !document.hasTargetChanges) {
+      return;
+    }
+
+    const base = sharedAuthWriteBackBase(activeProfile, remoteProfile);
+    const response = await networkHttpRequest(
+      "POST",
+      `${networkProfilesApiUrl(state.networkSharing)}/${remoteProfileId}`,
+      "同步共享授权",
+      {
+        token: state.networkSharing.token,
+        body: JSON.stringify({
+          ...base,
+          authContent: document.authJson,
+        }),
+      },
+    );
+
+    if (response.status === 401) {
+      throw networkUnauthorizedError("同步共享授权");
+    }
+    if (response.status === 409) {
+      setFlash("info", "共享配置已有新版本，已跳过本机授权写回。请先更新到最新版。");
+      return;
+    }
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(networkErrorMessageFromBody(response.body, "同步共享授权失败"));
+    }
+
+    const updatedProfile = parseNetworkJson<NetworkProfile>(response.body, "同步共享授权返回内容无法解析。");
+    state.networkProfiles = state.networkProfiles.map((profile) =>
+      profile.id === updatedProfile.id ? updatedProfile : profile,
+    );
+
+    const payload = profileInputFromDocument({
+      ...document,
+      name: activeProfile.name,
+      notes: activeProfile.notes,
+    });
+    const savedSnapshot = await desktopInvoke<AppSnapshot>("update_profile", {
+      profileId: activeProfile.id,
+      payload,
+    });
+    setSnapshot(savedSnapshot);
+
+    const metadataSnapshot = await persistRemoteMetadata(activeProfile.id, {
+      ...document,
+      remoteProfileId: updatedProfile.id,
+      remoteContentVersion: updatedProfile.contentVersion ?? null,
+      remoteContentHash: updatedProfile.contentHash ?? null,
+      remoteUpdatedAt: remoteUpdatedAtFromNetworkProfile(updatedProfile),
+    });
+    if (metadataSnapshot) {
+      setSnapshot(metadataSnapshot);
+    }
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    sharedAuthWriteBackInFlight = false;
+  }
 }
 
 function remoteUpdatePromptKey(profile: NetworkProfile): string {
@@ -1272,17 +1420,26 @@ async function checkActiveSharedProfileUpdate(): Promise<void> {
 async function openNetworkSsoLogin(): Promise<void> {
   saveNetworkSharingSettings(state.networkSharing);
   try {
-    const sessionResponse = await fetch(networkDesktopLoginApiUrl(state.networkSharing), {
-      method: "POST",
-      cache: "no-store",
-    });
-    if (!sessionResponse.ok) {
-      throw new Error("创建桌面登录会话失败。");
+    const sessionResponse = await networkHttpRequest(
+      "POST",
+      networkDesktopLoginApiUrl(state.networkSharing),
+      "创建桌面登录会话",
+    );
+    if (sessionResponse.status < 200 || sessionResponse.status >= 300) {
+      throw new Error(
+        networkErrorMessageFromBody(
+          sessionResponse.body,
+          `创建桌面登录会话失败（HTTP ${sessionResponse.status}）。`,
+        ),
+      );
     }
-    const session = (await sessionResponse.json()) as {
+    const session = parseNetworkJson<{
       id: string;
       pollToken: string;
-    };
+    }>(sessionResponse.body, "创建桌面登录会话返回内容无法解析。");
+    if (!session.id || !session.pollToken) {
+      throw new Error("创建桌面登录会话返回内容缺少必要字段。");
+    }
     const loginUrl = new URL(networkSsoLoginUrl(state.networkSharing));
     loginUrl.searchParams.set("desktopLoginId", session.id);
 
@@ -1307,13 +1464,18 @@ async function pollNetworkDesktopLogin(sessionId: string, pollToken: string): Pr
 
   for (let attempt = 0; attempt < 60; attempt += 1) {
     await new Promise((resolve) => window.setTimeout(resolve, desktopLoginPollIntervalMs));
-    const response = await fetch(pollUrl.toString(), { cache: "no-store" });
+    const response = await networkHttpRequest("GET", pollUrl.toString(), "桌面登录状态检查");
     if (response.status === 202) continue;
-    if (!response.ok) {
-      throw new Error("桌面登录状态检查失败。");
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(
+        networkErrorMessageFromBody(
+          response.body,
+          `桌面登录状态检查失败（HTTP ${response.status}）。`,
+        ),
+      );
     }
 
-    const result = (await response.json()) as { token?: string };
+    const result = parseNetworkJson<{ token?: string }>(response.body, "桌面登录状态返回内容无法解析。");
     if (!result.token) {
       throw new Error("桌面登录没有返回访问令牌。");
     }
@@ -1595,6 +1757,8 @@ async function shareLocalProfileToNetwork(): Promise<void> {
             visibility,
             sharedWith,
             sourceProfileId: profileId,
+            baseContentVersion: existingProfile.contentVersion ?? null,
+            baseContentHash: existingProfile.contentHash ?? null,
             authContent: document.authJson,
             configContent: document.configToml,
           }),

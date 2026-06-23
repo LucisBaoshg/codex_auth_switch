@@ -24,7 +24,7 @@ use tauri::{AppHandle, Emitter, Listener, Manager};
 const MENU_BAR_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(serde::Serialize)]
-struct NetworkDeleteResponse {
+struct NetworkHttpResponse {
     status: u16,
     body: String,
 }
@@ -150,7 +150,7 @@ fn set_profile_remote_metadata(
 fn delete_network_profile(
     url: String,
     token: Option<String>,
-) -> Result<NetworkDeleteResponse, String> {
+) -> Result<NetworkHttpResponse, String> {
     let parsed = url::Url::parse(&url).map_err(|error| error.to_string())?;
     match parsed.scheme() {
         "http" | "https" => (),
@@ -166,11 +166,60 @@ fn delete_network_profile(
     }
 
     match request.call() {
-        Ok(response) => Ok(NetworkDeleteResponse {
+        Ok(response) => Ok(NetworkHttpResponse {
             status: response.status(),
             body: response.into_string().unwrap_or_default(),
         }),
-        Err(ureq::Error::Status(status, response)) => Ok(NetworkDeleteResponse {
+        Err(ureq::Error::Status(status, response)) => Ok(NetworkHttpResponse {
+            status,
+            body: response.into_string().unwrap_or_default(),
+        }),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[tauri::command]
+fn network_request(
+    method: String,
+    url: String,
+    token: Option<String>,
+    body: Option<String>,
+) -> Result<NetworkHttpResponse, String> {
+    let parsed = url::Url::parse(&url).map_err(|error| error.to_string())?;
+    match parsed.scheme() {
+        "http" | "https" => (),
+        scheme => return Err(format!("unsupported URL scheme: {scheme}")),
+    }
+
+    let method = method.trim().to_ascii_uppercase();
+    let mut request = match method.as_str() {
+        "GET" => ureq::get(parsed.as_str()),
+        "POST" => ureq::post(parsed.as_str()),
+        _ => return Err(format!("unsupported HTTP method: {method}")),
+    }
+    .set("User-Agent", "codex-auth-switch");
+
+    if let Some(token) = token {
+        let token = token.trim();
+        if !token.is_empty() {
+            request = request.set("Authorization", &format!("Bearer {token}"));
+        }
+    }
+
+    let response = if let Some(body) = body {
+        request
+            .set("Content-Type", "application/json")
+            .send_string(&body)
+    } else {
+        request.call()
+    };
+
+    match response {
+        Ok(response) => Ok(NetworkHttpResponse {
+            status: response.status(),
+            body: response.into_string().unwrap_or_default(),
+        }),
+        Err(ureq::Error::Status(status, response)) => Ok(NetworkHttpResponse {
             status,
             body: response.into_string().unwrap_or_default(),
         }),
@@ -601,6 +650,7 @@ pub fn run() {
             update_profile,
             set_profile_remote_metadata,
             delete_network_profile,
+            network_request,
             switch_profile,
             delete_profile,
             set_target_dir,

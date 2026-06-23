@@ -5,6 +5,7 @@ import {
   createProfile,
   filterProfilesForPrincipal,
   normalizeProfileVisibility,
+  ProfileShareSafetyError,
   publicProfileWithAuthType,
   readProfiles,
 } from "@/lib/profile-store";
@@ -69,6 +70,9 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json(await publicProfileWithAuthType(newProfile), { status: 201, headers: noStoreHeaders });
   } catch (error) {
+    if (error instanceof ProfileShareSafetyError) {
+      return NextResponse.json({ error: error.message }, { status: 400, headers: noStoreHeaders });
+    }
     console.error("Upload Error:", error);
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500, headers: noStoreHeaders });
   }

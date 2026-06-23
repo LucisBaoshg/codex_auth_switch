@@ -48,22 +48,61 @@ export type ProfileInput = {
   configContent: string;
 };
 
+export class ProfileContentConflictError extends Error {
+  currentVersion: number;
+  currentHash: string;
+
+  constructor(currentVersion: number, currentHash: string) {
+    super("共享配置已有更新，请先拉取最新版后再重试。");
+    this.name = "ProfileContentConflictError";
+    this.currentVersion = currentVersion;
+    this.currentHash = currentHash;
+  }
+}
+
+export class ProfileShareSafetyError extends Error {
+  constructor(message = "官方 OAuth 配置不能公开分享，请改为仅自己可见或指定成员可见。") {
+    super(message);
+    this.name = "ProfileShareSafetyError";
+  }
+}
+
 const profilesFileName = "profiles.json";
 
-export function detectSharedProfileAuthType(authContent: string, configContent: string): string {
-  let auth: Record<string, unknown> = {};
+function parseAuthContent(authContent: string): Record<string, unknown> | null {
   try {
-    auth = JSON.parse(authContent) as Record<string, unknown>;
+    return JSON.parse(authContent) as Record<string, unknown>;
   } catch {
-    return "未知";
+    return null;
   }
+}
 
-  const hasOfficialTokens =
+export function hasOfficialOauthTokens(authContent: string): boolean {
+  const auth = parseAuthContent(authContent);
+  if (!auth) return false;
+
+  return (
     auth.auth_mode === "chatgpt" ||
     typeof auth.tokens === "object" ||
     typeof auth.refresh_token === "string" ||
     typeof auth.id_token === "string" ||
-    typeof auth.access_token === "string";
+    typeof auth.access_token === "string"
+  );
+}
+
+function assertShareSafeAuthVisibility(authContent: string, visibility: ProfileVisibility) {
+  if (visibility === "public" && hasOfficialOauthTokens(authContent)) {
+    throw new ProfileShareSafetyError();
+  }
+}
+
+export function detectSharedProfileAuthType(authContent: string, configContent: string): string {
+  const auth = parseAuthContent(authContent);
+  if (!auth) {
+    return "未知";
+  }
+
+  const hasOfficialTokens = hasOfficialOauthTokens(authContent);
   const hasOpenAiApiKey = typeof auth.OPENAI_API_KEY === "string" && auth.OPENAI_API_KEY.trim().length > 0;
   const hasModelProviders = /^\s*\[\s*model_providers(?:\.[^\]]+)?\s*\]/m.test(configContent);
   const hasProviderBaseUrl = /^\s*base_url\s*=/m.test(configContent) || /^\s*openai_base_url\s*=/m.test(configContent);
@@ -246,6 +285,8 @@ export async function createProfile(input: ProfileInput, principal: ProfilePrinc
 
   const id = Date.now().toString();
   const now = new Date().toISOString();
+  const visibility = normalizeProfileVisibility(input.visibility, input.sharedWith);
+  assertShareSafeAuthVisibility(input.authContent, visibility);
   const contentHash = sharedProfileContentHash(input.authContent, input.configContent);
   const profileFolder = path.join(profileFilesDir(), id);
   await fs.mkdir(profileFolder, { recursive: true });
@@ -267,7 +308,7 @@ export async function createProfile(input: ProfileInput, principal: ProfilePrinc
     ownerDingUserId: principal.dingUserId,
     ownerName: principal.name,
     ownerMobile: principal.mobile,
-    visibility: normalizeProfileVisibility(input.visibility, input.sharedWith),
+    visibility,
     sharedWith: normalizeSharedWith(input.sharedWith),
   };
 
@@ -288,6 +329,8 @@ export async function updateProfileMetadata(
     sourceProfileId?: string;
     authContent?: string;
     configContent?: string;
+    baseContentVersion?: number | null;
+    baseContentHash?: string | null;
   },
 ) {
   const profiles = await readProfiles();
@@ -326,6 +369,17 @@ export async function updateProfileMetadata(
     const nextAuth = updates.authContent ?? previousAuth;
     const nextConfig = updates.configContent ?? previousConfig;
     const previousHash = profiles[index].contentHash ?? sharedProfileContentHash(previousAuth, previousConfig);
+    const previousVersion = profiles[index].contentVersion ?? 1;
+    const baseHash = updates.baseContentHash?.trim();
+    assertShareSafeAuthVisibility(nextAuth, profiles[index].visibility ?? "private");
+
+    if (
+      (typeof updates.baseContentVersion === "number" && updates.baseContentVersion !== previousVersion) ||
+      (baseHash && baseHash !== previousHash)
+    ) {
+      throw new ProfileContentConflictError(previousVersion, previousHash);
+    }
+
     const nextHash = sharedProfileContentHash(nextAuth, nextConfig);
 
     if (nextHash !== previousHash) {
@@ -337,6 +391,10 @@ export async function updateProfileMetadata(
     profiles[index].contentHash = nextHash;
     profiles[index].authTypeLabel = detectSharedProfileAuthType(nextAuth, nextConfig);
   } else {
+    assertShareSafeAuthVisibility(
+      await readProfileFile(profiles[index].id, "auth.json"),
+      profiles[index].visibility ?? "private",
+    );
     profiles[index].contentVersion = profiles[index].contentVersion ?? 1;
     profiles[index].authTypeLabel = profiles[index].authTypeLabel ??
       detectSharedProfileAuthType(
@@ -357,6 +415,55 @@ export async function updateProfileMetadata(
 
   await writeProfiles(profiles);
   return profiles[index];
+}
+
+export async function syncProfileAuthContent(
+  id: string,
+  principal: ProfilePrincipal,
+  updates: {
+    authContent: string;
+    baseContentVersion?: number | null;
+    baseContentHash?: string | null;
+  },
+) {
+  const profiles = await readProfiles();
+  const index = profiles.findIndex((profile) => profile.id === id);
+  if (index === -1 || !canAccessProfile(profiles[index], principal)) return null;
+
+  const profile = profiles[index];
+  const previousAuth = await readProfileFile(profile.id, "auth.json");
+  const previousConfig = await readProfileFile(profile.id, "config.toml");
+  const currentVersion = profile.contentVersion ?? 1;
+  const currentHash = profile.contentHash ?? sharedProfileContentHash(previousAuth, previousConfig);
+  const baseHash = updates.baseContentHash?.trim();
+
+  if (
+    (typeof updates.baseContentVersion === "number" && updates.baseContentVersion !== currentVersion) ||
+    (baseHash && baseHash !== currentHash)
+  ) {
+    throw new ProfileContentConflictError(currentVersion, currentHash);
+  }
+
+  const now = new Date().toISOString();
+  const nextAuth = updates.authContent;
+  const nextHash = sharedProfileContentHash(nextAuth, previousConfig);
+  assertShareSafeAuthVisibility(nextAuth, profile.visibility ?? "private");
+  const profileFolder = path.join(profileFilesDir(), profile.id);
+  await fs.mkdir(profileFolder, { recursive: true });
+  await fs.writeFile(path.join(profileFolder, "auth.json"), nextAuth);
+
+  if (nextHash !== currentHash) {
+    profile.contentVersion = currentVersion + 1;
+    profile.contentUpdatedAt = now;
+  } else {
+    profile.contentVersion = currentVersion;
+  }
+  profile.contentHash = nextHash;
+  profile.authTypeLabel = detectSharedProfileAuthType(nextAuth, previousConfig);
+  profile.updatedAt = now;
+
+  await writeProfiles(profiles);
+  return profile;
 }
 
 export async function deleteProfile(id: string, principal: ProfilePrincipal) {

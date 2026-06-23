@@ -4,6 +4,7 @@ import { createDesktopToken } from "../src/lib/auth";
 import { POST as createSharedProfile } from "../src/app/api/profiles/route";
 import { DELETE as deleteSharedProfile, POST as updateSharedProfile } from "../src/app/api/profiles/[id]/route";
 import { GET as getSharedProfileFile } from "../src/app/api/profiles/[id]/[filename]/route";
+import { sharedProfileContentHash } from "../src/lib/profile-store";
 
 async function useTempDataDir(prefix: string) {
   const fs = await import("node:fs/promises");
@@ -53,6 +54,90 @@ test("creates shared profiles from a desktop bearer token", async () => {
   expect(body.contentUpdatedAt).toBe(body.updatedAt);
 });
 
+test("rejects public sharing for official OAuth auth files", async () => {
+  await useTempDataDir("codex-profiles-public-oauth-test-");
+  const { token } = await createDesktopToken({
+    dingUserId: "Ding-A",
+    name: "Alice",
+    mobile: "13900000001",
+    active: true,
+  });
+
+  const formData = new FormData();
+  formData.append("name", "ChatGPT Pro");
+  formData.append("description", "shared auth");
+  formData.append("visibility", "public");
+  formData.append("sharedWith", "[]");
+  formData.append("file1", new File(['{"auth_mode":"chatgpt","tokens":{"refresh_token":"secret"}}'], "auth.json", { type: "application/json" }));
+  formData.append("file2", new File(['model = "gpt-5.5"\n'], "config.toml", { type: "text/plain" }));
+
+  const response = await createSharedProfile(
+    new NextRequest("http://localhost/codex/api/profiles", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+      },
+      body: formData,
+    }),
+  );
+  const body = await response.json();
+
+  expect(response.status).toBe(400);
+  expect(body.error).toContain("官方 OAuth");
+});
+
+test("rejects updating official OAuth auth files to public visibility", async () => {
+  const dataDir = await useTempDataDir("codex-profiles-public-oauth-update-test-");
+  const fs = await import("node:fs/promises");
+  const path = await import("node:path");
+  const previousAuth = '{"auth_mode":"chatgpt","tokens":{"refresh_token":"secret"}}';
+  const configToml = 'model = "gpt-5.5"\n';
+  await fs.mkdir(path.join(dataDir, "files", "profile-1"), { recursive: true });
+  await fs.writeFile(path.join(dataDir, "files", "profile-1", "auth.json"), previousAuth);
+  await fs.writeFile(path.join(dataDir, "files", "profile-1", "config.toml"), configToml);
+  await fs.writeFile(path.join(dataDir, "profiles.json"), JSON.stringify([
+    {
+      id: "profile-1",
+      name: "ChatGPT Pro",
+      description: "shared auth",
+      createdAt: "2026-06-04T10:00:00.000Z",
+      updatedAt: "2026-06-04T10:00:00.000Z",
+      files: ["auth.json", "config.toml"],
+      contentVersion: 1,
+      contentHash: sharedProfileContentHash(previousAuth, configToml),
+      ownerDingUserId: "Ding-A",
+      ownerName: "Alice",
+      visibility: "selected",
+      sharedWith: ["Ding-B"],
+    },
+  ]));
+  const { token } = await createDesktopToken({
+    dingUserId: "Ding-A",
+    name: "Alice",
+    active: true,
+  });
+
+  const response = await updateSharedProfile(
+    new NextRequest("http://localhost/codex/api/profiles/profile-1", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        name: "ChatGPT Pro",
+        description: "shared auth",
+        visibility: "public",
+        sharedWith: [],
+      }),
+    }),
+    { params: Promise.resolve({ id: "profile-1" }) },
+  );
+  const body = await response.json();
+
+  expect(response.status).toBe(400);
+  expect(body.error).toContain("官方 OAuth");
+});
+
 test("stores only share-safe config.toml content from desktop uploads", async () => {
   const dataDir = await useTempDataDir("codex-profiles-sanitize-test-");
   const fs = await import("node:fs/promises");
@@ -66,7 +151,7 @@ test("stores only share-safe config.toml content from desktop uploads", async ()
   const formData = new FormData();
   formData.append("name", "ChatGPT Pro");
   formData.append("description", "shared auth");
-  formData.append("visibility", "public");
+  formData.append("visibility", "private");
   formData.append("sharedWith", "[]");
   formData.append("file1", new File(['{"auth_mode":"chatgpt","tokens":{"access_token":"shared"}}'], "auth.json", { type: "application/json" }));
   formData.append("file2", new File([[
@@ -114,7 +199,7 @@ test("returns derived auth type labels for symbiotic shared profiles", async () 
   const formData = new FormData();
   formData.append("name", "伊莉思Code");
   formData.append("description", "lancer.he@gmail.com 账号 $100/天");
-  formData.append("visibility", "public");
+  formData.append("visibility", "private");
   formData.append("sharedWith", "[]");
   formData.append(
     "file1",
@@ -284,6 +369,213 @@ test("updates shared profile files from a desktop bearer token", async () => {
   expect(storedConfig).not.toContain("notify");
   expect(storedProfiles[0].sourceProfileId).toBe("local-profile-1");
   expect(storedProfiles[0].contentVersion).toBe(2);
+});
+
+test("rejects stale shared auth write backs", async () => {
+  const dataDir = await useTempDataDir("codex-profiles-auth-sync-stale-test-");
+  const fs = await import("node:fs/promises");
+  const path = await import("node:path");
+  const previousAuth = '{"auth_mode":"chatgpt","tokens":{"refresh_token":"old-refresh"}}';
+  const configToml = 'model = "gpt-5.5"\n';
+  const currentHash = sharedProfileContentHash(previousAuth, configToml);
+  await fs.mkdir(path.join(dataDir, "files", "profile-1"), { recursive: true });
+  await fs.writeFile(path.join(dataDir, "files", "profile-1", "auth.json"), previousAuth);
+  await fs.writeFile(path.join(dataDir, "files", "profile-1", "config.toml"), configToml);
+  await fs.writeFile(path.join(dataDir, "known-users.json"), JSON.stringify([
+    {
+      dingUserId: "Ding-B",
+      name: "Bob",
+      active: true,
+      firstSeenAt: "2026-06-04T10:00:00.000Z",
+      lastSeenAt: "2026-06-04T10:00:00.000Z",
+    },
+  ]));
+  await fs.writeFile(path.join(dataDir, "profiles.json"), JSON.stringify([
+    {
+      id: "profile-1",
+      name: "ChatGPT Pro",
+      description: "shared auth",
+      createdAt: "2026-06-04T10:00:00.000Z",
+      updatedAt: "2026-06-04T10:00:00.000Z",
+      files: ["auth.json", "config.toml"],
+      contentVersion: 3,
+      contentHash: currentHash,
+      contentUpdatedAt: "2026-06-04T10:00:00.000Z",
+      ownerDingUserId: "Ding-A",
+      ownerName: "Alice",
+      visibility: "selected",
+      sharedWith: ["Ding-B"],
+    },
+  ]));
+  const { token } = await createDesktopToken({
+    dingUserId: "Ding-B",
+    name: "Bob",
+    active: true,
+  });
+
+  const response = await updateSharedProfile(
+    new NextRequest("http://localhost/codex/api/profiles/profile-1", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        baseContentVersion: 2,
+        baseContentHash: "older-hash",
+        authContent: '{"auth_mode":"chatgpt","tokens":{"refresh_token":"new-refresh"}}',
+      }),
+    }),
+    { params: Promise.resolve({ id: "profile-1" }) },
+  );
+  const body = await response.json();
+  const storedAuth = await fs.readFile(path.join(dataDir, "files", "profile-1", "auth.json"), "utf-8");
+  const storedProfiles = JSON.parse(await fs.readFile(path.join(dataDir, "profiles.json"), "utf-8"));
+
+  expect(response.status).toBe(409);
+  expect(body.error).toContain("共享配置已有更新");
+  expect(storedAuth).toBe(previousAuth);
+  expect(storedProfiles[0].contentVersion).toBe(3);
+  expect(storedProfiles[0].contentHash).toBe(currentHash);
+});
+
+test("allows shared recipients to write back refreshed auth without editing share metadata", async () => {
+  const dataDir = await useTempDataDir("codex-profiles-auth-sync-shared-user-test-");
+  const fs = await import("node:fs/promises");
+  const path = await import("node:path");
+  const previousAuth = '{"auth_mode":"chatgpt","tokens":{"refresh_token":"old-refresh"}}';
+  const nextAuth = '{"auth_mode":"chatgpt","tokens":{"refresh_token":"new-refresh"}}';
+  const configToml = 'model = "gpt-5.5"\n';
+  const previousHash = sharedProfileContentHash(previousAuth, configToml);
+  await fs.mkdir(path.join(dataDir, "files", "profile-1"), { recursive: true });
+  await fs.writeFile(path.join(dataDir, "files", "profile-1", "auth.json"), previousAuth);
+  await fs.writeFile(path.join(dataDir, "files", "profile-1", "config.toml"), configToml);
+  await fs.writeFile(path.join(dataDir, "known-users.json"), JSON.stringify([
+    {
+      dingUserId: "Ding-B",
+      name: "Bob",
+      active: true,
+      firstSeenAt: "2026-06-04T10:00:00.000Z",
+      lastSeenAt: "2026-06-04T10:00:00.000Z",
+    },
+  ]));
+  await fs.writeFile(path.join(dataDir, "profiles.json"), JSON.stringify([
+    {
+      id: "profile-1",
+      name: "ChatGPT Pro",
+      description: "shared auth",
+      createdAt: "2026-06-04T10:00:00.000Z",
+      updatedAt: "2026-06-04T10:00:00.000Z",
+      files: ["auth.json", "config.toml"],
+      contentVersion: 1,
+      contentHash: previousHash,
+      contentUpdatedAt: "2026-06-04T10:00:00.000Z",
+      ownerDingUserId: "Ding-A",
+      ownerName: "Alice",
+      visibility: "selected",
+      sharedWith: ["Ding-B"],
+    },
+  ]));
+  const { token } = await createDesktopToken({
+    dingUserId: "Ding-B",
+    name: "Bob",
+    active: true,
+  });
+
+  const response = await updateSharedProfile(
+    new NextRequest("http://localhost/codex/api/profiles/profile-1", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        baseContentVersion: 1,
+        baseContentHash: previousHash,
+        authContent: nextAuth,
+      }),
+    }),
+    { params: Promise.resolve({ id: "profile-1" }) },
+  );
+  const body = await response.json();
+  const storedAuth = await fs.readFile(path.join(dataDir, "files", "profile-1", "auth.json"), "utf-8");
+  const storedConfig = await fs.readFile(path.join(dataDir, "files", "profile-1", "config.toml"), "utf-8");
+  const storedProfiles = JSON.parse(await fs.readFile(path.join(dataDir, "profiles.json"), "utf-8"));
+
+  expect(response.status).toBe(200);
+  expect(body.contentVersion).toBe(2);
+  expect(body.contentHash).toBe(sharedProfileContentHash(nextAuth, configToml));
+  expect(storedAuth).toBe(nextAuth);
+  expect(storedConfig).toBe(configToml);
+  expect(storedProfiles[0].ownerDingUserId).toBe("Ding-A");
+  expect(storedProfiles[0].sharedWith).toEqual(["Ding-B"]);
+});
+
+test("rejects stale owner file updates when a base content version is supplied", async () => {
+  const dataDir = await useTempDataDir("codex-profiles-owner-stale-update-test-");
+  const fs = await import("node:fs/promises");
+  const path = await import("node:path");
+  const previousAuth = '{"auth_mode":"chatgpt","tokens":{"refresh_token":"current-refresh"}}';
+  const configToml = 'model = "gpt-5.5"\n';
+  const currentHash = sharedProfileContentHash(previousAuth, configToml);
+  await fs.mkdir(path.join(dataDir, "files", "profile-1"), { recursive: true });
+  await fs.writeFile(path.join(dataDir, "files", "profile-1", "auth.json"), previousAuth);
+  await fs.writeFile(path.join(dataDir, "files", "profile-1", "config.toml"), configToml);
+  await fs.writeFile(path.join(dataDir, "known-users.json"), JSON.stringify([
+    {
+      dingUserId: "Ding-B",
+      name: "Bob",
+      active: true,
+      firstSeenAt: "2026-06-04T10:00:00.000Z",
+      lastSeenAt: "2026-06-04T10:00:00.000Z",
+    },
+  ]));
+  await fs.writeFile(path.join(dataDir, "profiles.json"), JSON.stringify([
+    {
+      id: "profile-1",
+      name: "ChatGPT Pro",
+      description: "shared auth",
+      createdAt: "2026-06-04T10:00:00.000Z",
+      updatedAt: "2026-06-04T10:00:00.000Z",
+      files: ["auth.json", "config.toml"],
+      contentVersion: 5,
+      contentHash: currentHash,
+      contentUpdatedAt: "2026-06-04T10:00:00.000Z",
+      ownerDingUserId: "Ding-A",
+      ownerName: "Alice",
+      visibility: "selected",
+      sharedWith: ["Ding-B"],
+    },
+  ]));
+  const { token } = await createDesktopToken({
+    dingUserId: "Ding-A",
+    name: "Alice",
+    active: true,
+  });
+
+  const response = await updateSharedProfile(
+    new NextRequest("http://localhost/codex/api/profiles/profile-1", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        name: "ChatGPT Pro",
+        description: "shared auth",
+        visibility: "selected",
+        sharedWith: ["Ding-B"],
+        baseContentVersion: 4,
+        baseContentHash: "stale-hash",
+        authContent: '{"auth_mode":"chatgpt","tokens":{"refresh_token":"stale-refresh"}}',
+        configContent: configToml,
+      }),
+    }),
+    { params: Promise.resolve({ id: "profile-1" }) },
+  );
+  const body = await response.json();
+  const storedAuth = await fs.readFile(path.join(dataDir, "files", "profile-1", "auth.json"), "utf-8");
+
+  expect(response.status).toBe(409);
+  expect(body.error).toContain("共享配置已有更新");
+  expect(storedAuth).toBe(previousAuth);
 });
 
 test("deletes an owned shared profile and removes its stored files", async () => {

@@ -1,7 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { noStoreHeaders, optionsResponse } from "@/lib/api-response";
 import { principalFromRequest } from "@/lib/auth";
-import { deleteProfile, getVisibleProfile, normalizeProfileVisibility, publicProfileWithAuthType, updateProfileMetadata } from "@/lib/profile-store";
+import {
+  ProfileContentConflictError,
+  ProfileShareSafetyError,
+  deleteProfile,
+  getVisibleProfile,
+  normalizeProfileVisibility,
+  publicProfileWithAuthType,
+  syncProfileAuthContent,
+  updateProfileMetadata,
+} from "@/lib/profile-store";
 import { sanitizeSharedConfigToml } from "@/lib/shared-profile-config";
 import { readKnownUsers, resolveSharedWithForVisibility } from "@/lib/user-store";
 
@@ -69,6 +78,7 @@ export async function POST(
   }
 
   try {
+    const body = await request.json();
     const {
       name,
       description,
@@ -77,7 +87,47 @@ export async function POST(
       sourceProfileId,
       authContent,
       configContent,
-    } = await request.json();
+      baseContentVersion,
+      baseContentHash,
+    } = body;
+
+    const isAuthWriteBack =
+      authContent !== undefined &&
+      configContent === undefined &&
+      name === undefined &&
+      description === undefined &&
+      rawVisibility === undefined &&
+      sharedWith === undefined &&
+      sourceProfileId === undefined;
+
+    if (isAuthWriteBack) {
+      try {
+        const synced = await syncProfileAuthContent(id, principal, {
+          authContent: String(authContent),
+          baseContentVersion: typeof baseContentVersion === "number" ? baseContentVersion : null,
+          baseContentHash: typeof baseContentHash === "string" ? baseContentHash : null,
+        });
+
+        if (!synced) {
+          return NextResponse.json({ error: "Profile not found" }, { status: 404, headers: noStoreHeaders });
+        }
+
+        return NextResponse.json(await publicProfileWithAuthType(synced), { headers: noStoreHeaders });
+      } catch (error) {
+        if (error instanceof ProfileContentConflictError) {
+          return NextResponse.json(
+            {
+              error: error.message,
+              currentVersion: error.currentVersion,
+              currentHash: error.currentHash,
+            },
+            { status: 409, headers: noStoreHeaders },
+          );
+        }
+        throw error;
+      }
+    }
+
     const visibility = normalizeProfileVisibility(rawVisibility, sharedWith);
     let resolvedSharedWith: string[];
     try {
@@ -96,6 +146,8 @@ export async function POST(
       sourceProfileId,
       authContent: authContent === undefined ? undefined : String(authContent),
       configContent: configContent === undefined ? undefined : sanitizeSharedConfigToml(String(configContent)),
+      baseContentVersion: typeof baseContentVersion === "number" ? baseContentVersion : null,
+      baseContentHash: typeof baseContentHash === "string" ? baseContentHash : null,
     });
 
     if (!updated) {
@@ -104,6 +156,19 @@ export async function POST(
 
     return NextResponse.json(await publicProfileWithAuthType(updated), { headers: noStoreHeaders });
   } catch (error) {
+    if (error instanceof ProfileContentConflictError) {
+      return NextResponse.json(
+        {
+          error: error.message,
+          currentVersion: error.currentVersion,
+          currentHash: error.currentHash,
+        },
+        { status: 409, headers: noStoreHeaders },
+      );
+    }
+    if (error instanceof ProfileShareSafetyError) {
+      return NextResponse.json({ error: error.message }, { status: 400, headers: noStoreHeaders });
+    }
     console.error("Error updating profile:", error);
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500, headers: noStoreHeaders });
   }

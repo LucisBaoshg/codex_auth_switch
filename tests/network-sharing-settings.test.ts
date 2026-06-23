@@ -55,6 +55,16 @@ async function flushUi(): Promise<void> {
   await Promise.resolve();
 }
 
+async function waitForStoredNetworkToken(expectedToken: string): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await flushUi();
+    if (localStorage.getItem("codex-auth-switch.networkProfileToken") === expectedToken) {
+      return;
+    }
+  }
+}
+
 test("uses saved desktop bearer token when refreshing the network shared library", async () => {
   fetchMock.mockImplementation(async (input: string | URL | Request) => {
     const url = input.toString();
@@ -216,20 +226,6 @@ test("starts DingTalk SSO login from the cloud sharing settings", async () => {
   });
   fetchMock.mockImplementation(async (input: string | URL | Request) => {
     const url = input.toString();
-    if (url === "https://share.example.com/codex/api/auth/desktop-login") {
-      return {
-        ok: true,
-        status: 201,
-        json: async () => ({ id: "desktop-login-1", pollToken: "poll-token-1" }),
-      };
-    }
-    if (url === "https://share.example.com/codex/api/auth/desktop-login/desktop-login-1?pollToken=poll-token-1") {
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({ status: "complete", token: "cas_auto_token" }),
-      };
-    }
     if (url === "https://share.example.com/codex/api/profiles") {
       return {
         ok: true,
@@ -239,9 +235,26 @@ test("starts DingTalk SSO login from the cloud sharing settings", async () => {
     }
     throw new Error(`unexpected fetch: ${url}`);
   });
-  invokeMock.mockImplementation(async (command: string) => {
+  invokeMock.mockImplementation(async (command: string, args?: { method?: string; url?: string }) => {
     if (command === "load_snapshot") return appSnapshot;
     if (command === "open_external_url") return undefined;
+    if (command === "network_request") {
+      if (args?.method === "POST" && args.url === "https://share.example.com/codex/api/auth/desktop-login") {
+        return {
+          status: 201,
+          body: JSON.stringify({ id: "desktop-login-1", pollToken: "poll-token-1" }),
+        };
+      }
+      if (
+        args?.method === "GET" &&
+        args.url === "https://share.example.com/codex/api/auth/desktop-login/desktop-login-1?pollToken=poll-token-1"
+      ) {
+        return {
+          status: 200,
+          body: JSON.stringify({ status: "complete", token: "cas_auto_token" }),
+        };
+      }
+    }
     throw new Error(`unexpected command: ${command}`);
   });
 
@@ -264,11 +277,16 @@ test("starts DingTalk SSO login from the cloud sharing settings", async () => {
 
   loginButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   await flushUi();
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  await flushUi();
+  await waitForStoredNetworkToken("cas_auto_token");
 
   expect(invokeMock).toHaveBeenCalledWith("open_external_url", {
     url: "https://share.example.com/codex/api/auth/login?returnTo=%2Fprofiles&desktopLoginId=desktop-login-1",
+  });
+  expect(invokeMock).toHaveBeenCalledWith("network_request", {
+    method: "POST",
+    url: "https://share.example.com/codex/api/auth/desktop-login",
+    token: null,
+    body: null,
   });
   expect(localStorage.getItem("codex-auth-switch.networkProfileToken")).toBe("cas_auto_token");
   expect(fetchMock).toHaveBeenCalledWith("https://share.example.com/codex/api/profiles", {
@@ -284,30 +302,34 @@ test("migrates the saved Tapcash cloud sharing URL before starting SSO login", a
     configurable: true,
     value: {},
   });
-  invokeMock.mockImplementation(async (command: string) => {
+  invokeMock.mockImplementation(async (command: string, args?: { method?: string; url?: string }) => {
     if (command === "load_snapshot") return appSnapshot;
     if (command === "open_external_url") return undefined;
+    if (command === "network_request") {
+      if (
+        args?.method === "POST" &&
+        args.url === "https://codex-helper.ite.tool4seller.com/codex/api/auth/desktop-login"
+      ) {
+        return {
+          status: 201,
+          body: JSON.stringify({ id: "desktop-login-2", pollToken: "poll-token-2" }),
+        };
+      }
+      if (
+        args?.method === "GET" &&
+        args.url ===
+          "https://codex-helper.ite.tool4seller.com/codex/api/auth/desktop-login/desktop-login-2?pollToken=poll-token-2"
+      ) {
+        return {
+          status: 200,
+          body: JSON.stringify({ status: "complete", token: "cas_auto_token" }),
+        };
+      }
+    }
     throw new Error(`unexpected command: ${command}`);
   });
   fetchMock.mockImplementation(async (input: string | URL | Request) => {
     const url = input.toString();
-    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/auth/desktop-login") {
-      return {
-        ok: true,
-        status: 201,
-        json: async () => ({ id: "desktop-login-2", pollToken: "poll-token-2" }),
-      };
-    }
-    if (
-      url ===
-      "https://codex-helper.ite.tool4seller.com/codex/api/auth/desktop-login/desktop-login-2?pollToken=poll-token-2"
-    ) {
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({ status: "complete", token: "cas_auto_token" }),
-      };
-    }
     if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles") {
       return {
         ok: true,
@@ -334,11 +356,16 @@ test("migrates the saved Tapcash cloud sharing URL before starting SSO login", a
     .querySelector<HTMLButtonElement>('[data-action="open-network-sso-login"]')
     ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   await flushUi();
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  await flushUi();
+  await waitForStoredNetworkToken("cas_auto_token");
 
   expect(invokeMock).toHaveBeenCalledWith("open_external_url", {
     url: "https://codex-helper.ite.tool4seller.com/codex/api/auth/login?returnTo=%2Fprofiles&desktopLoginId=desktop-login-2",
+  });
+  expect(invokeMock).toHaveBeenCalledWith("network_request", {
+    method: "POST",
+    url: "https://codex-helper.ite.tool4seller.com/codex/api/auth/desktop-login",
+    token: null,
+    body: null,
   });
 });
 
@@ -347,9 +374,26 @@ test("shows DingTalk SSO login inside the sharing center", async () => {
     configurable: true,
     value: {},
   });
-  invokeMock.mockImplementation(async (command: string) => {
+  invokeMock.mockImplementation(async (command: string, args?: { method?: string; url?: string }) => {
     if (command === "load_snapshot") return appSnapshot;
     if (command === "open_external_url") return undefined;
+    if (command === "network_request") {
+      if (args?.method === "POST" && args.url === "https://share.example.com/codex/api/auth/desktop-login") {
+        return {
+          status: 201,
+          body: JSON.stringify({ id: "desktop-login-3", pollToken: "poll-token-3" }),
+        };
+      }
+      if (
+        args?.method === "GET" &&
+        args.url === "https://share.example.com/codex/api/auth/desktop-login/desktop-login-3?pollToken=poll-token-3"
+      ) {
+        return {
+          status: 202,
+          body: JSON.stringify({ status: "pending" }),
+        };
+      }
+    }
     throw new Error(`unexpected command: ${command}`);
   });
   localStorage.setItem(
@@ -377,8 +421,10 @@ test("shows DingTalk SSO login inside the sharing center", async () => {
     ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   await flushUi();
 
-  expect(fetchMock).toHaveBeenCalledWith("https://share.example.com/codex/api/auth/desktop-login", {
+  expect(invokeMock).toHaveBeenCalledWith("network_request", {
     method: "POST",
-    cache: "no-store",
+    url: "https://share.example.com/codex/api/auth/desktop-login",
+    token: null,
+    body: null,
   });
 });
