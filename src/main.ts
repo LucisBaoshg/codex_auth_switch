@@ -154,6 +154,7 @@ import "./styles.css";
 
 const desktopLoginPollIntervalMs =
   typeof process !== "undefined" && process.env.NODE_ENV === "test" ? 10 : 2000;
+const sharedAuthAutoSyncIntervalMs = 15000;
 
 const isTauriRuntime = "__TAURI_INTERNALS__" in window;
 const appRoot = document.querySelector<HTMLDivElement>("#app");
@@ -389,6 +390,16 @@ function remoteUpdatedAtFromNetworkProfile(profile: NetworkProfile): string | nu
   return profile.contentUpdatedAt ?? profile.updatedAt ?? profile.createdAt ?? null;
 }
 
+function activeProfileHasRemoteProfile(snapshot: AppSnapshot | null = state.snapshot): boolean {
+  const activeProfileId = snapshot?.activeProfileId;
+  if (!activeProfileId) {
+    return false;
+  }
+
+  const activeProfile = snapshot.profiles.find((profile) => profile.id === activeProfileId);
+  return Boolean(activeProfile?.remoteProfileId?.trim());
+}
+
 async function persistRemoteMetadata(
   profileId: string,
   document: ProfileDocument,
@@ -419,6 +430,7 @@ async function refreshSnapshot(): Promise<void> {
     const snapshot = await desktopInvoke<AppSnapshot>("load_snapshot");
     clearFlash();
     setSnapshot(snapshot);
+    void syncActiveSharedProfileCloudState({ silent: true });
   } catch (error) {
     setFlash("error", error instanceof Error ? error.message : String(error));
   } finally {
@@ -892,7 +904,7 @@ async function saveEditorProfile(andSwitch: boolean): Promise<void> {
   }
 }
 
-async function fetchNetworkProfiles(): Promise<void> {
+async function fetchNetworkProfiles(options: { silent?: boolean } = {}): Promise<void> {
   state.networkLoading = true;
   render();
   try {
@@ -906,11 +918,26 @@ async function fetchNetworkProfiles(): Promise<void> {
     await syncActiveSharedAuthWriteBack();
     await checkActiveSharedProfileUpdate();
   } catch (error) {
-    setFlash("error", error instanceof Error ? error.message : String(error));
+    if (!options.silent) {
+      setFlash("error", error instanceof Error ? error.message : String(error));
+    }
   } finally {
     state.networkLoading = false;
     render();
   }
+}
+
+async function syncActiveSharedProfileCloudState(options: { silent?: boolean } = {}): Promise<void> {
+  if (
+    !isTauriRuntime ||
+    state.networkLoading ||
+    !hasNetworkAccessToken(state.networkSharing) ||
+    !activeProfileHasRemoteProfile()
+  ) {
+    return;
+  }
+
+  await fetchNetworkProfiles({ silent: options.silent ?? true });
 }
 
 async function fetchNetworkCurrentUser(options: { silent?: boolean } = {}): Promise<void> {
@@ -1935,6 +1962,36 @@ function startPacProxyStatusListener(): void {
       message,
     );
   });
+}
+
+function startSharedAuthAutoSync(): void {
+  if (
+    !isTauriRuntime ||
+    (typeof process !== "undefined" && process.env.NODE_ENV === "test")
+  ) {
+    return;
+  }
+
+  window.setInterval(() => {
+    if (
+      state.busy ||
+      state.networkLoading ||
+      sharedAuthWriteBackInFlight ||
+      !hasNetworkAccessToken(state.networkSharing)
+    ) {
+      return;
+    }
+
+    void (async () => {
+      try {
+        const snapshot = await desktopInvoke<AppSnapshot>("load_snapshot");
+        setSnapshot(snapshot);
+        await syncActiveSharedProfileCloudState({ silent: true });
+      } catch {
+        // Background sync is best-effort; explicit refresh still surfaces errors.
+      }
+    })();
+  }, sharedAuthAutoSyncIntervalMs);
 }
 
 function defaultPacProxyOptions(): PacProxyStatus["pacOptions"] {
@@ -3460,4 +3517,5 @@ void loadAppVersion();
 void refreshSnapshot();
 void loadPacProxyStatus({ silent: true });
 startPacProxyStatusListener();
+startSharedAuthAutoSync();
 startAutoUpdateChecker();

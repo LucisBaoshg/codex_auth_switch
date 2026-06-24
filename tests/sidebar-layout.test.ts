@@ -3315,6 +3315,195 @@ test("prompts to update and restarts Codex when the active shared profile has a 
   expect(document.body.textContent).toContain("已更新并重启 Codex");
 });
 
+test("writes back refreshed shared auth on startup when the active target changed", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+  localStorage.setItem("codex-auth-switch.networkProfileToken", "cas_test_token");
+
+  const initialSnapshot = {
+    targetDir: "/Users/example/.codex",
+    usingDefaultTargetDir: true,
+    targetExists: true,
+    targetAuthExists: true,
+    targetConfigExists: true,
+    targetUpdatedAt: "2026-06-24T10:00:00Z",
+    targetAuthTypeLabel: "官方 OAuth",
+    activeProfileId: "local-shared-oauth",
+    lastSelectedProfileId: "local-shared-oauth",
+    lastSwitchProfileId: "local-shared-oauth",
+    lastSwitchedAt: "2026-06-24T10:00:00Z",
+    codexUsageApiEnabled: false,
+    profiles: [
+      {
+        id: "local-shared-oauth",
+        name: "ChatGPT Pro",
+        notes: "共享官方 OAuth",
+        authTypeLabel: "官方 OAuth",
+        createdAt: "2026-06-24T09:00:00Z",
+        updatedAt: "2026-06-24T10:00:00Z",
+        authHash: "auth-old",
+        configHash: "config-old",
+        remoteProfileId: "remote-oauth",
+        remoteContentVersion: 3,
+        remoteContentHash: "hash-v3",
+        remoteUpdatedAt: "2026-06-24T09:30:00Z",
+        codexUsage: null,
+        thirdPartyLatency: null,
+        thirdPartyUsage: null,
+      },
+    ],
+  };
+  const updatedNetworkProfile = {
+    id: "remote-oauth",
+    name: "ChatGPT Pro",
+    description: "共享官方 OAuth",
+    createdAt: "2026-06-24T09:00:00Z",
+    updatedAt: "2026-06-24T10:05:00Z",
+    contentVersion: 4,
+    contentHash: "hash-v4",
+    contentUpdatedAt: "2026-06-24T10:05:00Z",
+    files: ["auth.json", "config.toml"],
+    ownerDingUserId: "Ding-A",
+    visibility: "selected",
+    sharedWith: ["Ding-B"],
+  };
+  const updatedSnapshot = {
+    ...initialSnapshot,
+    profiles: [
+      {
+        ...initialSnapshot.profiles[0],
+        updatedAt: "2026-06-24T10:05:00Z",
+        authHash: "auth-new",
+        remoteContentVersion: 4,
+        remoteContentHash: "hash-v4",
+        remoteUpdatedAt: "2026-06-24T10:05:00Z",
+      },
+    ],
+  };
+
+  invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+    if (command === "load_snapshot") return initialSnapshot;
+    if (command === "get_pac_proxy_status") {
+      return {
+        supported: false,
+        enabled: false,
+        pacUrl: "http://10.12.0.24/proxy.pac",
+        selectedPacKey: "jp",
+        pacOptions: [],
+        availableServices: [],
+        selectedServices: [],
+        services: [],
+        message: "PAC 状态尚未加载。",
+      };
+    }
+    if (command === "get_profile_document") {
+      expect(args).toEqual({ profileId: "local-shared-oauth" });
+      return {
+        id: "local-shared-oauth",
+        name: "ChatGPT Pro",
+        notes: "共享官方 OAuth",
+        authTypeLabel: "官方 OAuth",
+        createdAt: "2026-06-24T09:00:00Z",
+        updatedAt: "2026-06-24T10:05:00Z",
+        remoteProfileId: "remote-oauth",
+        remoteContentVersion: 3,
+        remoteContentHash: "hash-v3",
+        remoteUpdatedAt: "2026-06-24T09:30:00Z",
+        authJson: '{"auth_mode":"chatgpt","tokens":{"refresh_token":"new-refresh"}}',
+        configToml: 'model = "gpt-5"\n',
+        loadedFromTarget: true,
+        hasTargetChanges: true,
+        readOnly: false,
+      };
+    }
+    if (command === "network_request") {
+      expect(args).toEqual({
+        method: "POST",
+        url: "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-oauth",
+        token: "cas_test_token",
+        body: JSON.stringify({
+          baseContentVersion: 3,
+          baseContentHash: "hash-v3",
+          authContent: '{"auth_mode":"chatgpt","tokens":{"refresh_token":"new-refresh"}}',
+        }),
+      });
+      return {
+        status: 200,
+        body: JSON.stringify(updatedNetworkProfile),
+      };
+    }
+    if (command === "update_profile") {
+      expect(args).toEqual({
+        profileId: "local-shared-oauth",
+        payload: {
+          name: "ChatGPT Pro",
+          notes: "共享官方 OAuth",
+          authJson: '{"auth_mode":"chatgpt","tokens":{"refresh_token":"new-refresh"}}',
+          configToml: 'model = "gpt-5"\n',
+        },
+      });
+      return updatedSnapshot;
+    }
+    if (command === "set_profile_remote_metadata") {
+      expect(args).toEqual({
+        profileId: "local-shared-oauth",
+        remoteProfileId: "remote-oauth",
+        remoteContentVersion: 4,
+        remoteContentHash: "hash-v4",
+        remoteUpdatedAt: "2026-06-24T10:05:00Z",
+      });
+      return updatedSnapshot;
+    }
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    const url = input.toString();
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/auth/me") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ user: { dingUserId: "Ding-B", name: "Bob" } }),
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => [
+          {
+            ...updatedNetworkProfile,
+            contentVersion: 3,
+            contentHash: "hash-v3",
+            contentUpdatedAt: "2026-06-24T09:30:00Z",
+          },
+        ],
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  await import("../src/main");
+  await flushUi();
+  await flushUi();
+  await flushUi();
+  await flushUi();
+  await flushUi();
+
+  expect(fetchMock).toHaveBeenCalledWith(
+    "https://codex-helper.ite.tool4seller.com/codex/api/profiles",
+    expect.any(Object),
+  );
+  expect(invokeMock).toHaveBeenCalledWith("network_request", expect.objectContaining({
+    method: "POST",
+    url: "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-oauth",
+  }));
+  expect(document.body.textContent).not.toContain("请先更新到最新版");
+});
+
 test("deletes a saved profile after confirmation", async () => {
   const initialSnapshot = {
     targetDir: "/Users/example/.codex",
