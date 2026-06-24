@@ -176,6 +176,12 @@ export type PacProxyStatus = {
   supported: boolean;
   enabled: boolean;
   pacUrl: string;
+  selectedPacKey: string;
+  pacOptions: Array<{
+    key: string;
+    label: string;
+    url: string;
+  }>;
   availableServices: string[];
   selectedServices: string[];
   services: string[];

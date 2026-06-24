@@ -1918,22 +1918,53 @@ function startPacProxyStatusListener(): void {
   }
 
   void listen<PacProxyStatus>("pac-proxy-status-changed", (event) => {
+    const previousEnabled = state.pacProxy.enabled;
+    const previousPacKey = state.pacProxy.selectedPacKey;
     state.pacProxy = event.payload;
     render();
+    const selectedLabel = selectedPacProxyOptionLabel(event.payload);
+    const message = previousPacKey !== event.payload.selectedPacKey
+      ? `已从系统菜单栏切换 PAC 节点：${selectedLabel}。`
+      : event.payload.enabled
+        ? "已从系统菜单栏开启 PAC 内网加速。"
+        : previousEnabled
+          ? "已从系统菜单栏关闭 PAC 内网加速。"
+          : `已从系统菜单栏选择 PAC 节点：${selectedLabel}。`;
     setFlash(
       "success",
-      event.payload.enabled ? "已从系统菜单栏开启 PAC 内网加速。" : "已从系统菜单栏关闭 PAC 内网加速。",
+      message,
     );
   });
 }
 
-function previewPacProxyStatus(enabled: boolean = false): PacProxyStatus {
+function defaultPacProxyOptions(): PacProxyStatus["pacOptions"] {
+  return [
+    { key: "jp", label: "日本（Japan）", url: "http://10.12.0.24/proxy.pac" },
+    { key: "us", label: "美国（US）", url: "http://10.12.0.24/proxy-us.pac" },
+    { key: "ca", label: "加拿大（Canada）", url: "http://10.12.0.24/proxy-ca.pac" },
+  ];
+}
+
+function pacProxyOptionByKey(selectedPacKey: string): PacProxyStatus["pacOptions"][number] {
+  return defaultPacProxyOptions().find((option) => option.key === selectedPacKey)
+    ?? defaultPacProxyOptions()[0];
+}
+
+function selectedPacProxyOptionLabel(status: PacProxyStatus): string {
+  return status.pacOptions.find((option) => option.key === status.selectedPacKey)?.label
+    ?? status.pacUrl;
+}
+
+function previewPacProxyStatus(enabled: boolean = false, selectedPacKey: string = "jp"): PacProxyStatus {
   const availableServices = ["Ethernet", "Wi-Fi", "iPhone USB"];
   const selectedServices = ["Ethernet", "Wi-Fi"];
+  const selectedOption = pacProxyOptionByKey(selectedPacKey);
   return {
     supported: true,
     enabled,
-    pacUrl: "http://10.12.0.24/proxy.pac",
+    pacUrl: selectedOption.url,
+    selectedPacKey: selectedOption.key,
+    pacOptions: defaultPacProxyOptions(),
     availableServices,
     selectedServices,
     services: enabled ? selectedServices : [],
@@ -1980,7 +2011,7 @@ async function togglePacProxy(): Promise<void> {
 
   try {
     if (!isTauriRuntime) {
-      state.pacProxy = previewPacProxyStatus(enabled);
+      state.pacProxy = previewPacProxyStatus(enabled, state.pacProxy.selectedPacKey);
     } else {
       state.pacProxy = await desktopInvoke<PacProxyStatus>("set_pac_proxy_enabled", {
         enabled,
@@ -1991,6 +2022,47 @@ async function togglePacProxy(): Promise<void> {
       "success",
       enabled ? "已开启 PAC 内网加速。" : "已关闭 PAC 内网加速。",
     );
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+    if (isTauriRuntime) {
+      await loadPacProxyStatus({ silent: true });
+    }
+  } finally {
+    state.pacProxyLoading = false;
+    render();
+  }
+}
+
+async function setPacProxySelectedOption(selectedPacKey: string): Promise<void> {
+  if (state.pacProxyLoading) {
+    return;
+  }
+
+  const selectedOption = state.pacProxy.pacOptions.find((option) => option.key === selectedPacKey);
+  if (!selectedOption) {
+    setFlash("error", "未知 PAC 节点。");
+    render();
+    return;
+  }
+
+  state.pacProxyLoading = true;
+  render();
+
+  try {
+    if (!isTauriRuntime) {
+      state.pacProxy = {
+        ...state.pacProxy,
+        selectedPacKey: selectedOption.key,
+        pacUrl: selectedOption.url,
+        services: state.pacProxy.enabled ? state.pacProxy.selectedServices : [],
+      };
+    } else {
+      state.pacProxy = await desktopInvoke<PacProxyStatus>("set_pac_proxy_selected_option", {
+        selectedPacKey,
+      });
+    }
+
+    setFlash("success", `已切换 PAC 节点：${selectedOption.label}。`);
   } catch (error) {
     setFlash("error", error instanceof Error ? error.message : String(error));
     if (isTauriRuntime) {
@@ -2928,6 +3000,11 @@ function bindEvents(): void {
         }
       } else if (action === "toggle-pac-proxy") {
         await togglePacProxy();
+      } else if (action === "select-pac-proxy-option") {
+        const selectedPacKey = button.dataset.pacKey;
+        if (selectedPacKey) {
+          await setPacProxySelectedOption(selectedPacKey);
+        }
       } else if (action === "save-network-sharing-settings") {
         saveNetworkSharingSettings(state.networkSharing);
         state.networkAuthRequired = !state.networkSharing.token.trim();

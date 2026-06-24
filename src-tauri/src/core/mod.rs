@@ -20,10 +20,13 @@ mod updates;
 
 pub use pac_proxy::{
     get_pac_proxy_status, pac_proxy_status_from_macos_services,
-    pac_proxy_status_from_macos_services_with_selection, parse_macos_auto_proxy_status,
-    parse_windows_auto_config_url, set_pac_proxy_enabled, set_pac_proxy_selected_services,
-    unsupported_pac_proxy_status, windows_pac_proxy_status_from_auto_config_url,
-    windows_registry_command_creation_flags, MacosAutoProxyStatus, PacProxyStatus, PAC_PROXY_URL,
+    pac_proxy_status_from_macos_services_with_selection,
+    pac_proxy_status_from_macos_services_with_selection_and_pac_key, parse_macos_auto_proxy_status,
+    parse_windows_auto_config_url, set_pac_proxy_enabled, set_pac_proxy_selected_option,
+    set_pac_proxy_selected_services, unsupported_pac_proxy_status,
+    windows_pac_proxy_status_from_auto_config_url, windows_registry_command_creation_flags,
+    MacosAutoProxyStatus, PacProxyOption, PacProxyStatus, DEFAULT_PAC_PROXY_KEY, PAC_PROXY_CA_URL,
+    PAC_PROXY_URL, PAC_PROXY_US_URL,
 };
 pub use restart::{
     codex_restart_plan_for_platform, restart_codex_app, restart_codex_script, CodexRestartPlatform,

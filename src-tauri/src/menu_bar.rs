@@ -1,10 +1,10 @@
 use crate::core::{
     get_pac_proxy_status, unsupported_pac_proxy_status, AppSnapshot, CodexUsageCredits,
-    CodexUsageSnapshot, CodexUsageWindow, PacProxyStatus, ThirdPartyCreditSnapshot,
+    CodexUsageSnapshot, CodexUsageWindow, PacProxyOption, PacProxyStatus, ThirdPartyCreditSnapshot,
     ThirdPartySubscriptionSnapshot, ThirdPartyUsageQuotaSnapshot,
 };
 use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem},
+    menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
     App, AppHandle, Emitter, Manager, Runtime, Wry,
 };
@@ -12,6 +12,7 @@ use tauri::{
 const TRAY_ID: &str = "codex-auth-switch-usage";
 pub const MENU_REFRESH_ID: &str = "menu-bar-refresh-usage";
 pub const MENU_TOGGLE_PAC_ID: &str = "menu-bar-toggle-pac-proxy";
+const MENU_PAC_OPTION_ID_PREFIX: &str = "menu-bar-select-pac-proxy-option:";
 const MENU_SHOW_ID: &str = "menu-bar-show-window";
 const MENU_QUIT_ID: &str = "menu-bar-quit";
 
@@ -51,6 +52,7 @@ struct MenuBarState<R: Runtime> {
     secondary_item: MenuItem<R>,
     credits_item: MenuItem<R>,
     pac_item: MenuItem<R>,
+    pac_option_items: Vec<MenuItem<R>>,
 }
 
 pub fn install_menu_bar(app: &mut App<Wry>, snapshot: &AppSnapshot) -> tauri::Result<()> {
@@ -79,6 +81,19 @@ pub fn install_menu_bar(app: &mut App<Wry>, snapshot: &AppSnapshot) -> tauri::Re
         pac_status.supported,
         None::<&str>,
     )?;
+    let pac_option_items = pac_status
+        .pac_options
+        .iter()
+        .map(|option| {
+            MenuItem::with_id(
+                app,
+                pac_option_menu_id(&option.key),
+                menu_bar_pac_option_label(&pac_status, option),
+                pac_status.supported,
+                None::<&str>,
+            )
+        })
+        .collect::<tauri::Result<Vec<_>>>()?;
     let show_item = MenuItem::with_id(app, labels[2].0, labels[2].1, true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, labels[3].0, labels[3].1, true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
@@ -93,11 +108,14 @@ pub fn install_menu_bar(app: &mut App<Wry>, snapshot: &AppSnapshot) -> tauri::Re
             &separator,
             &refresh_item,
             &pac_item,
-            &show_item,
-            &separator_2,
-            &quit_item,
         ],
     )?;
+    let pac_option_refs = pac_option_items
+        .iter()
+        .map(|item| item as &dyn IsMenuItem<Wry>)
+        .collect::<Vec<_>>();
+    menu.append_items(&pac_option_refs)?;
+    menu.append_items(&[&show_item, &separator_2, &quit_item])?;
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(menu_bar_icon(status.progress_percent))
         .icon_as_template(false)
@@ -118,6 +136,14 @@ pub fn install_menu_bar(app: &mut App<Wry>, snapshot: &AppSnapshot) -> tauri::Re
                     let _ = app.emit("menu-bar-toggle-pac-proxy-requested", ());
                 });
             }
+            id if id.starts_with(MENU_PAC_OPTION_ID_PREFIX) => {
+                if let Some(selected_pac_key) = pac_option_key_from_menu_id(id) {
+                    let app = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let _ = app.emit("menu-bar-select-pac-option-requested", selected_pac_key);
+                    });
+                }
+            }
             MENU_SHOW_ID => show_main_window(app),
             MENU_QUIT_ID => app.exit(0),
             _ => {}
@@ -130,6 +156,7 @@ pub fn install_menu_bar(app: &mut App<Wry>, snapshot: &AppSnapshot) -> tauri::Re
         secondary_item,
         credits_item,
         pac_item,
+        pac_option_items,
     });
 
     Ok(())
@@ -167,6 +194,10 @@ pub fn sync_menu_bar_pac_proxy(app: &AppHandle<Wry>, status: &PacProxyStatus) ->
     if let Some(state) = app.try_state::<MenuBarState<Wry>>() {
         state.pac_item.set_text(menu_bar_pac_proxy_label(status))?;
         state.pac_item.set_enabled(status.supported)?;
+        for (item, option) in state.pac_option_items.iter().zip(&status.pac_options) {
+            item.set_text(menu_bar_pac_option_label(status, option))?;
+            item.set_enabled(status.supported)?;
+        }
     }
 
     Ok(())
@@ -177,11 +208,40 @@ pub fn menu_bar_pac_proxy_label(status: &PacProxyStatus) -> String {
         return "PAC 内网加速不可用".into();
     }
 
+    let target = selected_pac_option_label(status);
     if status.enabled {
-        "关闭 PAC 内网加速".into()
+        format!("关闭 PAC 内网加速：{target}")
     } else {
-        "开启 PAC 内网加速".into()
+        format!("开启 PAC 内网加速：{target}")
     }
+}
+
+pub fn menu_bar_pac_option_label(status: &PacProxyStatus, option: &PacProxyOption) -> String {
+    if option.key == status.selected_pac_key {
+        format!("✓ {}", option.label)
+    } else {
+        format!("切换到{}", option.label)
+    }
+}
+
+fn selected_pac_option_label(status: &PacProxyStatus) -> String {
+    status
+        .pac_options
+        .iter()
+        .find(|option| option.key == status.selected_pac_key)
+        .map(|option| option.label.clone())
+        .unwrap_or_else(|| status.pac_url.clone())
+}
+
+fn pac_option_menu_id(key: &str) -> String {
+    format!("{MENU_PAC_OPTION_ID_PREFIX}{key}")
+}
+
+fn pac_option_key_from_menu_id(id: &str) -> Option<String> {
+    id.strip_prefix(MENU_PAC_OPTION_ID_PREFIX)
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_string)
 }
 
 pub fn menu_bar_refresh_target(snapshot: &AppSnapshot) -> Option<MenuBarRefreshTarget> {

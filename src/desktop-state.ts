@@ -98,6 +98,12 @@ export function createDefaultPacProxyStatus(): PacProxyStatus {
     supported: false,
     enabled: false,
     pacUrl: "http://10.12.0.24/proxy.pac",
+    selectedPacKey: "jp",
+    pacOptions: [
+      { key: "jp", label: "日本（Japan）", url: "http://10.12.0.24/proxy.pac" },
+      { key: "us", label: "美国（US）", url: "http://10.12.0.24/proxy-us.pac" },
+      { key: "ca", label: "加拿大（Canada）", url: "http://10.12.0.24/proxy-ca.pac" },
+    ],
     availableServices: [],
     selectedServices: [],
     services: [],

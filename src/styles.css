@@ -992,6 +992,73 @@ p { margin: 0; }
   transform: translateX(14px);
 }
 
+.pac-option-controls {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.pac-option-controls > span {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
+.pac-option-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.pac-option-button {
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  min-width: 0;
+  min-height: 58px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.025);
+  color: var(--text-main);
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.2s ease;
+}
+
+.pac-option-button:hover:not(:disabled) {
+  border-color: rgba(99, 102, 241, 0.34);
+  background: var(--bg-panel-hover);
+  transform: translateY(-1px);
+}
+
+.pac-option-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.pac-option-button.is-active {
+  border-color: rgba(16, 185, 129, 0.34);
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.pac-option-button span {
+  font-size: 0.86rem;
+  font-weight: 760;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pac-option-button small {
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.68rem;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
 .pac-url-box {
   display: grid;
   gap: 6px;
@@ -1060,6 +1127,12 @@ p { margin: 0; }
 
 .pac-settings-message {
   margin-top: 12px;
+}
+
+@media (max-width: 640px) {
+  .pac-option-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .usage-panel {

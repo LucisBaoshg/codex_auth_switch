@@ -6,9 +6,20 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+pub const DEFAULT_PAC_PROXY_KEY: &str = "jp";
 pub const PAC_PROXY_URL: &str = "http://10.12.0.24/proxy.pac";
+pub const PAC_PROXY_US_URL: &str = "http://10.12.0.24/proxy-us.pac";
+pub const PAC_PROXY_CA_URL: &str = "http://10.12.0.24/proxy-ca.pac";
 const WINDOWS_CREATE_NO_WINDOW: u32 = 0x08000000;
 const WINDOWS_PROXY_SCRIPT_SERVICE: &str = "Windows 设置脚本";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PacProxyOption {
+    pub key: String,
+    pub label: String,
+    pub url: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -16,6 +27,8 @@ pub struct PacProxyStatus {
     pub supported: bool,
     pub enabled: bool,
     pub pac_url: String,
+    pub selected_pac_key: String,
+    pub pac_options: Vec<PacProxyOption>,
     pub available_services: Vec<String>,
     pub selected_services: Vec<String>,
     pub services: Vec<String>,
@@ -27,6 +40,8 @@ pub struct PacProxyStatus {
 struct PacProxySettings {
     #[serde(default)]
     selected_services: Vec<String>,
+    #[serde(default)]
+    selected_pac_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +81,70 @@ pub fn parse_macos_auto_proxy_status(
     }
 }
 
+fn pac_proxy_option_rows() -> [(&'static str, &'static str, &'static str); 3] {
+    [
+        (DEFAULT_PAC_PROXY_KEY, "日本（Japan）", PAC_PROXY_URL),
+        ("us", "美国（US）", PAC_PROXY_US_URL),
+        ("ca", "加拿大（Canada）", PAC_PROXY_CA_URL),
+    ]
+}
+
+pub fn pac_proxy_options() -> Vec<PacProxyOption> {
+    pac_proxy_option_rows()
+        .into_iter()
+        .map(|(key, label, url)| PacProxyOption {
+            key: key.into(),
+            label: label.into(),
+            url: url.into(),
+        })
+        .collect()
+}
+
+fn pac_proxy_option_for_key(key: Option<&str>) -> PacProxyOption {
+    let normalized_key = key.map(str::trim).filter(|key| !key.is_empty());
+    pac_proxy_options()
+        .into_iter()
+        .find(|option| Some(option.key.as_str()) == normalized_key)
+        .unwrap_or_else(|| {
+            pac_proxy_options()
+                .into_iter()
+                .find(|option| option.key == DEFAULT_PAC_PROXY_KEY)
+                .expect("default PAC option")
+        })
+}
+
+fn pac_proxy_option_for_url(url: &str) -> Option<PacProxyOption> {
+    let normalized_url = url.trim();
+    pac_proxy_options()
+        .into_iter()
+        .find(|option| option.url == normalized_url)
+}
+
+fn is_managed_pac_url(url: Option<&str>) -> bool {
+    url.and_then(pac_proxy_option_for_url).is_some()
+}
+
+fn pac_proxy_status_for_services(
+    enabled: bool,
+    option: PacProxyOption,
+    available_services: Vec<String>,
+    selected_services: Vec<String>,
+    services: Vec<String>,
+    message: Option<String>,
+) -> PacProxyStatus {
+    PacProxyStatus {
+        supported: true,
+        enabled,
+        pac_url: option.url.clone(),
+        selected_pac_key: option.key,
+        pac_options: pac_proxy_options(),
+        available_services,
+        selected_services,
+        services,
+        message,
+    }
+}
+
 pub fn pac_proxy_status_from_macos_services(services: Vec<MacosAutoProxyStatus>) -> PacProxyStatus {
     pac_proxy_status_from_macos_services_with_selection(services, Vec::new())
 }
@@ -74,30 +153,53 @@ pub fn pac_proxy_status_from_macos_services_with_selection(
     services: Vec<MacosAutoProxyStatus>,
     selected_services: Vec<String>,
 ) -> PacProxyStatus {
+    pac_proxy_status_from_macos_services_with_selection_and_pac_key(
+        services,
+        selected_services,
+        None,
+    )
+}
+
+pub fn pac_proxy_status_from_macos_services_with_selection_and_pac_key(
+    services: Vec<MacosAutoProxyStatus>,
+    selected_services: Vec<String>,
+    selected_pac_key: Option<String>,
+) -> PacProxyStatus {
     let available_services = services
         .iter()
         .map(|service| service.service.clone())
         .collect::<Vec<_>>();
     let selected_services = normalize_selected_services(selected_services, &available_services);
+    let saved_option = pac_proxy_option_for_key(selected_pac_key.as_deref());
+    let active_options = services
+        .iter()
+        .filter(|service| selected_services.contains(&service.service) && service.enabled)
+        .filter_map(|service| service.url.as_deref().and_then(pac_proxy_option_for_url))
+        .collect::<Vec<_>>();
+    let effective_option = active_options
+        .iter()
+        .find(|option| option.key == saved_option.key)
+        .cloned()
+        .or_else(|| active_options.first().cloned())
+        .unwrap_or(saved_option);
     let active_services = services
         .into_iter()
         .filter(|service| {
             selected_services.contains(&service.service)
                 && service.enabled
-                && service.url.as_deref() == Some(PAC_PROXY_URL)
+                && service.url.as_deref() == Some(effective_option.url.as_str())
         })
         .map(|service| service.service)
         .collect::<Vec<_>>();
 
-    PacProxyStatus {
-        supported: true,
-        enabled: !active_services.is_empty(),
-        pac_url: PAC_PROXY_URL.into(),
+    pac_proxy_status_for_services(
+        !active_services.is_empty(),
+        effective_option,
         available_services,
         selected_services,
-        services: active_services,
-        message: None,
-    }
+        active_services,
+        None,
+    )
 }
 
 pub fn parse_windows_auto_config_url(output: &str) -> Option<String> {
@@ -124,18 +226,29 @@ pub fn parse_windows_auto_config_url(output: &str) -> Option<String> {
 pub fn windows_pac_proxy_status_from_auto_config_url(
     auto_config_url: Option<String>,
 ) -> PacProxyStatus {
-    let enabled = auto_config_url.as_deref().map(str::trim) == Some(PAC_PROXY_URL);
+    windows_pac_proxy_status_from_auto_config_url_with_pac_key(auto_config_url, None)
+}
+
+pub fn windows_pac_proxy_status_from_auto_config_url_with_pac_key(
+    auto_config_url: Option<String>,
+    selected_pac_key: Option<String>,
+) -> PacProxyStatus {
+    let active_option = auto_config_url
+        .as_deref()
+        .and_then(pac_proxy_option_for_url);
+    let enabled = active_option.is_some();
+    let option =
+        active_option.unwrap_or_else(|| pac_proxy_option_for_key(selected_pac_key.as_deref()));
     let service = WINDOWS_PROXY_SCRIPT_SERVICE.to_string();
 
-    PacProxyStatus {
-        supported: true,
+    pac_proxy_status_for_services(
         enabled,
-        pac_url: PAC_PROXY_URL.into(),
-        available_services: vec![service.clone()],
-        selected_services: vec![service.clone()],
-        services: if enabled { vec![service] } else { Vec::new() },
-        message: None,
-    }
+        option,
+        vec![service.clone()],
+        vec![service.clone()],
+        if enabled { vec![service] } else { Vec::new() },
+        None,
+    )
 }
 
 pub fn windows_registry_command_creation_flags() -> u32 {
@@ -147,6 +260,8 @@ pub fn unsupported_pac_proxy_status() -> PacProxyStatus {
         supported: false,
         enabled: false,
         pac_url: PAC_PROXY_URL.into(),
+        selected_pac_key: DEFAULT_PAC_PROXY_KEY.into(),
+        pac_options: pac_proxy_options(),
         available_services: Vec::new(),
         selected_services: Vec::new(),
         services: Vec::new(),
@@ -172,19 +287,26 @@ pub fn set_pac_proxy_selected_services(
     platform_set_pac_proxy_selected_services(&app_data_dir, selected_services)
 }
 
+pub fn set_pac_proxy_selected_option(
+    app_data_dir: PathBuf,
+    selected_pac_key: String,
+) -> Result<PacProxyStatus, AppError> {
+    platform_set_pac_proxy_selected_option(&app_data_dir, selected_pac_key)
+}
+
 #[cfg(target_os = "macos")]
 fn platform_pac_proxy_status(app_data_dir: &Path) -> Result<PacProxyStatus, AppError> {
     let services = macos_network_services()?;
+    let settings = read_pac_proxy_settings(app_data_dir)?;
     if services.is_empty() {
-        return Ok(PacProxyStatus {
-            supported: true,
-            enabled: false,
-            pac_url: PAC_PROXY_URL.into(),
-            available_services: Vec::new(),
-            selected_services: Vec::new(),
-            services: Vec::new(),
-            message: Some("未找到可配置的网络服务。".into()),
-        });
+        return Ok(pac_proxy_status_for_services(
+            false,
+            pac_proxy_option_for_key(settings.selected_pac_key.as_deref()),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Some("未找到可配置的网络服务。".into()),
+        ));
     }
 
     let statuses = services
@@ -199,11 +321,13 @@ fn platform_pac_proxy_status(app_data_dir: &Path) -> Result<PacProxyStatus, AppE
         })
         .collect::<Vec<_>>();
 
-    let selected_services = read_pac_proxy_settings(app_data_dir)?.selected_services;
-    Ok(pac_proxy_status_from_macos_services_with_selection(
-        statuses,
-        selected_services,
-    ))
+    Ok(
+        pac_proxy_status_from_macos_services_with_selection_and_pac_key(
+            statuses,
+            settings.selected_services,
+            settings.selected_pac_key,
+        ),
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -212,29 +336,27 @@ fn platform_set_pac_proxy_enabled(
     enabled: bool,
 ) -> Result<PacProxyStatus, AppError> {
     let services = macos_network_services()?;
+    let settings = read_pac_proxy_settings(app_data_dir)?;
     if services.is_empty() {
-        return Ok(PacProxyStatus {
-            supported: true,
-            enabled: false,
-            pac_url: PAC_PROXY_URL.into(),
-            available_services: Vec::new(),
-            selected_services: Vec::new(),
-            services: Vec::new(),
-            message: Some("未找到可配置的网络服务。".into()),
-        });
+        return Ok(pac_proxy_status_for_services(
+            false,
+            pac_proxy_option_for_key(settings.selected_pac_key.as_deref()),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Some("未找到可配置的网络服务。".into()),
+        ));
     }
 
-    let selected_services = normalize_selected_services(
-        read_pac_proxy_settings(app_data_dir)?.selected_services,
-        &services,
-    );
+    let selected_services = normalize_selected_services(settings.selected_services, &services);
+    let selected_option = pac_proxy_option_for_key(settings.selected_pac_key.as_deref());
     if enabled {
         for service in &services {
             if selected_services.contains(service) {
-                run_networksetup(&["-setautoproxyurl", service, PAC_PROXY_URL])?;
+                run_networksetup(&["-setautoproxyurl", service, &selected_option.url])?;
                 run_networksetup(&["-setautoproxystate", service, "on"])?;
             } else if let Ok(status) = macos_auto_proxy_status(service) {
-                if status.enabled && status.url.as_deref() == Some(PAC_PROXY_URL) {
+                if status.enabled && is_managed_pac_url(status.url.as_deref()) {
                     run_networksetup(&["-setautoproxystate", service, "off"])?;
                 }
             }
@@ -244,7 +366,7 @@ fn platform_set_pac_proxy_enabled(
             .iter()
             .filter_map(|service| macos_auto_proxy_status(service).ok())
         {
-            if status.enabled && status.url.as_deref() == Some(PAC_PROXY_URL) {
+            if status.enabled && is_managed_pac_url(status.url.as_deref()) {
                 run_networksetup(&["-setautoproxystate", &status.service, "off"])?;
             }
         }
@@ -260,17 +382,40 @@ fn platform_set_pac_proxy_selected_services(
 ) -> Result<PacProxyStatus, AppError> {
     let services = macos_network_services()?;
     let selected_services = normalize_selected_services(selected_services, &services);
-    write_pac_proxy_settings(
-        app_data_dir,
-        &PacProxySettings {
-            selected_services: selected_services.clone(),
-        },
-    )?;
+    let mut settings = read_pac_proxy_settings(app_data_dir)?;
+    settings.selected_services = selected_services.clone();
+    write_pac_proxy_settings(app_data_dir, &settings)?;
 
     let currently_enabled = services
         .iter()
         .filter_map(|service| macos_auto_proxy_status(service).ok())
-        .any(|status| status.enabled && status.url.as_deref() == Some(PAC_PROXY_URL));
+        .any(|status| status.enabled && is_managed_pac_url(status.url.as_deref()));
+
+    if currently_enabled {
+        platform_set_pac_proxy_enabled(app_data_dir, true)
+    } else {
+        platform_pac_proxy_status(app_data_dir)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn platform_set_pac_proxy_selected_option(
+    app_data_dir: &Path,
+    selected_pac_key: String,
+) -> Result<PacProxyStatus, AppError> {
+    let selected_option = pac_proxy_option_for_key(Some(&selected_pac_key));
+    if selected_option.key != selected_pac_key.trim() {
+        return Err(AppError::Message("未知 PAC 节点。".into()));
+    }
+
+    let mut settings = read_pac_proxy_settings(app_data_dir)?;
+    settings.selected_pac_key = Some(selected_option.key);
+    write_pac_proxy_settings(app_data_dir, &settings)?;
+
+    let currently_enabled = macos_network_services()?
+        .iter()
+        .filter_map(|service| macos_auto_proxy_status(service).ok())
+        .any(|status| status.enabled && is_managed_pac_url(status.url.as_deref()));
 
     if currently_enabled {
         platform_set_pac_proxy_enabled(app_data_dir, true)
@@ -280,9 +425,10 @@ fn platform_set_pac_proxy_selected_services(
 }
 
 #[cfg(target_os = "windows")]
-fn platform_pac_proxy_status(_app_data_dir: &Path) -> Result<PacProxyStatus, AppError> {
-    Ok(windows_pac_proxy_status_from_auto_config_url(
+fn platform_pac_proxy_status(app_data_dir: &Path) -> Result<PacProxyStatus, AppError> {
+    Ok(windows_pac_proxy_status_from_auto_config_url_with_pac_key(
         windows_auto_config_url()?,
+        read_pac_proxy_settings(app_data_dir)?.selected_pac_key,
     ))
 }
 
@@ -291,6 +437,8 @@ fn platform_set_pac_proxy_enabled(
     app_data_dir: &Path,
     enabled: bool,
 ) -> Result<PacProxyStatus, AppError> {
+    let settings = read_pac_proxy_settings(app_data_dir)?;
+    let selected_option = pac_proxy_option_for_key(settings.selected_pac_key.as_deref());
     if enabled {
         run_windows_reg(&[
             "add",
@@ -300,13 +448,13 @@ fn platform_set_pac_proxy_enabled(
             "/t",
             "REG_SZ",
             "/d",
-            PAC_PROXY_URL,
+            &selected_option.url,
             "/f",
         ])?;
         windows_notify_proxy_settings_changed();
     } else {
         let current_url = windows_auto_config_url()?;
-        if current_url.as_deref().map(str::trim) == Some(PAC_PROXY_URL) {
+        if is_managed_pac_url(current_url.as_deref()) {
             run_windows_reg(&[
                 "delete",
                 WINDOWS_INTERNET_SETTINGS_KEY,
@@ -329,6 +477,27 @@ fn platform_set_pac_proxy_selected_services(
     platform_pac_proxy_status(app_data_dir)
 }
 
+#[cfg(target_os = "windows")]
+fn platform_set_pac_proxy_selected_option(
+    app_data_dir: &Path,
+    selected_pac_key: String,
+) -> Result<PacProxyStatus, AppError> {
+    let selected_option = pac_proxy_option_for_key(Some(&selected_pac_key));
+    if selected_option.key != selected_pac_key.trim() {
+        return Err(AppError::Message("未知 PAC 节点。".into()));
+    }
+
+    let mut settings = read_pac_proxy_settings(app_data_dir)?;
+    settings.selected_pac_key = Some(selected_option.key);
+    write_pac_proxy_settings(app_data_dir, &settings)?;
+
+    if is_managed_pac_url(windows_auto_config_url()?.as_deref()) {
+        platform_set_pac_proxy_enabled(app_data_dir, true)
+    } else {
+        platform_pac_proxy_status(app_data_dir)
+    }
+}
+
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 fn platform_pac_proxy_status(_app_data_dir: &Path) -> Result<PacProxyStatus, AppError> {
     Ok(unsupported_pac_proxy_status())
@@ -346,6 +515,14 @@ fn platform_set_pac_proxy_enabled(
 fn platform_set_pac_proxy_selected_services(
     _app_data_dir: &Path,
     _selected_services: Vec<String>,
+) -> Result<PacProxyStatus, AppError> {
+    Ok(unsupported_pac_proxy_status())
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+fn platform_set_pac_proxy_selected_option(
+    _app_data_dir: &Path,
+    _selected_pac_key: String,
 ) -> Result<PacProxyStatus, AppError> {
     Ok(unsupported_pac_proxy_status())
 }

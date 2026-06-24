@@ -5,6 +5,7 @@ use crate::core::{
     check_for_update, check_install_location as resolve_install_location,
     get_pac_proxy_status as read_pac_proxy_status, install_update as perform_install_update,
     restart_codex_app, set_pac_proxy_enabled as write_pac_proxy_enabled,
+    set_pac_proxy_selected_option as write_pac_proxy_selected_option,
     set_pac_proxy_selected_services as write_pac_proxy_selected_services, AppSnapshot,
     CodexMessage, CodexSessionInfo, CodexUsageStatsFilter, CodexUsageStatsSnapshot,
     InstallLocationStatus, LegacyThirdPartyMigrationResult, ModelProviderSummary, PacProxyStatus,
@@ -503,6 +504,21 @@ fn set_pac_proxy_selected_services(
 }
 
 #[tauri::command]
+fn set_pac_proxy_selected_option(
+    app: AppHandle,
+    selected_pac_key: String,
+) -> Result<PacProxyStatus, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    let status = write_pac_proxy_selected_option(app_data_dir, selected_pac_key)
+        .map_err(|error| error.to_string())?;
+    sync_menu_bar_pac_proxy(&app, &status).map_err(|error| error.to_string())?;
+    Ok(status)
+}
+
+#[tauri::command]
 async fn list_codex_sessions(app: AppHandle) -> Result<Vec<CodexSessionInfo>, String> {
     run_blocking_manager_task(app, move |manager| {
         manager
@@ -613,6 +629,28 @@ fn spawn_menu_bar_usage_refresher(app: AppHandle) {
         });
     });
 
+    let pac_option_app = app.clone();
+    app.listen("menu-bar-select-pac-option-requested", move |event| {
+        let app = pac_option_app.clone();
+        let selected_pac_key = serde_json::from_str::<String>(event.payload())
+            .unwrap_or_else(|_| event.payload().to_string());
+        tauri::async_runtime::spawn(async move {
+            let result = (|| -> Result<PacProxyStatus, String> {
+                let app_data_dir = app
+                    .path()
+                    .app_data_dir()
+                    .map_err(|error| error.to_string())?;
+                let status = write_pac_proxy_selected_option(app_data_dir, selected_pac_key)
+                    .map_err(|error| error.to_string())?;
+                sync_menu_bar_pac_proxy(&app, &status).map_err(|error| error.to_string())?;
+                Ok(status)
+            })();
+            if let Ok(status) = result {
+                let _ = app.emit("pac-proxy-status-changed", status);
+            }
+        });
+    });
+
     tauri::async_runtime::spawn({
         let app = app.clone();
         async move {
@@ -673,6 +711,7 @@ pub fn run() {
             get_pac_proxy_status,
             set_pac_proxy_enabled,
             set_pac_proxy_selected_services,
+            set_pac_proxy_selected_option,
             list_codex_sessions,
             refresh_codex_usage_stats,
             get_codex_session_messages,

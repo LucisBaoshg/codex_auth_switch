@@ -19,6 +19,12 @@ function fallbackPacProxyStatus(): PacProxyStatus {
     supported: false,
     enabled: false,
     pacUrl: "http://10.12.0.24/proxy.pac",
+    selectedPacKey: "jp",
+    pacOptions: [
+      { key: "jp", label: "日本（Japan）", url: "http://10.12.0.24/proxy.pac" },
+      { key: "us", label: "美国（US）", url: "http://10.12.0.24/proxy-us.pac" },
+      { key: "ca", label: "加拿大（Canada）", url: "http://10.12.0.24/proxy-ca.pac" },
+    ],
     availableServices: [],
     selectedServices: [],
     services: [],
@@ -50,6 +56,40 @@ function renderPacProxyServiceOptions(pacProxy: PacProxyStatus, disabled: boolea
           <div class="pac-service-options" data-role="pac-service-options">
             <span>生效网络服务</span>
             <div class="pac-service-option-grid">
+              ${options}
+            </div>
+          </div>
+  `;
+}
+
+function renderPacProxyOptionControls(pacProxy: PacProxyStatus, disabled: boolean): string {
+  if (!pacProxy.pacOptions.length) {
+    return "";
+  }
+
+  const options = pacProxy.pacOptions
+    .map((option) => {
+      const active = option.key === pacProxy.selectedPacKey;
+      return `
+              <button
+                class="pac-option-button${active ? " is-active" : ""}"
+                data-action="select-pac-proxy-option"
+                data-pac-key="${escapeHtml(option.key)}"
+                aria-pressed="${active ? "true" : "false"}"
+                title="${escapeHtml(option.url)}"
+                ${disabled ? "disabled" : ""}
+              >
+                <span>${escapeHtml(option.label)}</span>
+                <small>${escapeHtml(option.url)}</small>
+              </button>
+      `;
+    })
+    .join("");
+
+  return `
+          <div class="pac-option-controls" data-role="pac-option-controls">
+            <span>PAC 节点</span>
+            <div class="pac-option-grid">
               ${options}
             </div>
           </div>
@@ -93,6 +133,7 @@ function renderPacProxySettings(input: SettingsPageInput): string {
               <span>${escapeHtml(statusText)}</span>
             </button>
           </div>
+          ${renderPacProxyOptionControls(pacProxy, disabled)}
           <div class="pac-url-box">
             <span>自动代理配置地址</span>
             <strong>${escapeHtml(pacProxy.pacUrl)}</strong>

@@ -1,11 +1,12 @@
 use chrono::{TimeZone, Utc};
 use codex_auth_switch_lib::core::{
-    AppSnapshot, CodexUsageCredits, CodexUsageSnapshot, CodexUsageWindow, PacProxyStatus,
-    ProfileSummary, ThirdPartyUsageQuotaSnapshot, ThirdPartyUsageSnapshot, PAC_PROXY_URL,
+    AppSnapshot, CodexUsageCredits, CodexUsageSnapshot, CodexUsageWindow, PacProxyOption,
+    PacProxyStatus, ProfileSummary, ThirdPartyUsageQuotaSnapshot, ThirdPartyUsageSnapshot,
+    DEFAULT_PAC_PROXY_KEY, PAC_PROXY_CA_URL, PAC_PROXY_URL, PAC_PROXY_US_URL,
 };
 use codex_auth_switch_lib::menu_bar::{
-    menu_bar_action_labels, menu_bar_pac_proxy_label, menu_bar_refresh_target,
-    menu_bar_usage_status, MenuBarRefreshKind,
+    menu_bar_action_labels, menu_bar_pac_option_label, menu_bar_pac_proxy_label,
+    menu_bar_refresh_target, menu_bar_usage_status, MenuBarRefreshKind,
 };
 
 fn usage_window(used_percent: f64, minutes: i64) -> CodexUsageWindow {
@@ -320,6 +321,24 @@ fn menu_bar_pac_proxy_label_reflects_current_status() {
         supported: true,
         enabled: true,
         pac_url: PAC_PROXY_URL.into(),
+        selected_pac_key: DEFAULT_PAC_PROXY_KEY.into(),
+        pac_options: vec![
+            PacProxyOption {
+                key: "jp".into(),
+                label: "日本（Japan）".into(),
+                url: PAC_PROXY_URL.into(),
+            },
+            PacProxyOption {
+                key: "us".into(),
+                label: "美国（US）".into(),
+                url: PAC_PROXY_US_URL.into(),
+            },
+            PacProxyOption {
+                key: "ca".into(),
+                label: "加拿大（Canada）".into(),
+                url: PAC_PROXY_CA_URL.into(),
+            },
+        ],
         available_services: vec!["Ethernet".into(), "Wi-Fi".into()],
         selected_services: vec!["Wi-Fi".into()],
         services: vec!["Wi-Fi".into()],
@@ -327,7 +346,7 @@ fn menu_bar_pac_proxy_label_reflects_current_status() {
     };
     assert_eq!(
         menu_bar_pac_proxy_label(&enabled),
-        "关闭 PAC 内网加速"
+        "关闭 PAC 内网加速：日本（Japan）"
     );
 
     let disabled = PacProxyStatus {
@@ -335,5 +354,52 @@ fn menu_bar_pac_proxy_label_reflects_current_status() {
         services: Vec::new(),
         ..enabled
     };
-    assert_eq!(menu_bar_pac_proxy_label(&disabled), "开启 PAC 内网加速");
+    assert_eq!(
+        menu_bar_pac_proxy_label(&disabled),
+        "开启 PAC 内网加速：日本（Japan）"
+    );
+}
+
+#[test]
+fn menu_bar_pac_option_labels_show_current_choice() {
+    let status = PacProxyStatus {
+        supported: true,
+        enabled: true,
+        pac_url: PAC_PROXY_US_URL.into(),
+        selected_pac_key: "us".into(),
+        pac_options: vec![
+            PacProxyOption {
+                key: "jp".into(),
+                label: "日本（Japan）".into(),
+                url: PAC_PROXY_URL.into(),
+            },
+            PacProxyOption {
+                key: "us".into(),
+                label: "美国（US）".into(),
+                url: PAC_PROXY_US_URL.into(),
+            },
+            PacProxyOption {
+                key: "ca".into(),
+                label: "加拿大（Canada）".into(),
+                url: PAC_PROXY_CA_URL.into(),
+            },
+        ],
+        available_services: vec!["Wi-Fi".into()],
+        selected_services: vec!["Wi-Fi".into()],
+        services: vec!["Wi-Fi".into()],
+        message: None,
+    };
+
+    assert_eq!(
+        menu_bar_pac_option_label(&status, &status.pac_options[0]),
+        "切换到日本（Japan）"
+    );
+    assert_eq!(
+        menu_bar_pac_option_label(&status, &status.pac_options[1]),
+        "✓ 美国（US）"
+    );
+    assert_eq!(
+        menu_bar_pac_option_label(&status, &status.pac_options[2]),
+        "切换到加拿大（Canada）"
+    );
 }

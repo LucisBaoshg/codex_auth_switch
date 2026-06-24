@@ -81,6 +81,12 @@ test("renders PAC acceleration controls in settings", async () => {
       supported: true,
       enabled: true,
       pacUrl: "http://10.12.0.24/proxy.pac",
+      selectedPacKey: "jp",
+      pacOptions: [
+        { key: "jp", label: "日本（Japan）", url: "http://10.12.0.24/proxy.pac" },
+        { key: "us", label: "美国（US）", url: "http://10.12.0.24/proxy-us.pac" },
+        { key: "ca", label: "加拿大（Canada）", url: "http://10.12.0.24/proxy-ca.pac" },
+      ],
       services: ["Wi-Fi"],
       availableServices: ["Ethernet", "Wi-Fi", "iPhone USB"],
       selectedServices: ["Ethernet", "Wi-Fi"],
@@ -91,6 +97,18 @@ test("renders PAC acceleration controls in settings", async () => {
 
   expect(html).toContain("PAC 内网加速");
   expect(html).toContain("http://10.12.0.24/proxy.pac");
+  expect(html).toContain("PAC 节点");
+  expect(html).toContain('data-role="pac-option-controls"');
+  expect(html).toContain('data-action="select-pac-proxy-option"');
+  expect(html).toContain('data-pac-key="jp"');
+  expect(html).toContain('data-pac-key="us"');
+  expect(html).toContain('data-pac-key="ca"');
+  expect(html).toContain("日本（Japan）");
+  expect(html).toContain("美国（US）");
+  expect(html).toContain("加拿大（Canada）");
+  expect(html).toContain('aria-pressed="true"');
+  expect(html).toContain("http://10.12.0.24/proxy-us.pac");
+  expect(html).toContain("http://10.12.0.24/proxy-ca.pac");
   expect(html).toContain('data-role="pac-proxy-settings"');
   expect(html).toContain('data-action="toggle-pac-proxy"');
   expect(html).toContain('aria-pressed="true"');
@@ -121,6 +139,12 @@ test("renders disabled PAC acceleration controls when unsupported", async () => 
       supported: false,
       enabled: false,
       pacUrl: "http://10.12.0.24/proxy.pac",
+      selectedPacKey: "jp",
+      pacOptions: [
+        { key: "jp", label: "日本（Japan）", url: "http://10.12.0.24/proxy.pac" },
+        { key: "us", label: "美国（US）", url: "http://10.12.0.24/proxy-us.pac" },
+        { key: "ca", label: "加拿大（Canada）", url: "http://10.12.0.24/proxy-ca.pac" },
+      ],
       services: [],
       availableServices: [],
       selectedServices: [],
