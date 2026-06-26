@@ -299,7 +299,7 @@ test("does not render editor runtime panel for network editor source", async () 
   expect(html).toBe("");
 });
 
-test("renders editor layout by composing config and sidebar panels", async () => {
+test("renders editor layout with a dense summary section before config panels", async () => {
   expect(existsSync(join(root, "src/profile-editor-renderers.ts"))).toBe(true);
   const rendererModule = await import(renderersImportPath);
 
@@ -323,6 +323,9 @@ test("renders editor layout by composing config and sidebar panels", async () =>
       updatedAt: "2026-06-05T00:00:00.000Z",
     }),
     editorProfile,
+    networkProfiles: [],
+    hasNetworkAccessToken: false,
+    remoteVersionCheckAttempted: false,
     configFieldsHtml: "<section data-role=\"config-fields\">fields</section>",
     busy: true,
     readOnly: false,
@@ -331,10 +334,12 @@ test("renders editor layout by composing config and sidebar panels", async () =>
     pendingActions: new Set(),
   });
 
-  expect(html).toContain('class="editor-layout-grid"');
-  expect(html).toContain('class="editor-main-column"');
+  expect(html).toContain('data-role="editor-detail-layout"');
+  expect(html).toContain('data-role="editor-summary-section"');
+  expect(html).toContain('data-role="editor-summary-grid"');
+  expect(html).toContain('data-role="editor-config-section"');
   expect(html).toContain('data-role="config-fields"');
-  expect(html).toContain('class="editor-sidebar-column"');
+  expect(html).toContain('data-role="editor-status-section"');
   expect(html).toContain("Third &lt;Party&gt;");
   expect(html).toContain('data-action="generate-symbiotic"');
   expect(html).toContain('data-role="editor-runtime-panel"');
@@ -363,6 +368,9 @@ test("disables profile deletion for the active editor profile", async () => {
       notes: "Active runtime",
     }),
     editorProfile,
+    networkProfiles: [],
+    hasNetworkAccessToken: false,
+    remoteVersionCheckAttempted: false,
     configFieldsHtml: "<section data-role=\"config-fields\">fields</section>",
     busy: false,
     readOnly: false,
@@ -441,6 +449,9 @@ test("renders complete editor page from snapshot and editor state", async () => 
       ],
     }),
     editor,
+    networkProfiles: [],
+    hasNetworkAccessToken: false,
+    remoteVersionCheckAttempted: false,
     busy: true,
     pendingActions: new Set(),
   });
@@ -448,9 +459,39 @@ test("renders complete editor page from snapshot and editor state", async () => 
   expect(html).toContain('data-page="editor"');
   expect(html).toContain("Third &lt;Party&gt;");
   expect(html).toContain('data-role="editor-live-change-notice"');
-  expect(html).toContain('class="editor-layout-grid"');
-  expect(html).toContain('class="editor-panels"');
+  expect(html).toContain('data-role="editor-detail-layout"');
+  // Existing profiles render a tabbed detail view; overview is the default tab.
+  expect(html).toContain('data-role="editor-detail-tabs"');
+  expect(html).toContain('data-action="editor-detail-overview"');
+  expect(html).toContain('data-action="editor-detail-config"');
   expect(html).toContain('data-action="generate-symbiotic"');
   expect(html).toContain('data-role="editor-runtime-panel"');
   expect(html).toContain("disabled");
+  // Config panels live on the dedicated 配置文件 tab, not the default overview.
+  expect(html).not.toContain('data-role="editor-config-section"');
+
+  const configTabHtml = renderEditorPage({
+    snapshot: createSnapshot({
+      activeProfileId: "official-a",
+      profiles: [
+        createProfile(),
+        createProfile({
+          id: "third-party-a",
+          name: "Third <Party>",
+          authTypeLabel: "第三方 API",
+          modelProviderKey: "ylscode",
+        }),
+      ],
+    }),
+    editor: { ...editor, detailTab: "config" },
+    networkProfiles: [],
+    hasNetworkAccessToken: false,
+    remoteVersionCheckAttempted: false,
+    busy: true,
+    pendingActions: new Set(),
+  });
+
+  expect(configTabHtml).toContain('data-role="editor-config-section"');
+  expect(configTabHtml).toContain('class="editor-panels"');
+  expect(configTabHtml).not.toContain('data-role="editor-runtime-panel"');
 });

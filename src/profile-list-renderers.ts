@@ -87,6 +87,36 @@ function renderProfileDetailButton(profile: ProfileSummary, busy: boolean): stri
   `;
 }
 
+export function isCurrentAccountUnsaved(snapshot: AppSnapshot): boolean {
+  return (
+    !snapshot.activeProfileId &&
+    snapshot.targetExists &&
+    snapshot.targetAuthExists &&
+    snapshot.targetConfigExists &&
+    Boolean(snapshot.targetAuthTypeLabel)
+  );
+}
+
+export function renderUnsavedCurrentAccountBanner(input: CardsPageInput): string {
+  if (!isCurrentAccountUnsaved(input.snapshot)) {
+    return "";
+  }
+
+  const label = input.snapshot.targetAuthTypeLabel ?? "当前配置";
+  return `
+    <aside class="flash flash-info current-account-unsaved" data-role="current-account-unsaved">
+      <div class="current-account-unsaved-copy">
+        <strong>当前 Codex 账号尚未保存</strong>
+        <span>检测到正在生效的「${escapeHtml(label)}」配置不在已保存列表里。保存后才能应用切换、查看额度与备注。</span>
+      </div>
+      <button class="button button-primary current-account-unsaved-action" data-action="save-current-account" ${input.busy ? "disabled" : ""}>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
+        保存当前账号
+      </button>
+    </aside>
+  `;
+}
+
 export function renderCardsPage(input: CardsPageInput): string {
   return `
     <section class="cards-page" data-page="cards">
@@ -107,19 +137,20 @@ export function renderCardsPage(input: CardsPageInput): string {
         </div>
       </header>
 
+      ${renderUnsavedCurrentAccountBanner(input)}
+
       <section class="grid-container">
         <div class="section-header">
           <h3 class="section-title">已保存的配置文件</h3>
           <div class="section-actions">
             <button
-              class="button button-secondary"
+              class="button button-secondary section-toolbar-button"
               data-action="refresh-all-codex-usage"
               title="连接 API 接口以获取并更新所有配置的最新额度使用情况"
               ${input.busy || hasPendingActionPrefix(input.pendingActions, codexUsageActionPrefix) ? "disabled" : ""}
-              style="padding: 6px 12px; font-size: 0.82rem; height: 32px; display: inline-flex; align-items: center; gap: 4px;"
             >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"></line><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
-              <span>${hasPendingAction(input.pendingActions, refreshAllUsageActionKey) ? "更新中..." : "更新全部额度用量"}</span>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"></line><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
+              <span>${hasPendingAction(input.pendingActions, refreshAllUsageActionKey) ? "更新中..." : "更新额度"}</span>
             </button>
             ${renderProfileLayoutToggle({
               layout: input.layout,
@@ -221,7 +252,7 @@ export function renderProfileList(input: ProfileCollectionRenderInput): string {
                           ${refreshingLatency ? "测速中..." : "测速"}
                         </button>
                       `
-                      : `<span class="profile-row-action-placeholder">--</span>`
+                      : `<span class="profile-row-action-placeholder" aria-hidden="true"></span>`
                   }
                   </span>
                 </span>

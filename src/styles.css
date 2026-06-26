@@ -559,8 +559,8 @@ p { margin: 0; }
 }
 
 .profile-list {
-  --profile-row-metrics-width: 360px;
-  --profile-row-actions-width: 206px;
+  --profile-row-metrics-width: 340px;
+  --profile-row-actions-width: 256px;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -743,8 +743,9 @@ p { margin: 0; }
 
 .profile-row-primary-action {
   display: inline-flex;
-  justify-content: flex-end;
+  justify-content: stretch;
   flex: 0 0 auto;
+  width: 76px;
 }
 
 .profile-row-utility-actions,
@@ -758,11 +759,11 @@ p { margin: 0; }
   display: flex;
   justify-content: center;
   flex: 0 0 auto;
-  min-width: 44px;
+  width: 60px;
 }
 
 .profile-row-utility-actions {
-  gap: 4px;
+  gap: 6px;
 }
 
 .profile-row-detail-actions {
@@ -773,7 +774,8 @@ p { margin: 0; }
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 32px;
+  min-width: 68px;
+  height: 34px;
   padding: 0 10px;
   border-radius: 9px;
   border: 1px solid rgba(16, 185, 129, 0.2);
@@ -784,19 +786,42 @@ p { margin: 0; }
   white-space: nowrap;
 }
 
-.profile-row-switch,
+.profile-row-switch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 68px;
+  height: 34px;
+  padding: 0 14px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* Only stretch the primary action to fill its fixed list slot — the
+   .profile-row-status badge is also reused in the runtime panel head,
+   where it must stay compact. */
+.profile-row-primary-action .profile-row-status,
+.profile-row-primary-action .profile-row-switch {
+  width: 100%;
+}
+
 .profile-row-utility {
-  width: auto;
-  min-height: 32px;
-  padding: 6px 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-width: 56px;
+  height: 34px;
+  padding: 0 8px;
   font-size: 0.8rem;
   white-space: nowrap;
 }
 
 .profile-row-detail {
-  width: 32px;
-  min-width: 32px;
-  min-height: 32px;
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
   padding: 0;
   border-radius: 9px;
   color: var(--text-muted);
@@ -811,14 +836,18 @@ p { margin: 0; }
 }
 
 .profile-row-action-placeholder {
+  display: block;
+  width: 100%;
+  height: 34px;
+}
+
+.section-toolbar-button {
+  height: 34px;
+  padding: 0 14px;
+  font-size: 0.82rem;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  width: 44px;
-  min-height: 32px;
-  color: var(--text-muted);
-  font-size: 0.78rem;
-  opacity: 0.45;
+  gap: 6px;
 }
 
 .card-grid {
@@ -1733,7 +1762,7 @@ p { margin: 0; }
 .editor-page {
   display: flex;
   flex-direction: column;
-  gap: 32px;
+  gap: 16px;
 }
 
 .editor-runtime {
@@ -1765,7 +1794,7 @@ p { margin: 0; }
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding-bottom: 24px;
+  padding-bottom: 4px;
 }
 
 .editor-header-left p.eyebrow {
@@ -2075,6 +2104,37 @@ p { margin: 0; }
 .flash-success { background-color: var(--success-bg); color: var(--success); border: 1px solid rgba(16, 185, 129, 0.2); }
 .flash-error { background-color: var(--danger-bg); color: var(--danger); border: 1px solid rgba(239, 68, 68, 0.2); }
 .flash-info { background-color: rgba(99, 102, 241, 0.1); color: var(--accent); border: 1px solid rgba(99, 102, 241, 0.2); }
+
+/* Unsaved current-account banner on the cards page */
+.current-account-unsaved {
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.current-account-unsaved-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.current-account-unsaved-copy strong {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--text-main);
+}
+
+.current-account-unsaved-copy span {
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.current-account-unsaved-action {
+  flex-shrink: 0;
+}
 
 /* Global Toast Notifications */
 .toast-notification {
@@ -4801,32 +4861,59 @@ p { margin: 0; }
   border: 1px solid rgba(99, 102, 241, 0.18) !important;
 }
 
-/* Two-Column Editor Layout Grid */
-.editor-layout-grid {
+/* Profile detail layout */
+.editor-detail-layout {
   display: grid;
-  grid-template-columns: 1fr 340px;
-  gap: 24px;
-  align-items: start;
+  gap: 16px;
 }
 
-.editor-main-column {
-  display: flex;
-  flex-direction: column;
-  gap: 24px;
+/* Tabbed detail view: 概览 / 配置文件 */
+.editor-detail-layout-tabbed {
+  gap: 0;
 }
 
-.editor-sidebar-column {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
+.editor-detail-tabs {
+  margin-bottom: 18px;
+}
+
+.editor-tab-panel {
+  display: grid;
+  gap: 16px;
+  animation: editor-tab-fade 0.18s ease;
+}
+
+@keyframes editor-tab-fade {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.editor-summary-section,
+.editor-config-section,
+.editor-status-section {
+  min-width: 0;
+}
+
+.editor-status-section {
+  display: block;
+  min-width: 0;
+}
+
+.editor-status-section:empty {
+  display: none;
 }
 
 /* Sidebar cards */
 .sidebar-card {
   background-color: var(--bg-panel);
   border: 1px solid var(--border);
-  border-radius: 16px;
-  padding: 20px;
+  border-radius: 14px;
+  padding: 18px;
   box-shadow: var(--shadow-sm);
 }
 
@@ -4839,6 +4926,161 @@ p { margin: 0; }
   letter-spacing: 0.05em;
   border-bottom: 1px solid var(--border-light);
   padding-bottom: 8px;
+}
+
+.editor-page > .flash {
+  margin: 0;
+  padding: 10px 14px;
+}
+
+.editor-summary-card {
+  padding: 14px 18px 16px;
+}
+
+.editor-summary-card .sidebar-card-title {
+  margin-bottom: 10px;
+  padding-bottom: 6px;
+}
+
+.editor-summary-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(248px, 300px);
+  gap: 24px;
+  align-items: stretch;
+}
+
+.editor-summary-section .field,
+.editor-summary-section .field[style] {
+  margin: 0 !important;
+}
+
+.editor-summary-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.editor-summary-actions {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.editor-summary-actions .sidebar-actions {
+  margin: 0;
+  padding: 0;
+  border-top: 0;
+  gap: 10px;
+}
+
+.editor-summary-grid input,
+.editor-summary-grid textarea {
+  font-size: 0.92rem;
+}
+
+/* Notes grows to fill the column so the left side stays level with the
+   actions + metadata right rail (no leftover empty space). */
+.editor-summary-fields .profile-notes-field {
+  flex: 1 1 auto;
+}
+
+.editor-summary-fields .profile-notes-field textarea {
+  flex: 1 1 auto;
+}
+
+.editor-summary-grid #editor-notes {
+  min-height: 96px;
+  height: auto;
+}
+
+/* Secondary "generate symbiotic" link sits quietly below the main actions. */
+.editor-secondary-link {
+  justify-content: center;
+  width: 100%;
+  color: var(--accent);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+/* 版本与时间 metadata lives in the action rail, divided from the buttons. */
+.editor-summary-actions .metadata-card {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-light);
+}
+
+.shared-version-status {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 16px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background-color: rgba(15, 23, 42, 0.02);
+}
+
+.shared-version-status[data-state="stale"] {
+  border-color: rgba(245, 158, 11, 0.35);
+  background-color: rgba(245, 158, 11, 0.1);
+}
+
+.shared-version-status[data-state="current"] {
+  border-color: rgba(16, 185, 129, 0.28);
+  background-color: var(--success-bg);
+}
+
+.shared-version-status[data-state="missing"] {
+  border-color: rgba(239, 68, 68, 0.22);
+  background-color: var(--danger-bg);
+}
+
+.shared-version-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.shared-version-title {
+  min-width: 0;
+  color: var(--text-main);
+  font-size: 0.86rem;
+  font-weight: 750;
+}
+
+.shared-version-pill {
+  flex-shrink: 0;
+  border-radius: 999px;
+  padding: 3px 8px;
+  background-color: rgba(100, 116, 139, 0.12);
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 750;
+}
+
+.shared-version-pill-current {
+  background-color: var(--success-bg);
+  color: var(--success);
+}
+
+.shared-version-pill-stale {
+  background-color: rgba(245, 158, 11, 0.16);
+  color: #B45309;
+}
+
+.shared-version-status p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  line-height: 1.42;
+  overflow-wrap: anywhere;
+}
+
+.shared-version-status .button-full {
+  min-height: 34px;
+  padding: 7px 10px;
+  font-size: 0.82rem;
 }
 
 /* Code Editor Styling */
@@ -4900,7 +5142,7 @@ p { margin: 0; }
   font-size: 0.85rem;
   line-height: 1.6;
   resize: vertical;
-  min-height: 480px;
+  min-height: 420px;
   width: 100%;
   box-shadow: none !important;
   color: var(--text-main);
@@ -4940,15 +5182,8 @@ p { margin: 0; }
   font-weight: 600;
 }
 
-/* Responsive adjustment for sidebar */
-@media (max-width: 1024px) {
-  .editor-layout-grid {
-    grid-template-columns: 1fr;
-  }
-}
-
-/* Force layout constraints inside sidebar runtime components */
-.editor-sidebar-column .editor-runtime {
+/* Runtime components inside the lower status section */
+.editor-status-section .editor-runtime {
   background-color: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: 16px;
@@ -4957,8 +5192,8 @@ p { margin: 0; }
   margin: 0;
 }
 
-.editor-sidebar-column .third-party-quota-grid {
-  grid-template-columns: 1fr;
+.editor-status-section .third-party-quota-grid {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
 }
 
 /* Sidebar action buttons positioning */
@@ -4987,6 +5222,11 @@ p { margin: 0; }
 }
 
 @media (max-width: 760px) {
+  .editor-summary-grid,
+  .editor-status-section {
+    grid-template-columns: 1fr;
+  }
+
   .app-layout {
     flex-direction: column;
     height: auto;

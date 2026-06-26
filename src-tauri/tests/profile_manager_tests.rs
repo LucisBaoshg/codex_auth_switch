@@ -1361,6 +1361,76 @@ fn switch_profile_merges_shared_runtime_config_without_polluting_official_profil
 }
 
 #[test]
+fn runtime_capture_does_not_flip_official_profile_into_symbiotic() {
+    // Repro for the OAuth pollution bug: after codex's own OAuth login leaves a
+    // third-party `[model_providers.*] requires_openai_auth + bearer` block in
+    // config.toml, a pre-switch runtime capture must NOT write that symbiotic
+    // routing back into the clean official profile it thinks is active.
+    let (app_dir, target_dir, mut manager) = temp_manager();
+
+    let official = manager
+        .import_profile(ProfileInput {
+            name: "Official".into(),
+            notes: String::new(),
+            auth_json: oauth_auth_json("one@example.com", "user-a", "acct-a"),
+            config_toml: official_config_toml("gpt-5.4"),
+        })
+        .expect("import official");
+    let other = manager
+        .import_profile(ProfileInput {
+            name: "Third Party".into(),
+            notes: String::new(),
+            auth_json: api_key_auth_json("sk-third"),
+            config_toml: third_party_config_toml("gpt-5.4"),
+        })
+        .expect("import third party");
+
+    // Official is the active profile (marker + last-switch point at it).
+    manager
+        .switch_profile(&official.id)
+        .expect("switch to official");
+
+    // Simulate codex leaving symbiotic third-party routing in the live config
+    // while the auth.json is still the same official OAuth identity.
+    fs::write(
+        target_dir.path().join("config.toml"),
+        symbiotic_third_party_config_toml("gpt-5.4"),
+    )
+    .expect("seed polluted runtime config");
+
+    // Switching away triggers the pre-switch runtime capture into the active
+    // (official) profile.
+    manager
+        .switch_profile(&other.id)
+        .expect("switch away from official");
+
+    let saved_config = fs::read_to_string(
+        app_dir
+            .path()
+            .join("profiles")
+            .join(&official.id)
+            .join("config.toml"),
+    )
+    .expect("read saved official config");
+    assert!(
+        !saved_config.contains("[model_providers."),
+        "official profile must not absorb third-party provider routing: {saved_config}"
+    );
+    assert!(
+        !saved_config.contains("experimental_bearer_token"),
+        "official profile must not absorb a third-party bearer token: {saved_config}"
+    );
+
+    let official_summary = manager
+        .list_profiles()
+        .expect("list profiles")
+        .into_iter()
+        .find(|profile| profile.id == official.id)
+        .expect("official profile still present");
+    assert_eq!(official_summary.auth_type_label, "官方 OAuth");
+}
+
+#[test]
 fn switch_profile_updates_selected_profile_document_with_effective_merged_config() {
     let (_app_dir, target_dir, mut manager) = temp_manager();
 

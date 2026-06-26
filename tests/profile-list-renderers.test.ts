@@ -100,7 +100,7 @@ test("renders cards page shell with selected profile layout", async () => {
   });
 
   expect(gridHtml).toContain('data-role="profile-grid"');
-  expect(gridHtml).toContain("更新全部额度用量");
+  expect(gridHtml).toContain('data-action="refresh-all-codex-usage"');
 });
 
 test("renders profile list rows with live and pending actions", async () => {
@@ -185,4 +185,42 @@ test("renders profile grid empty state and profile cards", async () => {
   expect(cardHtml).toContain("环境生效中");
   expect(cardHtml).toContain('data-action="view-profile-details"');
   expect(cardHtml).toContain('aria-label="查看和编辑 Profile &lt;One&gt;"');
+});
+
+test("shows the unsaved-current-account banner only when no profile matches the live target", async () => {
+  const { renderCardsPage, isCurrentAccountUnsaved } = await import(renderersImportPath);
+
+  const unsavedSnapshot = createSnapshot({
+    activeProfileId: null,
+    targetAuthTypeLabel: "官方 OAuth",
+    profiles: [createProfile()],
+  });
+  expect(isCurrentAccountUnsaved(unsavedSnapshot)).toBe(true);
+
+  const unsavedHtml = renderCardsPage({
+    snapshot: unsavedSnapshot,
+    profiles: unsavedSnapshot.profiles,
+    busy: false,
+    pendingActions: new Set(),
+    layout: "grid",
+  });
+  expect(unsavedHtml).toContain('data-role="current-account-unsaved"');
+  expect(unsavedHtml).toContain('data-action="save-current-account"');
+  expect(unsavedHtml).toContain("官方 OAuth");
+
+  // A matched active profile means the current account is already saved.
+  const savedSnapshot = createSnapshot({
+    activeProfileId: "profile-1",
+    targetAuthTypeLabel: "官方 OAuth",
+    profiles: [createProfile()],
+  });
+  expect(isCurrentAccountUnsaved(savedSnapshot)).toBe(false);
+  const savedHtml = renderCardsPage({
+    snapshot: savedSnapshot,
+    profiles: savedSnapshot.profiles,
+    busy: false,
+    pendingActions: new Set(),
+    layout: "grid",
+  });
+  expect(savedHtml).not.toContain('data-action="save-current-account"');
 });

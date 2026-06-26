@@ -51,6 +51,41 @@ export function shouldWriteBackSharedAuth(
   return true;
 }
 
+export function sharedProfileHasNewerRemote(
+  local: SharedAuthLocalState,
+  remote: SharedAuthRemoteState | null | undefined,
+): boolean {
+  const remoteProfileId = local.remoteProfileId?.trim();
+  if (!remoteProfileId || !remote || remote.id !== remoteProfileId) {
+    return false;
+  }
+
+  const localVersion = local.remoteContentVersion;
+  const remoteVersion = remote.contentVersion;
+  if (typeof remoteVersion === "number") {
+    if (typeof localVersion !== "number") {
+      return true;
+    }
+    if (remoteVersion > localVersion) {
+      return true;
+    }
+    if (remoteVersion < localVersion) {
+      return false;
+    }
+  }
+
+  const localHash = normalizedHash(local.remoteContentHash);
+  const remoteHash = normalizedHash(remote.contentHash);
+  if (remoteHash && !localHash) {
+    return true;
+  }
+  if (localHash && remoteHash && localHash !== remoteHash) {
+    return true;
+  }
+
+  return false;
+}
+
 export function sharedAuthWriteBackBase(
   local: SharedAuthLocalState,
   remote: SharedAuthRemoteState | null | undefined,

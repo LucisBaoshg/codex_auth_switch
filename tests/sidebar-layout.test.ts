@@ -1786,6 +1786,13 @@ test("opens the detail editor when clicking view-details on a profile card", asy
   await flushUi();
 
   expect(document.querySelector('[data-page="editor"]')).not.toBeNull();
+
+  // Config files now live on the dedicated 配置文件 tab.
+  document
+    .querySelector<HTMLButtonElement>('[data-action="editor-detail-config"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+
   expect(document.querySelector("#editor-auth-json")).not.toBeNull();
   expect(document.querySelector("#editor-config-toml")).not.toBeNull();
 });
@@ -2907,9 +2914,16 @@ test("opens network shared profile details in readonly mode without browser cach
 
   expect(document.querySelector('[data-page="editor"]')).not.toBeNull();
   expect(document.querySelector<HTMLInputElement>("#editor-name")?.disabled).toBe(true);
+  expect(document.querySelector('[data-role="editor-readonly-notice"]')).not.toBeNull();
+
+  // Config files now live on the dedicated 配置文件 tab.
+  document
+    .querySelector<HTMLButtonElement>('[data-action="editor-detail-config"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+
   expect(document.querySelector<HTMLTextAreaElement>("#editor-auth-json")?.disabled).toBe(true);
   expect(document.querySelector<HTMLTextAreaElement>("#editor-config-toml")?.disabled).toBe(true);
-  expect(document.querySelector('[data-role="editor-readonly-notice"]')).not.toBeNull();
   expect(document.querySelector('[data-action="save-editor"]')).toBeNull();
   expect(document.querySelector('[data-action="save-and-switch"]')).toBeNull();
   expect(fetchMock).toHaveBeenCalledWith(
@@ -3313,6 +3327,681 @@ test("prompts to update and restarts Codex when the active shared profile has a 
   expect(invokeMock).toHaveBeenCalledWith("switch_profile", { profileId: "local-shared-1" });
   expect(invokeMock).toHaveBeenCalledWith("restart_codex", undefined);
   expect(document.body.textContent).toContain("已更新并重启 Codex");
+});
+
+test("shows a stale shared profile version notice in local profile details and updates from cloud", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+  localStorage.setItem("codex-auth-switch.networkProfileToken", "cas_test_token");
+
+  const initialSnapshot = {
+    targetDir: "/Users/example/.codex",
+    usingDefaultTargetDir: true,
+    targetExists: true,
+    targetAuthExists: true,
+    targetConfigExists: true,
+    targetUpdatedAt: "2026-06-24T10:00:00Z",
+    targetAuthTypeLabel: "官方 OAuth",
+    activeProfileId: "other-profile",
+    lastSelectedProfileId: "other-profile",
+    lastSwitchProfileId: "other-profile",
+    lastSwitchedAt: "2026-06-24T10:00:00Z",
+    codexUsageApiEnabled: false,
+    profiles: [
+      {
+        id: "local-shared-oauth",
+        name: "ChatGPT Pro",
+        notes: "共享官方 OAuth",
+        authTypeLabel: "官方 OAuth",
+        createdAt: "2026-06-24T09:00:00Z",
+        updatedAt: "2026-06-24T10:00:00Z",
+        authHash: "auth-old",
+        configHash: "config-old",
+        remoteProfileId: "remote-oauth",
+        remoteContentVersion: 1,
+        remoteContentHash: "hash-v1",
+        remoteUpdatedAt: "2026-06-24T09:30:00Z",
+        codexUsage: null,
+        thirdPartyLatency: null,
+        thirdPartyUsage: null,
+      },
+      {
+        id: "other-profile",
+        name: "Other",
+        notes: "",
+        authTypeLabel: "第三方 API",
+        createdAt: "2026-06-24T09:00:00Z",
+        updatedAt: "2026-06-24T09:00:00Z",
+        authHash: "auth-other",
+        configHash: "config-other",
+        remoteProfileId: null,
+        remoteContentVersion: null,
+        remoteContentHash: null,
+        remoteUpdatedAt: null,
+        codexUsage: null,
+        thirdPartyLatency: null,
+        thirdPartyUsage: null,
+      },
+    ],
+  };
+  const updatedSnapshot = {
+    ...initialSnapshot,
+    profiles: [
+      {
+        ...initialSnapshot.profiles[0],
+        updatedAt: "2026-06-24T11:00:00Z",
+        authHash: "auth-new",
+        configHash: "config-new",
+        remoteContentVersion: 2,
+        remoteContentHash: "hash-v2",
+        remoteUpdatedAt: "2026-06-24T11:00:00Z",
+      },
+      initialSnapshot.profiles[1],
+    ],
+  };
+
+  invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+    if (command === "load_snapshot") return initialSnapshot;
+    if (command === "get_pac_proxy_status") {
+      return {
+        supported: false,
+        enabled: false,
+        pacUrl: "http://10.12.0.24/proxy.pac",
+        selectedPacKey: "jp",
+        pacOptions: [],
+        availableServices: [],
+        selectedServices: [],
+        services: [],
+        message: "PAC 状态尚未加载。",
+      };
+    }
+    if (command === "get_profile_document") {
+      expect(args).toEqual({ profileId: "local-shared-oauth" });
+      return {
+        id: "local-shared-oauth",
+        name: "ChatGPT Pro",
+        notes: "共享官方 OAuth",
+        authTypeLabel: "官方 OAuth",
+        createdAt: "2026-06-24T09:00:00Z",
+        updatedAt: "2026-06-24T10:00:00Z",
+        remoteProfileId: "remote-oauth",
+        remoteContentVersion: 1,
+        remoteContentHash: "hash-v1",
+        remoteUpdatedAt: "2026-06-24T09:30:00Z",
+        authJson: '{"auth_mode":"chatgpt","tokens":{"refresh_token":"old-refresh"}}',
+        configToml: 'model = "gpt-5"\n',
+        loadedFromTarget: false,
+        hasTargetChanges: false,
+        readOnly: false,
+      };
+    }
+    if (command === "update_profile") {
+      expect(args).toEqual({
+        profileId: "local-shared-oauth",
+        payload: {
+          name: "ChatGPT Pro",
+          notes: "共享官方 OAuth",
+          authJson: '{"auth_mode":"chatgpt","tokens":{"refresh_token":"new-refresh"}}',
+          configToml: 'model = "gpt-5.5"\n',
+        },
+      });
+      return updatedSnapshot;
+    }
+    if (command === "set_profile_remote_metadata") {
+      expect(args).toEqual({
+        profileId: "local-shared-oauth",
+        remoteProfileId: "remote-oauth",
+        remoteContentVersion: 2,
+        remoteContentHash: "hash-v2",
+        remoteUpdatedAt: "2026-06-24T11:00:00Z",
+      });
+      return updatedSnapshot;
+    }
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    const url = input.toString();
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/auth/me") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ user: { dingUserId: "Ding-B", name: "Bob" } }),
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => [
+          {
+            id: "remote-oauth",
+            name: "ChatGPT Pro",
+            description: "共享官方 OAuth",
+            createdAt: "2026-06-24T09:00:00Z",
+            updatedAt: "2026-06-24T11:00:00Z",
+            contentVersion: 2,
+            contentHash: "hash-v2",
+            contentUpdatedAt: "2026-06-24T11:00:00Z",
+            files: ["auth.json", "config.toml"],
+            ownerDingUserId: "Ding-A",
+            visibility: "selected",
+            sharedWith: ["Ding-B"],
+          },
+        ],
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-oauth") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          id: "remote-oauth",
+          name: "ChatGPT Pro",
+          description: "共享官方 OAuth",
+          createdAt: "2026-06-24T09:00:00Z",
+          updatedAt: "2026-06-24T11:00:00Z",
+          contentVersion: 2,
+          contentHash: "hash-v2",
+          contentUpdatedAt: "2026-06-24T11:00:00Z",
+          files: ["auth.json", "config.toml"],
+        }),
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-oauth/auth.json") {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => '{"auth_mode":"chatgpt","tokens":{"refresh_token":"new-refresh"}}',
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-oauth/config.toml") {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => 'model = "gpt-5.5"\n',
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  await import("../src/main");
+  await flushUi();
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="view-profile-details"][data-id="local-shared-oauth"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  await flushUi();
+  await flushUi();
+
+  expect(document.querySelector('[data-role="shared-version-status"]')?.textContent).toContain("共享中心有新版本");
+  expect(document.querySelector('[data-role="shared-version-status"]')?.textContent).toContain("本地 v1");
+  expect(document.querySelector('[data-role="shared-version-status"]')?.textContent).toContain("共享中心 v2");
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="update-shared-profile-from-cloud"][data-id="local-shared-oauth"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  await flushUi();
+  await flushUi();
+  await flushUi();
+  await flushUi();
+
+  expect(invokeMock).toHaveBeenCalledWith("update_profile", expect.objectContaining({
+    profileId: "local-shared-oauth",
+  }));
+  expect(invokeMock).toHaveBeenCalledWith("set_profile_remote_metadata", expect.objectContaining({
+    profileId: "local-shared-oauth",
+  }));
+  expect(invokeMock).not.toHaveBeenCalledWith("restart_codex", undefined);
+  expect(document.body.textContent).toContain("已更新共享配置");
+});
+
+test("shows a not found result after checking a missing shared center profile version", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+  localStorage.setItem("codex-auth-switch.networkProfileToken", "cas_test_token");
+
+  const snapshot = {
+    targetDir: "/Users/example/.codex",
+    usingDefaultTargetDir: true,
+    targetExists: true,
+    targetAuthExists: true,
+    targetConfigExists: true,
+    targetUpdatedAt: "2026-06-24T10:00:00Z",
+    targetAuthTypeLabel: "官方 OAuth",
+    activeProfileId: null,
+    lastSelectedProfileId: null,
+    lastSwitchProfileId: null,
+    lastSwitchedAt: null,
+    codexUsageApiEnabled: false,
+    profiles: [
+      {
+        id: "local-shared-oauth",
+        name: "ChatGPT Pro",
+        notes: "共享官方 OAuth",
+        authTypeLabel: "官方 OAuth",
+        createdAt: "2026-06-24T09:00:00Z",
+        updatedAt: "2026-06-24T10:00:00Z",
+        authHash: "auth-old",
+        configHash: "config-old",
+        remoteProfileId: "remote-missing",
+        remoteContentVersion: 1,
+        remoteContentHash: "hash-v1",
+        remoteUpdatedAt: "2026-06-24T09:30:00Z",
+        codexUsage: null,
+        thirdPartyLatency: null,
+        thirdPartyUsage: null,
+      },
+    ],
+  };
+
+  invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+    if (command === "load_snapshot") return snapshot;
+    if (command === "get_pac_proxy_status") {
+      return {
+        supported: false,
+        enabled: false,
+        pacUrl: "http://10.12.0.24/proxy.pac",
+        selectedPacKey: "jp",
+        pacOptions: [],
+        availableServices: [],
+        selectedServices: [],
+        services: [],
+        message: "PAC 状态尚未加载。",
+      };
+    }
+    if (command === "get_profile_document") {
+      expect(args).toEqual({ profileId: "local-shared-oauth" });
+      return {
+        id: "local-shared-oauth",
+        name: "ChatGPT Pro",
+        notes: "共享官方 OAuth",
+        authTypeLabel: "官方 OAuth",
+        createdAt: "2026-06-24T09:00:00Z",
+        updatedAt: "2026-06-24T10:00:00Z",
+        remoteProfileId: "remote-missing",
+        remoteContentVersion: 1,
+        remoteContentHash: "hash-v1",
+        remoteUpdatedAt: "2026-06-24T09:30:00Z",
+        authJson: '{"auth_mode":"chatgpt"}',
+        configToml: 'model = "gpt-5"\n',
+        loadedFromTarget: false,
+        hasTargetChanges: false,
+        readOnly: false,
+      };
+    }
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    const url = input.toString();
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/auth/me") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ user: { dingUserId: "Ding-B", name: "Bob" } }),
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => [],
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  await import("../src/main");
+  await flushUi();
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="view-profile-details"][data-id="local-shared-oauth"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  await flushUi();
+  await flushUi();
+
+  expect(document.querySelector('[data-role="shared-version-status"]')?.textContent).toContain("共享中心未找到对应配置");
+});
+
+test("relinks a missing shared profile to the unique same-name cloud profile when updating", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+  localStorage.setItem("codex-auth-switch.networkProfileToken", "cas_test_token");
+
+  const initialProfile = {
+    id: "local-shared-oauth",
+    name: "ChatGPT Pro",
+    notes: "共享官方 OAuth",
+    authTypeLabel: "官方 OAuth",
+    createdAt: "2026-06-24T09:00:00Z",
+    updatedAt: "2026-06-24T10:00:00Z",
+    authHash: "auth-old",
+    configHash: "config-old",
+    remoteProfileId: "remote-old",
+    remoteContentVersion: 1,
+    remoteContentHash: "hash-old",
+    remoteUpdatedAt: "2026-06-24T09:30:00Z",
+    codexUsage: null,
+    thirdPartyLatency: null,
+    thirdPartyUsage: null,
+  };
+  const initialSnapshot = {
+    targetDir: "/Users/example/.codex",
+    usingDefaultTargetDir: true,
+    targetExists: true,
+    targetAuthExists: true,
+    targetConfigExists: true,
+    targetUpdatedAt: "2026-06-24T10:00:00Z",
+    targetAuthTypeLabel: "官方 OAuth",
+    activeProfileId: null,
+    lastSelectedProfileId: null,
+    lastSwitchProfileId: null,
+    lastSwitchedAt: null,
+    codexUsageApiEnabled: false,
+    profiles: [initialProfile],
+  };
+  const updatedSnapshot = {
+    ...initialSnapshot,
+    profiles: [
+      {
+        ...initialProfile,
+        authHash: "auth-new",
+        configHash: "config-new",
+        updatedAt: "2026-06-24T11:00:00Z",
+      },
+    ],
+  };
+  const metadataSnapshot = {
+    ...updatedSnapshot,
+    profiles: [
+      {
+        ...updatedSnapshot.profiles[0],
+        remoteProfileId: "remote-new",
+        remoteContentVersion: 1,
+        remoteContentHash: "hash-new",
+        remoteUpdatedAt: "2026-06-24T11:00:00Z",
+      },
+    ],
+  };
+
+  invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+    if (command === "load_snapshot") return initialSnapshot;
+    if (command === "get_pac_proxy_status") {
+      return {
+        supported: false,
+        enabled: false,
+        pacUrl: "http://10.12.0.24/proxy.pac",
+        selectedPacKey: "jp",
+        pacOptions: [],
+        availableServices: [],
+        selectedServices: [],
+        services: [],
+        message: "PAC 状态尚未加载。",
+      };
+    }
+    if (command === "get_profile_document") {
+      expect(args).toEqual({ profileId: "local-shared-oauth" });
+      return {
+        id: "local-shared-oauth",
+        name: "ChatGPT Pro",
+        notes: "共享官方 OAuth",
+        authTypeLabel: "官方 OAuth",
+        createdAt: "2026-06-24T09:00:00Z",
+        updatedAt: "2026-06-24T10:00:00Z",
+        remoteProfileId: "remote-old",
+        remoteContentVersion: 1,
+        remoteContentHash: "hash-old",
+        remoteUpdatedAt: "2026-06-24T09:30:00Z",
+        authJson: '{"auth_mode":"chatgpt","tokens":{"refresh_token":"old-refresh"}}',
+        configToml: 'model = "gpt-5"\n',
+        loadedFromTarget: false,
+        hasTargetChanges: false,
+        readOnly: false,
+      };
+    }
+    if (command === "update_profile") {
+      expect(args).toEqual({
+        profileId: "local-shared-oauth",
+        payload: {
+          name: "ChatGPT Pro",
+          notes: "共享官方 OAuth",
+          authJson: '{"auth_mode":"chatgpt","tokens":{"refresh_token":"new-refresh"}}',
+          configToml: 'model = "gpt-5.5"\n',
+        },
+      });
+      return updatedSnapshot;
+    }
+    if (command === "set_profile_remote_metadata") {
+      expect(args).toEqual({
+        profileId: "local-shared-oauth",
+        remoteProfileId: "remote-new",
+        remoteContentVersion: 1,
+        remoteContentHash: "hash-new",
+        remoteUpdatedAt: "2026-06-24T11:00:00Z",
+      });
+      return metadataSnapshot;
+    }
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    const url = input.toString();
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/auth/me") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ user: { dingUserId: "Ding-B", name: "Bob" } }),
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => [
+          {
+            id: "remote-new",
+            name: "ChatGPT Pro",
+            description: "共享官方 OAuth",
+            createdAt: "2026-06-24T09:00:00Z",
+            updatedAt: "2026-06-24T11:00:00Z",
+            contentVersion: 1,
+            contentHash: "hash-new",
+            contentUpdatedAt: "2026-06-24T11:00:00Z",
+            files: ["auth.json", "config.toml"],
+          },
+        ],
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-new") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          id: "remote-new",
+          name: "ChatGPT Pro",
+          description: "共享官方 OAuth",
+          createdAt: "2026-06-24T09:00:00Z",
+          updatedAt: "2026-06-24T11:00:00Z",
+          contentVersion: 1,
+          contentHash: "hash-new",
+          contentUpdatedAt: "2026-06-24T11:00:00Z",
+          files: ["auth.json", "config.toml"],
+        }),
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-new/auth.json") {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => '{"auth_mode":"chatgpt","tokens":{"refresh_token":"new-refresh"}}',
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-new/config.toml") {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => 'model = "gpt-5.5"\n',
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  await import("../src/main");
+  await flushUi();
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="view-profile-details"][data-id="local-shared-oauth"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  await flushUi();
+  await flushUi();
+
+  expect(document.querySelector('[data-role="shared-version-status"]')?.textContent).toContain("关联同名配置并更新");
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="update-shared-profile-from-cloud"][data-id="local-shared-oauth"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  for (let i = 0; i < 12; i += 1) {
+    await flushUi();
+  }
+
+  expect(invokeMock).toHaveBeenCalledWith("set_profile_remote_metadata", {
+    profileId: "local-shared-oauth",
+    remoteProfileId: "remote-new",
+    remoteContentVersion: 1,
+    remoteContentHash: "hash-new",
+    remoteUpdatedAt: "2026-06-24T11:00:00Z",
+  });
+  expect(invokeMock).not.toHaveBeenCalledWith("restart_codex", undefined);
+  expect(document.body.textContent).toContain("已更新共享配置");
+});
+
+test("lays out local profile details in a tabbed overview / config view", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+
+  const snapshot = {
+    targetDir: "/Users/example/.codex",
+    usingDefaultTargetDir: true,
+    targetExists: true,
+    targetAuthExists: true,
+    targetConfigExists: true,
+    targetUpdatedAt: "2026-06-24T10:00:00Z",
+    targetAuthTypeLabel: "官方 OAuth",
+    activeProfileId: null,
+    lastSelectedProfileId: null,
+    lastSwitchProfileId: null,
+    lastSwitchedAt: null,
+    codexUsageApiEnabled: false,
+    profiles: [
+      {
+        id: "local-oauth",
+        name: "ChatGPT Pro",
+        notes: "自动从当前 Codex 配置生成",
+        authTypeLabel: "官方 OAuth",
+        createdAt: "2026-06-24T09:00:00Z",
+        updatedAt: "2026-06-24T10:00:00Z",
+        authHash: "auth-hash",
+        configHash: "config-hash",
+        remoteProfileId: null,
+        remoteContentVersion: null,
+        remoteContentHash: null,
+        remoteUpdatedAt: null,
+        codexUsage: null,
+        thirdPartyLatency: null,
+        thirdPartyUsage: null,
+      },
+    ],
+  };
+
+  invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+    if (command === "load_snapshot") return snapshot;
+    if (command === "get_pac_proxy_status") {
+      return {
+        supported: false,
+        enabled: false,
+        pacUrl: "http://10.12.0.24/proxy.pac",
+        selectedPacKey: "jp",
+        pacOptions: [],
+        availableServices: [],
+        selectedServices: [],
+        services: [],
+        message: "PAC 状态尚未加载。",
+      };
+    }
+    if (command === "get_profile_document") {
+      expect(args).toEqual({ profileId: "local-oauth" });
+      return {
+        id: "local-oauth",
+        name: "ChatGPT Pro",
+        notes: "自动从当前 Codex 配置生成",
+        authTypeLabel: "官方 OAuth",
+        createdAt: "2026-06-24T09:00:00Z",
+        updatedAt: "2026-06-24T10:00:00Z",
+        remoteProfileId: null,
+        remoteContentVersion: null,
+        remoteContentHash: null,
+        remoteUpdatedAt: null,
+        authJson: '{"auth_mode":"chatgpt"}',
+        configToml: 'model = "gpt-5.5"\n',
+        loadedFromTarget: false,
+        hasTargetChanges: false,
+        readOnly: false,
+      };
+    }
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  await import("../src/main");
+  await flushUi();
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="view-profile-details"][data-id="local-oauth"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  await flushUi();
+  await flushUi();
+
+  const layout = document.querySelector('[data-role="editor-detail-layout"]');
+
+  expect(layout).not.toBeNull();
+  // Tabbed detail view: tab bar first, then the active tab panel.
+  expect(layout?.children.item(0)?.getAttribute("data-role")).toBe("editor-detail-tabs");
+  expect(layout?.children.item(1)?.getAttribute("data-role")).toBe("editor-tab-panel");
+  expect(document.querySelector(".editor-sidebar-column")).toBeNull();
+
+  // 概览 tab is active by default: summary present, config panels hidden.
+  expect(document.querySelector('[data-role="editor-summary-grid"]')).not.toBeNull();
+  expect(document.querySelector('[data-role="editor-summary-section"] #editor-name')).not.toBeNull();
+  expect(document.querySelector('[data-role="editor-config-section"]')).toBeNull();
+
+  // Switching to 配置文件 reveals the auth/config editors.
+  document
+    .querySelector<HTMLButtonElement>('[data-action="editor-detail-config"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+
+  expect(document.querySelector('[data-role="editor-config-section"] #editor-auth-json')).not.toBeNull();
+  expect(document.querySelector('[data-role="editor-summary-section"]')).toBeNull();
 });
 
 test("writes back refreshed shared auth on startup when the active target changed", async () => {

@@ -3042,6 +3042,18 @@ impl ProfileManager {
         let existing_metadata = self.read_profile_metadata(&profile_dir)?;
         let normalized_config =
             normalize_config_toml_for_auth(auth_json, &repair_illegal_config_toml(config_toml))?;
+
+        // Guard: never let an automatic runtime capture flip a profile's auth type.
+        // codex's own OAuth login rewrites auth.json but leaves the previous
+        // third-party `[model_providers.*]` / `requires_openai_auth` routing in
+        // config.toml. Without this check, a routine usage refresh or a pre-switch
+        // capture would write that mismatched runtime state back into a clean
+        // profile, silently turning e.g. 官方 OAuth into 共生配置 / 第三方 API.
+        let incoming_auth_type = detect_auth_type_label(auth_json, &normalized_config)?;
+        if incoming_auth_type != existing_metadata.auth_type_label {
+            return Ok(());
+        }
+
         let next_auth_hash = auth_match_hash(auth_json)?;
         let next_config_hash = managed_config_hash(auth_json, &normalized_config)?;
         let preserved_codex_usage = if existing_metadata.auth_hash == next_auth_hash {
@@ -5649,6 +5661,23 @@ fn oauth_identity_payload(id_token: &str) -> Option<String> {
     ))
 }
 
+fn oauth_email(auth_json: &str) -> Option<String> {
+    let auth = serde_json::from_str::<serde_json::Value>(auth_json).ok()?;
+    auth.get("tokens")
+        .and_then(|value| value.as_object())
+        .and_then(|tokens| tokens.get("id_token"))
+        .and_then(|value| value.as_str())
+        .and_then(|id_token| {
+            let payload = id_token.split('.').nth(1)?;
+            let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
+            let json = serde_json::from_slice::<serde_json::Value>(&decoded).ok()?;
+            json.get("email")
+                .and_then(|value| value.as_str())
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+}
+
 fn oauth_account_id(auth_json: &str) -> Option<String> {
     let auth = serde_json::from_str::<serde_json::Value>(auth_json).ok()?;
     auth.get("tokens")
@@ -6667,6 +6696,11 @@ fn suggested_profile_name(auth_json: &str, config_toml: &str) -> Result<String, 
     let auth_type_label = detect_auth_type_label(auth_json, config_toml)?;
 
     if auth_type_label == "官方 OAuth" {
+        // Prefer the account email so a freshly logged-in OAuth account gets a
+        // recognizable name instead of an opaque account-UUID fragment.
+        if let Some(email) = oauth_email(auth_json) {
+            return Ok(email);
+        }
         if let Some(account_id) = oauth_account_id(auth_json) {
             if let Some(segment) = account_id
                 .split(['-', '_'])

@@ -1,5 +1,6 @@
 import { expect, test } from "vitest";
 import {
+  sharedProfileHasNewerRemote,
   sharedAuthWriteBackBase,
   shouldWriteBackSharedAuth,
 } from "../src/network-auth-sync";
@@ -49,6 +50,47 @@ test("skips shared auth write back when same-version hashes disagree", () => {
       id: "remote-1",
       contentVersion: 3,
       contentHash: "cloud-hash-v3",
+    },
+  )).toBe(false);
+});
+
+test("detects a newer shared center profile by version or hash", () => {
+  expect(sharedProfileHasNewerRemote(
+    {
+      remoteProfileId: "remote-1",
+      remoteContentVersion: 1,
+      remoteContentHash: "hash-v1",
+    },
+    {
+      id: "remote-1",
+      contentVersion: 2,
+      contentHash: "hash-v2",
+    },
+  )).toBe(true);
+
+  expect(sharedProfileHasNewerRemote(
+    {
+      remoteProfileId: "remote-1",
+      remoteContentVersion: null,
+      remoteContentHash: null,
+    },
+    {
+      id: "remote-1",
+      contentVersion: 2,
+      contentHash: "hash-v2",
+    },
+  )).toBe(true);
+
+  expect(sharedProfileHasNewerRemote(
+    {
+      remoteProfileId: "remote-1",
+      remoteContentVersion: 3,
+      remoteContentHash: "hash-v3",
+    },
+    {
+      id: "remote-1",
+      contentVersion: 3,
+      contentHash: "hash-v3",
     },
   )).toBe(false);
 });

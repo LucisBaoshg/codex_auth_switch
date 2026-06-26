@@ -23,6 +23,7 @@ export type EditorState = {
   readOnly: boolean;
   source: "local" | "network";
   newTab?: "manual-delta" | "manual-full";
+  detailTab?: "overview" | "config";
 };
 
 export type LocalShareDraft = {
@@ -71,6 +72,7 @@ theme = "system"
     readOnly: false,
     source: "local",
     newTab: "manual-delta",
+    detailTab: "overview",
   };
 }
 

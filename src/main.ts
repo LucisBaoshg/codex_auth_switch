@@ -56,6 +56,7 @@ import {
   type ShareVisibility,
 } from "./network-profile-utils";
 import {
+  sharedProfileHasNewerRemote,
   sharedAuthWriteBackBase,
   shouldWriteBackSharedAuth,
 } from "./network-auth-sync";
@@ -259,6 +260,7 @@ let flashTimeoutId: number | null = null;
 const promptedRemoteUpdateKeys = new Set<string>();
 let remoteUpdateCheckInFlight = false;
 let sharedAuthWriteBackInFlight = false;
+const checkedRemoteVersionProfileIds = new Set<string>();
 
 function setFlash(kind: FlashKind, text: string): void {
   state.flash = { kind, text };
@@ -753,6 +755,31 @@ async function openEditorForNewProfile(): Promise<void> {
   render();
 }
 
+async function openEditorForCurrentAccount(): Promise<void> {
+  let input: ProfileInput;
+
+  if (!isTauriRuntime) {
+    input = createMockCurrentInput();
+  } else {
+    setBusy(true);
+    try {
+      input = await desktopInvoke<ProfileInput>("get_target_profile_input");
+    } catch (error) {
+      setFlash("error", error instanceof Error ? error.message : String(error));
+      setBusy(false);
+      render();
+      return;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  state.editor = createEditorFromInput("fromCurrent", input);
+  state.view = "editor";
+  setFlash("info", "已载入当前 Codex 账号配置，确认名称后保存即可。");
+  render();
+}
+
 async function generateSymbioticFromExisting(profileId: string): Promise<void> {
   let document: ProfileDocument;
 
@@ -812,6 +839,12 @@ async function openEditorForProfile(profileId: string): Promise<void> {
     applyEditorDocument(document);
     state.view = "editor";
     clearFlash();
+    if (selectedProfile.remoteProfileId?.trim() && hasNetworkAccessToken(state.networkSharing)) {
+      const didLoadRemoteProfiles = await fetchNetworkProfiles({ silent: true, checkActiveProfileUpdate: false });
+      if (didLoadRemoteProfiles) {
+        checkedRemoteVersionProfileIds.add(selectedProfile.remoteProfileId.trim());
+      }
+    }
   } catch (error) {
     setFlash("error", error instanceof Error ? error.message : String(error));
   } finally {
@@ -904,7 +937,9 @@ async function saveEditorProfile(andSwitch: boolean): Promise<void> {
   }
 }
 
-async function fetchNetworkProfiles(options: { silent?: boolean } = {}): Promise<void> {
+async function fetchNetworkProfiles(
+  options: { silent?: boolean; checkActiveProfileUpdate?: boolean } = {},
+): Promise<boolean> {
   state.networkLoading = true;
   render();
   try {
@@ -916,11 +951,15 @@ async function fetchNetworkProfiles(options: { silent?: boolean } = {}): Promise
     state.networkProfiles = await res.json();
     state.networkAuthRequired = false;
     await syncActiveSharedAuthWriteBack();
-    await checkActiveSharedProfileUpdate();
+    if (options.checkActiveProfileUpdate ?? true) {
+      await checkActiveSharedProfileUpdate();
+    }
+    return true;
   } catch (error) {
     if (!options.silent) {
       setFlash("error", error instanceof Error ? error.message : String(error));
     }
+    return false;
   } finally {
     state.networkLoading = false;
     render();
@@ -1236,36 +1275,62 @@ function remoteUpdateVersion(profile: NetworkProfile): string {
   return typeof profile.contentVersion === "number" ? `v${profile.contentVersion}` : "最新版本";
 }
 
+function normalizedProfileName(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function findUniqueNetworkProfileByName(name: string): NetworkProfile | null {
+  const normalizedName = normalizedProfileName(name);
+  if (!normalizedName) {
+    return null;
+  }
+
+  const matches = state.networkProfiles.filter((profile) => normalizedProfileName(profile.name) === normalizedName);
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function sharedProfileReplacementTarget(
+  localProfile: ProfileSummary | null | undefined,
+): { localProfile: ProfileSummary; remoteProfile: NetworkProfile } | null {
+  const remoteProfileId = localProfile?.remoteProfileId?.trim();
+  if (!localProfile || !remoteProfileId) {
+    return null;
+  }
+
+  if (state.networkProfiles.some((profile) => profile.id === remoteProfileId)) {
+    return null;
+  }
+
+  const replacementRemoteProfile = findUniqueNetworkProfileByName(localProfile.name);
+  return replacementRemoteProfile ? { localProfile, remoteProfile: replacementRemoteProfile } : null;
+}
+
+function sharedProfileUpdateTarget(
+  localProfile: ProfileSummary | null | undefined,
+): { localProfile: ProfileSummary; remoteProfile: NetworkProfile } | null {
+  const remoteProfileId = localProfile?.remoteProfileId?.trim();
+  if (!localProfile || !remoteProfileId) {
+    return null;
+  }
+
+  const remoteProfile = state.networkProfiles.find((profile) => profile.id === remoteProfileId);
+  if (!remoteProfile || !sharedProfileHasNewerRemote(localProfile, remoteProfile)) {
+    return null;
+  }
+
+  return { localProfile, remoteProfile };
+}
+
 function activeSharedProfileUpdateTarget(): { activeProfile: ProfileSummary; remoteProfile: NetworkProfile } | null {
   const snapshot = state.snapshot;
   if (!snapshot?.activeProfileId) {
     return null;
   }
 
-  const activeProfile = snapshot.profiles.find((profile) => profile.id === snapshot.activeProfileId);
-  const remoteProfileId = activeProfile?.remoteProfileId?.trim();
-  if (!activeProfile || !remoteProfileId) {
-    return null;
-  }
-
-  const remoteProfile = state.networkProfiles.find((profile) => profile.id === remoteProfileId);
-  if (!remoteProfile) {
-    return null;
-  }
-
-  const localVersion = activeProfile.remoteContentVersion;
-  const remoteVersion = remoteProfile.contentVersion;
-  if (typeof localVersion === "number" && typeof remoteVersion === "number" && remoteVersion > localVersion) {
-    return { activeProfile, remoteProfile };
-  }
-
-  const localHash = activeProfile.remoteContentHash?.trim();
-  const remoteHash = remoteProfile.contentHash?.trim();
-  if (localHash && remoteHash && localHash !== remoteHash) {
-    return { activeProfile, remoteProfile };
-  }
-
-  return null;
+  const target = sharedProfileUpdateTarget(
+    snapshot.profiles.find((profile) => profile.id === snapshot.activeProfileId),
+  );
+  return target ? { activeProfile: target.localProfile, remoteProfile: target.remoteProfile } : null;
 }
 
 async function syncActiveSharedAuthWriteBack(): Promise<void> {
@@ -1359,10 +1424,12 @@ function remoteUpdatePromptKey(profile: NetworkProfile): string {
   ].join(":");
 }
 
-async function updateActiveSharedProfileFromCloud(
-  activeProfile: ProfileSummary,
+async function updateLocalSharedProfileFromCloud(
+  localProfile: ProfileSummary,
   remoteProfile: NetworkProfile,
+  options: { restartIfActive: boolean },
 ): Promise<void> {
+  const isActiveProfile = state.snapshot?.activeProfileId === localProfile.id;
   state.busy = true;
   state.busyDialog = {
     title: "更新共享配置",
@@ -1373,14 +1440,41 @@ async function updateActiveSharedProfileFromCloud(
   try {
     const document = await fetchNetworkProfileDocument(remoteProfile.id);
     const updateSnapshot = await desktopInvoke<AppSnapshot>("update_profile", {
-      profileId: activeProfile.id,
+      profileId: localProfile.id,
       payload: profileInputFromDocument(document),
     });
     setSnapshot(updateSnapshot);
 
-    const metadataSnapshot = await persistRemoteMetadata(activeProfile.id, document);
+    const metadataSnapshot = await persistRemoteMetadata(localProfile.id, document);
     if (metadataSnapshot) {
       setSnapshot(metadataSnapshot);
+    }
+
+    if (state.editor.profileId === localProfile.id) {
+      const refreshedProfile =
+        state.snapshot?.profiles.find((profile) => profile.id === localProfile.id) ?? localProfile;
+      applyEditorDocument({
+        ...document,
+        id: localProfile.id,
+        name: refreshedProfile.name,
+        notes: refreshedProfile.notes,
+        authTypeLabel: refreshedProfile.authTypeLabel,
+        createdAt: refreshedProfile.createdAt,
+        updatedAt: refreshedProfile.updatedAt,
+        remoteProfileId: refreshedProfile.remoteProfileId ?? document.remoteProfileId ?? null,
+        remoteContentVersion: refreshedProfile.remoteContentVersion ?? document.remoteContentVersion ?? null,
+        remoteContentHash: refreshedProfile.remoteContentHash ?? document.remoteContentHash ?? null,
+        remoteUpdatedAt: refreshedProfile.remoteUpdatedAt ?? document.remoteUpdatedAt ?? null,
+        loadedFromTarget: false,
+        hasTargetChanges: false,
+        readOnly: false,
+        source: "local",
+      });
+    }
+
+    if (!options.restartIfActive || !isActiveProfile) {
+      setFlash("success", `已更新共享配置：${document.name} ${remoteUpdateVersion(remoteProfile)}。`);
+      return;
     }
 
     state.busyDialog = {
@@ -1389,8 +1483,8 @@ async function updateActiveSharedProfileFromCloud(
     };
     render();
 
-    const switchSnapshot = await desktopInvoke<AppSnapshot>("switch_profile", { profileId: activeProfile.id });
-    state.selectedProfileId = activeProfile.id;
+    const switchSnapshot = await desktopInvoke<AppSnapshot>("switch_profile", { profileId: localProfile.id });
+    state.selectedProfileId = localProfile.id;
     setSnapshot(switchSnapshot);
 
     state.busyDialog = {
@@ -1408,6 +1502,13 @@ async function updateActiveSharedProfileFromCloud(
     state.busyDialog = null;
     render();
   }
+}
+
+async function updateActiveSharedProfileFromCloud(
+  activeProfile: ProfileSummary,
+  remoteProfile: NetworkProfile,
+): Promise<void> {
+  await updateLocalSharedProfileFromCloud(activeProfile, remoteProfile, { restartIfActive: true });
 }
 
 async function checkActiveSharedProfileUpdate(): Promise<void> {
@@ -2576,6 +2677,11 @@ function render(): void {
     content = renderEditorPage({
       snapshot: state.snapshot,
       editor: state.editor,
+      networkProfiles: state.networkProfiles,
+      hasNetworkAccessToken: hasNetworkAccessToken(state.networkSharing),
+      remoteVersionCheckAttempted: state.editor.remoteProfileId
+        ? checkedRemoteVersionProfileIds.has(state.editor.remoteProfileId)
+        : false,
       busy: state.busy,
       pendingActions: state.pendingActions,
     });
@@ -3200,8 +3306,34 @@ function bindEvents(): void {
         await generateSymbioticFromExisting(button.dataset.id);
       } else if (action === "new-profile") {
         await openEditorForNewProfile();
+      } else if (action === "save-current-account") {
+        await openEditorForCurrentAccount();
       } else if (action === "view-profile-details" && button.dataset.id) {
         await openEditorForProfile(button.dataset.id);
+      } else if (action === "update-shared-profile-from-cloud" && button.dataset.id) {
+        const localProfile = state.snapshot?.profiles.find((profile) => profile.id === button.dataset.id);
+        if (localProfile?.remoteProfileId?.trim() && !state.networkProfiles.some((profile) => profile.id === localProfile.remoteProfileId)) {
+          const didLoadRemoteProfiles = await fetchNetworkProfiles({ checkActiveProfileUpdate: false });
+          if (!didLoadRemoteProfiles) {
+            return;
+          }
+        }
+        const replacementTarget = sharedProfileReplacementTarget(localProfile);
+        if (replacementTarget) {
+          await updateLocalSharedProfileFromCloud(replacementTarget.localProfile, replacementTarget.remoteProfile, {
+            restartIfActive: true,
+          });
+          return;
+        }
+        const target = sharedProfileUpdateTarget(localProfile);
+        if (!target) {
+          setFlash("info", "当前配置已经是共享中心最新版。");
+          render();
+        } else {
+          await updateLocalSharedProfileFromCloud(target.localProfile, target.remoteProfile, {
+            restartIfActive: true,
+          });
+        }
       } else if (action === "switch" && button.dataset.id && button.dataset.name) {
         await switchProfile(button.dataset.id, button.dataset.name);
       } else if (action === "delete-profile" && button.dataset.id && button.dataset.name) {
@@ -3236,12 +3368,22 @@ function bindEvents(): void {
         }
         state.editor.newTab = "manual-full";
         render();
+      } else if (action === "editor-detail-overview") {
+        state.editor.detailTab = "overview";
+        render();
+      } else if (action === "editor-detail-config") {
+        state.editor.detailTab = "config";
+        render();
       } else if (action === "refresh-network-in-editor") {
         if (!state.networkSharing.token.trim()) {
           state.networkAuthRequired = true;
           render();
         } else {
-          await fetchNetworkProfiles();
+          const remoteProfileId = state.editor.remoteProfileId?.trim();
+          const didLoadRemoteProfiles = await fetchNetworkProfiles({ checkActiveProfileUpdate: false });
+          if (remoteProfileId && didLoadRemoteProfiles) {
+            checkedRemoteVersionProfileIds.add(remoteProfileId);
+          }
         }
       } else if (action === "import-network-profile-to-editor" && button.dataset.id) {
         await importNetworkProfileToEditor(button.dataset.id);
