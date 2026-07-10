@@ -2930,15 +2930,124 @@ impl ProfileManager {
         }
     }
 
+    fn inspect_target_config_for_snapshot(
+        &self,
+        profiles: &[ProfileSummary],
+    ) -> Result<
+        (
+            Option<ProfileSummary>,
+            Option<String>,
+            Vec<ConfigRecoveryNotice>,
+        ),
+        AppError,
+    > {
+        let mut notices = Vec::new();
+        if !self.target_auth_path().exists() || !self.target_config_path().exists() {
+            return Ok((None, None, notices));
+        }
+
+        let auth_path = self.target_auth_path();
+        let auth_json = match fs::read_to_string(&auth_path) {
+            Ok(contents) => contents,
+            Err(error) => {
+                let notice = stable_invalid_file_notice(
+                    ConfigRecoveryKind::TargetAuth,
+                    &auth_path,
+                    error.to_string().as_bytes(),
+                    format!("活动 auth.json 无法读取：{error}"),
+                    "请检查文件权限、从备份恢复，或切换到一套有效档案。".into(),
+                );
+                record_pending_notices(&self.app_data_dir, &[notice.clone()]);
+                notices.push(notice);
+                return Ok((None, None, notices));
+            }
+        };
+        if let Err(error) = validate_auth_json(&auth_json) {
+            let notice = stable_invalid_file_notice(
+                ConfigRecoveryKind::TargetAuth,
+                &auth_path,
+                auth_json.as_bytes(),
+                format!("活动 auth.json 无效：{error}"),
+                "请从备份恢复、手工修复，或切换到一套有效档案。".into(),
+            );
+            record_pending_notices(&self.app_data_dir, &[notice.clone()]);
+            notices.push(notice);
+            return Ok((None, None, notices));
+        }
+
+        let config_path = self.target_config_path();
+        let config_toml = match fs::read_to_string(&config_path) {
+            Ok(contents) => contents,
+            Err(error) => {
+                let notice = stable_invalid_file_notice(
+                    ConfigRecoveryKind::TargetConfig,
+                    &config_path,
+                    error.to_string().as_bytes(),
+                    format!("活动 config.toml 无法读取：{error}"),
+                    "请检查文件权限、从备份恢复，或切换到一套有效档案。".into(),
+                );
+                record_pending_notices(&self.app_data_dir, &[notice.clone()]);
+                notices.push(notice);
+                return Ok((None, None, notices));
+            }
+        };
+        if let Err(error) = validate_config_toml(&config_toml) {
+            let notice = stable_invalid_file_notice(
+                ConfigRecoveryKind::TargetConfig,
+                &config_path,
+                config_toml.as_bytes(),
+                format!("活动 config.toml 无效：{error}"),
+                "请从备份恢复、手工修复，或切换到一套有效档案。".into(),
+            );
+            record_pending_notices(&self.app_data_dir, &[notice.clone()]);
+            notices.push(notice);
+            return Ok((None, None, notices));
+        }
+
+        let auth_hash = auth_match_hash(&auth_json)?;
+        let config_hash = managed_config_hash(&auth_json, &config_toml)?;
+        let marker = self.read_target_marker_with_recovery(&mut notices);
+        let active_profile = marker
+            .as_ref()
+            .filter(|marker| marker.auth_hash == auth_hash && marker.config_hash == config_hash)
+            .and_then(|marker| {
+                profiles
+                    .iter()
+                    .find(|profile| profile.id == marker.profile_id)
+            })
+            .or_else(|| {
+                profiles.iter().find(|profile| {
+                    profile.auth_hash == auth_hash && profile.config_hash == config_hash
+                })
+            })
+            .or_else(|| {
+                self.state
+                    .last_switch_profile_id
+                    .as_deref()
+                    .and_then(|profile_id| {
+                        profiles.iter().find(|profile| {
+                            profile.id == profile_id && profile.auth_hash == auth_hash
+                        })
+                    })
+            })
+            .cloned();
+        let auth_type_label = Some(detect_auth_type_label(&auth_json, &config_toml)?);
+
+        Ok((active_profile, auth_type_label, notices))
+    }
+
     pub fn snapshot(&self) -> Result<AppSnapshot, AppError> {
         let default_target_dir = default_codex_target_dir()?;
         let (profiles, profile_recovery_notices) = self.collect_profiles_with_recovery()?;
-        let active_profile_id = self
-            .detect_active_profile_from_profiles(&profiles)?
-            .map(|profile| profile.id);
+        let (active_profile, target_auth_type_label, target_recovery_notices) =
+            self.inspect_target_config_for_snapshot(&profiles)?;
+        let active_profile_id = active_profile.map(|profile| profile.id);
         let config_recovery_notices = merge_recovery_notices(
-            self.pending_config_recovery_notices(),
-            profile_recovery_notices,
+            merge_recovery_notices(
+                self.pending_config_recovery_notices(),
+                profile_recovery_notices,
+            ),
+            target_recovery_notices,
         );
 
         Ok(AppSnapshot {
@@ -2948,7 +3057,7 @@ impl ProfileManager {
             target_auth_exists: self.target_auth_path().exists(),
             target_config_exists: self.target_config_path().exists(),
             target_updated_at: self.resolve_target_updated_at()?,
-            target_auth_type_label: self.resolve_target_auth_type_label()?,
+            target_auth_type_label,
             active_profile_id,
             last_selected_profile_id: self.state.last_selected_profile_id.clone(),
             last_switch_profile_id: self.state.last_switch_profile_id.clone(),
@@ -3376,17 +3485,6 @@ impl ProfileManager {
         Ok(timestamps.into_iter().max())
     }
 
-    fn resolve_target_auth_type_label(&self) -> Result<Option<String>, AppError> {
-        if !self.target_auth_path().exists() || !self.target_config_path().exists() {
-            return Ok(None);
-        }
-
-        Ok(Some(detect_auth_type_label(
-            &fs::read_to_string(self.target_auth_path())?,
-            &fs::read_to_string(self.target_config_path())?,
-        )?))
-    }
-
     fn read_target_marker(&self) -> Result<Option<TargetMarkerFile>, AppError> {
         let marker_path = self.target_marker_path();
         if !marker_path.exists() {
@@ -3398,13 +3496,63 @@ impl ProfileManager {
         )?))
     }
 
+    fn read_target_marker_with_recovery(
+        &self,
+        notices: &mut Vec<ConfigRecoveryNotice>,
+    ) -> Option<TargetMarkerFile> {
+        let marker_path = self.target_marker_path();
+        if !marker_path.exists() {
+            return None;
+        }
+
+        let contents = match fs::read_to_string(&marker_path) {
+            Ok(contents) => contents,
+            Err(error) => {
+                let notice = stable_invalid_file_notice(
+                    ConfigRecoveryKind::TargetMarker,
+                    &marker_path,
+                    error.to_string().as_bytes(),
+                    format!("活动档案标记无法读取：{error}"),
+                    "请检查文件权限；应用仍会尝试按配置内容识别当前档案。".into(),
+                );
+                record_pending_notices(&self.app_data_dir, &[notice.clone()]);
+                notices.push(notice);
+                return None;
+            }
+        };
+
+        match serde_json::from_str::<TargetMarkerFile>(&contents) {
+            Ok(marker) => Some(marker),
+            Err(error) => {
+                let mut notice = stable_invalid_file_notice(
+                    ConfigRecoveryKind::TargetMarker,
+                    &marker_path,
+                    contents.as_bytes(),
+                    format!("活动档案标记无法解析：{error}"),
+                    "无需手工修复；下次成功切换档案时会重新生成标记。".into(),
+                );
+                match quarantine_corrupt_file(
+                    &self.app_data_dir,
+                    &marker_path,
+                    "target/codex-auth-switch",
+                ) {
+                    Ok(recovery_path) => {
+                        notice.recovery_path = Some(recovery_path.to_string_lossy().to_string());
+                    }
+                    Err(quarantine_error) => {
+                        notice.summary =
+                            format!("活动档案标记无法解析，且未能隔离：{quarantine_error}");
+                    }
+                }
+                record_pending_notices(&self.app_data_dir, &[notice.clone()]);
+                notices.push(notice);
+                None
+            }
+        }
+    }
+
     fn persist_target_marker(&self, marker: TargetMarkerFile) -> Result<(), AppError> {
-        fs::create_dir_all(&self.target_dir)?;
-        fs::write(
-            self.target_marker_path(),
-            serde_json::to_string_pretty(&marker)?,
-        )?;
-        Ok(())
+        atomic_write_json(&self.target_marker_path(), &marker)
     }
 
     fn clear_target_marker(&self) -> Result<(), AppError> {

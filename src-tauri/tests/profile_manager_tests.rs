@@ -316,6 +316,82 @@ fn snapshot_quarantines_nul_filled_metadata_and_keeps_valid_profiles() {
 }
 
 #[test]
+fn snapshot_quarantines_corrupt_target_marker_and_detects_profile_by_hash() {
+    let (_app_dir, target_dir, mut manager) = temp_manager();
+    let profile = manager
+        .import_profile(recovery_profile_input("Current", "sk-current"))
+        .unwrap();
+    manager.switch_profile(&profile.id).unwrap();
+    fs::write(target_dir.path().join("codex-auth-switch.json"), b"\0\0\0").unwrap();
+
+    let snapshot = manager
+        .snapshot()
+        .expect("bad marker must not stop snapshot");
+
+    assert_eq!(
+        snapshot.active_profile_id.as_deref(),
+        Some(profile.id.as_str())
+    );
+    assert!(snapshot
+        .config_recovery_notices
+        .iter()
+        .any(|notice| notice.kind == ConfigRecoveryKind::TargetMarker));
+    assert!(!target_dir.path().join("codex-auth-switch.json").exists());
+}
+
+#[test]
+fn snapshot_reports_invalid_live_auth_without_modifying_it() {
+    let (_app_dir, target_dir, manager) = temp_manager();
+    fs::write(target_dir.path().join("auth.json"), "{broken").unwrap();
+    fs::write(
+        target_dir.path().join("config.toml"),
+        official_config_toml("gpt-5"),
+    )
+    .unwrap();
+
+    let snapshot = manager
+        .snapshot()
+        .expect("bad live auth must degrade to unknown");
+
+    assert_eq!(snapshot.active_profile_id, None);
+    assert_eq!(snapshot.target_auth_type_label, None);
+    assert_eq!(
+        fs::read_to_string(target_dir.path().join("auth.json")).unwrap(),
+        "{broken"
+    );
+    assert!(snapshot
+        .config_recovery_notices
+        .iter()
+        .any(|notice| notice.kind == ConfigRecoveryKind::TargetAuth));
+}
+
+#[test]
+fn snapshot_reports_invalid_live_config_without_modifying_it() {
+    let (_app_dir, target_dir, manager) = temp_manager();
+    fs::write(
+        target_dir.path().join("auth.json"),
+        api_key_auth_json("sk-live"),
+    )
+    .unwrap();
+    fs::write(target_dir.path().join("config.toml"), "model = [broken").unwrap();
+
+    let snapshot = manager
+        .snapshot()
+        .expect("bad live config must degrade to unknown");
+
+    assert_eq!(snapshot.active_profile_id, None);
+    assert_eq!(snapshot.target_auth_type_label, None);
+    assert_eq!(
+        fs::read_to_string(target_dir.path().join("config.toml")).unwrap(),
+        "model = [broken"
+    );
+    assert!(snapshot
+        .config_recovery_notices
+        .iter()
+        .any(|notice| notice.kind == ConfigRecoveryKind::TargetConfig));
+}
+
+#[test]
 fn delete_profile_rejects_current_codex_profile() {
     let (app_dir, _target_dir, mut manager) = temp_manager();
     let profile = manager

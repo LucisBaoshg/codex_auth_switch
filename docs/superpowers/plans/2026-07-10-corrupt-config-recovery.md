@@ -301,7 +301,7 @@ git commit -m "fix: recover corrupt profile metadata"
 - Modify: `src-tauri/tests/profile_manager_tests.rs`
 - Modify: `src-tauri/src/core/mod.rs:2552-2585,2798-2824,3258-3270`
 
-- [ ] **Step 1: 写入损坏标记回归测试**
+- [x] **Step 1: 写入损坏标记回归测试**
 
 ```rust
 #[test]
@@ -318,7 +318,7 @@ fn snapshot_quarantines_corrupt_target_marker_and_detects_profile_by_hash() {
 }
 ```
 
-- [ ] **Step 2: 写入无效活动配置回归测试**
+- [x] **Step 2: 写入无效活动配置回归测试**
 
 ```rust
 #[test]
@@ -338,25 +338,25 @@ fn snapshot_reports_invalid_live_auth_without_modifying_it() {
 
 另加同形的无效 `config.toml` 测试，期望 `TargetConfig`。
 
-- [ ] **Step 3: 运行三项测试确认失败**
+- [x] **Step 3: 运行三项测试确认失败**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml --test profile_manager_tests 'snapshot_quarantines_corrupt_target_marker|snapshot_reports_invalid_live' -- --nocapture`
 
 Expected: FAIL，当前快照传播 JSON/TOML 错误。
 
-- [ ] **Step 4: 实现活动配置预检和标记隔离**
+- [x] **Step 4: 实现活动配置预检和标记隔离**
 
 增加 `inspect_target_config`，读取存在的活动文件后先调用 `validate_auth_json` 和 `validate_config_toml`。无效时用文件路径和 SHA-256 内容指纹构造稳定事件，并返回未知活动状态；不要移动或写回文件。有效时才计算哈希、识别档案和认证类型。
 
 保留操作命令使用的严格 `read_target_marker`，另加启动快照专用的 `read_target_marker_with_recovery(&mut notices)`；解析失败时隔离到应用恢复目录后按 `None` 继续，使档案哈希匹配仍能工作。这样不会扩大非启动操作的错误语义。
 
-- [ ] **Step 5: 运行所有配置恢复 Rust 测试**
+- [x] **Step 5: 运行所有配置恢复 Rust 测试**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml --test profile_manager_tests snapshot_ -- --nocapture`
 
 Expected: 新增测试和既有 snapshot 测试全部 PASS。
 
-- [ ] **Step 6: 提交活动配置恢复**
+- [x] **Step 6: 提交活动配置恢复**
 
 ```bash
 git add src-tauri/src/core/mod.rs src-tauri/tests/profile_manager_tests.rs
