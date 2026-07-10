@@ -177,7 +177,7 @@ git commit -m "feat: add config recovery storage"
 - Modify: `src-tauri/tests/menu_bar_tests.rs`
 - Modify: `src-tauri/src/core/mod.rs:797-878,2552-2585,2808-2853`
 
-- [ ] **Step 1: 写入 state.json 失败测试**
+- [x] **Step 1: 写入 state.json 失败测试**
 
 ```rust
 #[test]
@@ -198,13 +198,13 @@ fn load_or_default_quarantines_corrupt_state_and_keeps_running() {
 }
 ```
 
-- [ ] **Step 2: 运行单测确认失败**
+- [x] **Step 2: 运行单测确认失败**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml --test profile_manager_tests load_or_default_quarantines_corrupt_state_and_keeps_running -- --nocapture`
 
 Expected: FAIL，当前返回 `Failed to process JSON data`。
 
-- [ ] **Step 3: 实现宽容 state.json 载入**
+- [x] **Step 3: 实现宽容 state.json 载入**
 
 给 `ProfileManager` 增加 `startup_recovery_notices: Vec<ConfigRecoveryNotice>`，并在 `new` 中初始化为空列表。`load_or_default` 将读取分成不存在、读取失败、解析失败和成功四路：解析失败才隔离，读取失败只生成告警；隔离成功后才原子写入默认状态。新增：
 
@@ -223,13 +223,13 @@ pub fn acknowledge_config_recovery(&self, notice_ids: &[String]) -> Result<(), A
 
 `persist_state` 改用 `atomic_write_json(self.state_path(), &self.state)`。
 
-- [ ] **Step 4: 运行 state.json 单测**
+- [x] **Step 4: 运行 state.json 单测**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml --test profile_manager_tests load_or_default_quarantines_corrupt_state_and_keeps_running -- --nocapture`
 
 Expected: PASS。
 
-- [ ] **Step 5: 写入空字节 meta.json 失败测试**
+- [x] **Step 5: 写入空字节 meta.json 失败测试**
 
 ```rust
 fn recovery_profile_input(name: &str, api_key: &str) -> ProfileInput {
@@ -261,13 +261,13 @@ fn snapshot_quarantines_nul_filled_metadata_and_keeps_valid_profiles() {
 }
 ```
 
-- [ ] **Step 6: 运行 meta.json 单测确认失败**
+- [x] **Step 6: 运行 meta.json 单测确认失败**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml --test profile_manager_tests snapshot_quarantines_nul_filled_metadata_and_keeps_valid_profiles -- --nocapture`
 
 Expected: FAIL，当前 `snapshot()` 返回 JSON 解析错误。
 
-- [ ] **Step 7: 实现统一宽容档案扫描**
+- [x] **Step 7: 实现统一宽容档案扫描**
 
 实现私有 `collect_profiles_with_recovery() -> Result<(Vec<ProfileSummary>, Vec<ConfigRecoveryNotice>), AppError>`：成功解析的元数据加入结果；解析失败的 `meta.json` 被隔离并记录；读取失败只记录并跳过；缺少元数据继续沿用现有静默跳过。`list_profiles` 只返回元组第一项，`snapshot` 先扫描一次并把同一列表传入 `detect_active_profile_from_profiles`，避免二次扫描提前吞掉恢复事件。
 
@@ -280,7 +280,7 @@ pub config_recovery_notices: Vec<ConfigRecoveryNotice>,
 
 同时给 `src-tauri/tests/menu_bar_tests.rs` 中的 `AppSnapshot` 基础构造器补上 `config_recovery_notices: Vec::new()`；其余使用结构体更新语法的测试自动继承该字段。
 
-- [ ] **Step 8: 增加不重复备份测试并运行目标测试**
+- [x] **Step 8: 增加不重复备份测试并运行目标测试**
 
 第二次调用 `snapshot()`，断言恢复目录中的 `meta.corrupt-*` 数量仍为 1，且持久化待确认事件仍只有一个。
 
@@ -288,7 +288,7 @@ Run: `cargo test --manifest-path src-tauri/Cargo.toml --test profile_manager_tes
 
 Expected: 相关测试 PASS。
 
-- [ ] **Step 9: 提交 state/meta 恢复**
+- [x] **Step 9: 提交 state/meta 恢复**
 
 ```bash
 git add src-tauri/src/core/mod.rs src-tauri/tests/profile_manager_tests.rs src-tauri/tests/menu_bar_tests.rs
