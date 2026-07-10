@@ -41,10 +41,7 @@ fn pending_notices_path(app_data_dir: &Path) -> PathBuf {
     recovery_dir(app_data_dir).join(PENDING_NOTICES_FILE)
 }
 
-pub(super) fn atomic_write_json<T: Serialize>(
-    path: &Path,
-    value: &T,
-) -> Result<(), AppError> {
+pub(super) fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), AppError> {
     let parent = path.parent().ok_or_else(|| {
         AppError::Message(format!(
             "Cannot write JSON without a parent directory: {}",
@@ -91,10 +88,8 @@ fn replace_file(temp_path: &Path, target_path: &Path) -> Result<(), AppError> {
         return Ok(());
     }
 
-    let backup_path = target_path.with_extension(format!(
-        "replace-{}.bak",
-        Uuid::new_v4().simple()
-    ));
+    let backup_path =
+        target_path.with_extension(format!("replace-{}.bak", Uuid::new_v4().simple()));
     fs::rename(target_path, &backup_path)?;
     match fs::rename(temp_path, target_path) {
         Ok(()) => {
@@ -128,17 +123,11 @@ pub(super) fn read_pending_notices(app_data_dir: &Path) -> Vec<ConfigRecoveryNot
     serde_json::from_slice(&contents).unwrap_or_default()
 }
 
-pub(super) fn record_pending_notices(
-    app_data_dir: &Path,
-    notices: &[ConfigRecoveryNotice],
-) {
+pub(super) fn record_pending_notices(app_data_dir: &Path, notices: &[ConfigRecoveryNotice]) {
     if notices.is_empty() {
         return;
     }
-    let merged = merge_recovery_notices(
-        read_pending_notices(app_data_dir),
-        notices.to_vec(),
-    );
+    let merged = merge_recovery_notices(read_pending_notices(app_data_dir), notices.to_vec());
     let _ = atomic_write_json(&pending_notices_path(app_data_dir), &merged);
 }
 
@@ -247,8 +236,7 @@ mod tests {
         let source = app_dir.path().join("meta.json");
         std::fs::write(&source, [0_u8; 32]).unwrap();
 
-        let recovered =
-            quarantine_corrupt_file(app_dir.path(), &source, "profile-1/meta").unwrap();
+        let recovered = quarantine_corrupt_file(app_dir.path(), &source, "profile-1/meta").unwrap();
 
         assert!(!source.exists());
         assert_eq!(std::fs::read(recovered).unwrap(), vec![0_u8; 32]);
