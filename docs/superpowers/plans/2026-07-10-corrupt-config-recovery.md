@@ -31,7 +31,7 @@
 - Create: `src-tauri/src/core/config_recovery.rs`
 - Modify: `src-tauri/src/core/mod.rs:1-35`
 
-- [ ] **Step 1: 写入失败测试**
+- [x] **Step 1: 写入失败测试**
 
 先创建 `config_recovery.rs`，只放测试模块；测试固定恢复事件去重、损坏文件隔离和原子写入：
 
@@ -88,13 +88,13 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 运行测试并确认按预期失败**
+- [x] **Step 2: 运行测试并确认按预期失败**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml config_recovery::tests -- --nocapture`
 
 Expected: FAIL，错误包含 `cannot find type ConfigRecoveryNotice` 或 `cannot find function atomic_write_json`。
 
-- [ ] **Step 3: 实现最小恢复模块**
+- [x] **Step 3: 实现最小恢复模块**
 
 在 `core/mod.rs` 加入 `mod config_recovery;` 和公开导出，然后在新模块实现以下契约：
 
@@ -157,13 +157,13 @@ pub(super) fn stable_invalid_file_notice(
 
 临时文件名使用 `.<filename>.<uuid>.tmp`，写完调用 `sync_all`。Unix 用同目录 `rename` 覆盖；Windows 在唯一备份名下保留旧目标，完成替换后删除备份，替换失败时恢复旧目标。待确认日志固定为 `recovery/pending-notices.json`，读取损坏日志时返回空列表而不是传播错误。
 
-- [ ] **Step 4: 运行模块测试**
+- [x] **Step 4: 运行模块测试**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml config_recovery::tests -- --nocapture`
 
 Expected: 3 tests PASS。
 
-- [ ] **Step 5: 提交基础设施**
+- [x] **Step 5: 提交基础设施**
 
 ```bash
 git add src-tauri/src/core/config_recovery.rs src-tauri/src/core/mod.rs

@@ -14,10 +14,12 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 use uuid::Uuid;
 
+mod config_recovery;
 mod pac_proxy;
 mod restart;
 mod updates;
 
+pub use config_recovery::{ConfigRecoveryKind, ConfigRecoveryNotice};
 pub use pac_proxy::{
     get_pac_proxy_status, pac_proxy_status_from_macos_services,
     pac_proxy_status_from_macos_services_with_selection,
