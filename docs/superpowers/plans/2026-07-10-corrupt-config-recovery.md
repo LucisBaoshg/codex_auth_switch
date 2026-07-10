@@ -592,7 +592,7 @@ git commit -m "feat: notify users about recovered config"
 - 主工作区所有当前已修改文件
 - 本计划产生的实现文件
 
-- [ ] **Step 1: 记录两个工作区状态**
+- [x] **Step 1: 记录两个工作区状态**
 
 Run in feature worktree: `git status --short && git log --oneline main..HEAD`
 
@@ -600,7 +600,7 @@ Run in main workspace: `git status --short`
 
 Expected: 功能工作树干净；主工作区只包含用户原有修改。
 
-- [ ] **Step 2: 提交用户原有修改**
+- [x] **Step 2: 提交用户原有修改**
 
 在主工作区逐项检查 `git diff --check` 和差异内容，确认没有临时产物后，只暂存用户原有修改并提交：
 
@@ -609,13 +609,13 @@ git add src/main.ts src/profile-editor-renderers.ts src/profile-list-renderers.t
 git commit -m "feat: preserve local workspace updates"
 ```
 
-- [ ] **Step 3: 合并功能分支并解决重叠**
+- [x] **Step 3: 合并功能分支并解决重叠**
 
 Run: `git merge --no-ff codex/corrupt-config-recovery`
 
 Expected: 自动合并或只在 `src/main.ts`、`tests/sidebar-layout.test.ts` 等真实重叠处产生冲突。逐段同时保留用户功能与配置恢复逻辑，不接受整文件覆盖。
 
-- [ ] **Step 4: 在合并结果上重新验证**
+- [x] **Step 4: 在合并结果上重新验证**
 
 Run: `npm install --include=dev && npm test && npm run build`
 
@@ -625,7 +625,7 @@ Run: `npm --prefix website install --include=dev && npm --prefix website test`
 
 Expected: 桌面前端、Rust 和 website 测试全部 PASS。
 
-- [ ] **Step 5: 完成合并提交**
+- [x] **Step 5: 完成合并提交**
 
 如果合并产生冲突，解决后运行：
 

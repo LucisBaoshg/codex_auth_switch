@@ -810,10 +810,18 @@ pub struct ProfileManager {
     startup_recovery_notices: Vec<ConfigRecoveryNotice>,
 }
 
+struct TargetConfigSnapshot {
+    active_profile: Option<ProfileSummary>,
+    auth_type_label: Option<String>,
+    recovery_notices: Vec<ConfigRecoveryNotice>,
+}
+
 impl ProfileManager {
     pub fn new(app_data_dir: PathBuf, target_dir: PathBuf) -> Result<Self, AppError> {
-        let mut state = StateFile::default();
-        state.target_dir = Some(target_dir.to_string_lossy().to_string());
+        let state = StateFile {
+            target_dir: Some(target_dir.to_string_lossy().to_string()),
+            ..StateFile::default()
+        };
 
         let manager = Self {
             app_data_dir,
@@ -859,7 +867,7 @@ impl ProfileManager {
                                 );
                             }
                         }
-                        record_pending_notices(&app_data_dir, &[notice.clone()]);
+                        record_pending_notices(&app_data_dir, std::slice::from_ref(&notice));
                         startup_recovery_notices.push(notice);
                         StateFile::default()
                     }
@@ -872,7 +880,7 @@ impl ProfileManager {
                         format!("state.json 无法读取：{error}"),
                         "请备份原文件并检查文件权限，然后确认 Codex 目标目录。".into(),
                     );
-                    record_pending_notices(&app_data_dir, &[notice.clone()]);
+                    record_pending_notices(&app_data_dir, std::slice::from_ref(&notice));
                     startup_recovery_notices.push(notice);
                     StateFile::default()
                 }
@@ -965,7 +973,7 @@ impl ProfileManager {
                                 );
                             }
                         }
-                        record_pending_notices(&self.app_data_dir, &[notice.clone()]);
+                        record_pending_notices(&self.app_data_dir, std::slice::from_ref(&notice));
                         notices.push(notice);
                     }
                 },
@@ -978,7 +986,7 @@ impl ProfileManager {
                         "请备份原档案目录并检查文件权限，然后重新导入这个档案。".into(),
                     );
                     notice.profile_id = Some(profile_id);
-                    record_pending_notices(&self.app_data_dir, &[notice.clone()]);
+                    record_pending_notices(&self.app_data_dir, std::slice::from_ref(&notice));
                     notices.push(notice);
                 }
             }
@@ -2955,17 +2963,14 @@ impl ProfileManager {
     fn inspect_target_config_for_snapshot(
         &self,
         profiles: &[ProfileSummary],
-    ) -> Result<
-        (
-            Option<ProfileSummary>,
-            Option<String>,
-            Vec<ConfigRecoveryNotice>,
-        ),
-        AppError,
-    > {
+    ) -> Result<TargetConfigSnapshot, AppError> {
         let mut notices = Vec::new();
         if !self.target_auth_path().exists() || !self.target_config_path().exists() {
-            return Ok((None, None, notices));
+            return Ok(TargetConfigSnapshot {
+                active_profile: None,
+                auth_type_label: None,
+                recovery_notices: notices,
+            });
         }
 
         let auth_path = self.target_auth_path();
@@ -2979,9 +2984,13 @@ impl ProfileManager {
                     format!("活动 auth.json 无法读取：{error}"),
                     "请检查文件权限、从备份恢复，或切换到一套有效档案。".into(),
                 );
-                record_pending_notices(&self.app_data_dir, &[notice.clone()]);
+                record_pending_notices(&self.app_data_dir, std::slice::from_ref(&notice));
                 notices.push(notice);
-                return Ok((None, None, notices));
+                return Ok(TargetConfigSnapshot {
+                    active_profile: None,
+                    auth_type_label: None,
+                    recovery_notices: notices,
+                });
             }
         };
         if let Err(error) = validate_auth_json(&auth_json) {
@@ -2992,9 +3001,13 @@ impl ProfileManager {
                 format!("活动 auth.json 无效：{error}"),
                 "请从备份恢复、手工修复，或切换到一套有效档案。".into(),
             );
-            record_pending_notices(&self.app_data_dir, &[notice.clone()]);
+            record_pending_notices(&self.app_data_dir, std::slice::from_ref(&notice));
             notices.push(notice);
-            return Ok((None, None, notices));
+            return Ok(TargetConfigSnapshot {
+                active_profile: None,
+                auth_type_label: None,
+                recovery_notices: notices,
+            });
         }
 
         let config_path = self.target_config_path();
@@ -3008,9 +3021,13 @@ impl ProfileManager {
                     format!("活动 config.toml 无法读取：{error}"),
                     "请检查文件权限、从备份恢复，或切换到一套有效档案。".into(),
                 );
-                record_pending_notices(&self.app_data_dir, &[notice.clone()]);
+                record_pending_notices(&self.app_data_dir, std::slice::from_ref(&notice));
                 notices.push(notice);
-                return Ok((None, None, notices));
+                return Ok(TargetConfigSnapshot {
+                    active_profile: None,
+                    auth_type_label: None,
+                    recovery_notices: notices,
+                });
             }
         };
         if let Err(error) = validate_config_toml(&config_toml) {
@@ -3021,9 +3038,13 @@ impl ProfileManager {
                 format!("活动 config.toml 无效：{error}"),
                 "请从备份恢复、手工修复，或切换到一套有效档案。".into(),
             );
-            record_pending_notices(&self.app_data_dir, &[notice.clone()]);
+            record_pending_notices(&self.app_data_dir, std::slice::from_ref(&notice));
             notices.push(notice);
-            return Ok((None, None, notices));
+            return Ok(TargetConfigSnapshot {
+                active_profile: None,
+                auth_type_label: None,
+                recovery_notices: notices,
+            });
         }
 
         let auth_hash = auth_match_hash(&auth_json)?;
@@ -3055,21 +3076,24 @@ impl ProfileManager {
             .cloned();
         let auth_type_label = Some(detect_auth_type_label(&auth_json, &config_toml)?);
 
-        Ok((active_profile, auth_type_label, notices))
+        Ok(TargetConfigSnapshot {
+            active_profile,
+            auth_type_label,
+            recovery_notices: notices,
+        })
     }
 
     pub fn snapshot(&self) -> Result<AppSnapshot, AppError> {
         let default_target_dir = default_codex_target_dir()?;
         let (profiles, profile_recovery_notices) = self.collect_profiles_with_recovery()?;
-        let (active_profile, target_auth_type_label, target_recovery_notices) =
-            self.inspect_target_config_for_snapshot(&profiles)?;
-        let active_profile_id = active_profile.map(|profile| profile.id);
+        let target_snapshot = self.inspect_target_config_for_snapshot(&profiles)?;
+        let active_profile_id = target_snapshot.active_profile.map(|profile| profile.id);
         let config_recovery_notices = merge_recovery_notices(
             merge_recovery_notices(
                 self.pending_config_recovery_notices(),
                 profile_recovery_notices,
             ),
-            target_recovery_notices,
+            target_snapshot.recovery_notices,
         );
 
         Ok(AppSnapshot {
@@ -3079,11 +3103,11 @@ impl ProfileManager {
             target_auth_exists: self.target_auth_path().exists(),
             target_config_exists: self.target_config_path().exists(),
             target_updated_at: self.resolve_target_updated_at()?,
-            target_auth_type_label,
+            target_auth_type_label: target_snapshot.auth_type_label,
             active_profile_id,
             last_selected_profile_id: self.state.last_selected_profile_id.clone(),
             last_switch_profile_id: self.state.last_switch_profile_id.clone(),
-            last_switched_at: self.state.last_switched_at.clone(),
+            last_switched_at: self.state.last_switched_at,
             codex_usage_api_enabled: self.state.codex_usage_api_enabled,
             profiles,
             config_recovery_notices,
@@ -3537,7 +3561,7 @@ impl ProfileManager {
                     format!("活动档案标记无法读取：{error}"),
                     "请检查文件权限；应用仍会尝试按配置内容识别当前档案。".into(),
                 );
-                record_pending_notices(&self.app_data_dir, &[notice.clone()]);
+                record_pending_notices(&self.app_data_dir, std::slice::from_ref(&notice));
                 notices.push(notice);
                 return None;
             }
@@ -3566,7 +3590,7 @@ impl ProfileManager {
                             format!("活动档案标记无法解析，且未能隔离：{quarantine_error}");
                     }
                 }
-                record_pending_notices(&self.app_data_dir, &[notice.clone()]);
+                record_pending_notices(&self.app_data_dir, std::slice::from_ref(&notice));
                 notices.push(notice);
                 None
             }

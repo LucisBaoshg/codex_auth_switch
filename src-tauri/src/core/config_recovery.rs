@@ -93,7 +93,10 @@ fn replace_file(temp_path: &Path, target_path: &Path) -> Result<(), AppError> {
     fs::rename(target_path, &backup_path)?;
     match fs::rename(temp_path, target_path) {
         Ok(()) => {
-            fs::remove_file(backup_path)?;
+            // The replacement already succeeded. Antivirus or indexing software may
+            // temporarily hold the old file on Windows, so cleanup must not turn a
+            // successful state write into an application startup failure.
+            let _ = fs::remove_file(backup_path);
             Ok(())
         }
         Err(error) => {
