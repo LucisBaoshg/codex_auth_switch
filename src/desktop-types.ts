@@ -53,6 +53,24 @@ export type ProfileDocument = {
   source?: "local" | "network";
 };
 
+export type ConfigRecoveryKind =
+  | "state"
+  | "profileMetadata"
+  | "targetMarker"
+  | "targetAuth"
+  | "targetConfig";
+
+export type ConfigRecoveryNotice = {
+  id: string;
+  kind: ConfigRecoveryKind;
+  sourcePath: string;
+  recoveryPath: string | null;
+  profileId: string | null;
+  summary: string;
+  action: string;
+  occurredAt: string;
+};
+
 export type AppSnapshot = {
   targetDir: string;
   usingDefaultTargetDir: boolean;
@@ -67,6 +85,7 @@ export type AppSnapshot = {
   lastSwitchedAt: string | null;
   codexUsageApiEnabled: boolean;
   profiles: ProfileSummary[];
+  configRecoveryNotices?: ConfigRecoveryNotice[];
 };
 
 export type CodexUsageStatsSyncResult = {

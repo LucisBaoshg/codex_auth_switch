@@ -1,4 +1,5 @@
 import { escapeHtml, getFlashIcon, type FlashKind } from "./html-utils";
+import type { ConfigRecoveryNotice } from "./desktop-types";
 
 export type BusyDialogState = {
   title: string;
@@ -70,6 +71,68 @@ export function renderNativeConfirmDialog(input: NativeConfirmDialogInput): stri
         <button id="btn-cancel" style="flex:1;padding:10px;border:none;border-radius:12px;background:var(--bg-page);color:var(--text-main);cursor:pointer;font-weight:600;border:1px solid var(--border);">取消</button>
         <button id="btn-ok" style="flex:1;padding:10px;border:none;border-radius:12px;background:${okColor};color:white;cursor:pointer;font-weight:600;box-shadow:0 4px 12px ${okShadow};">${escapeHtml(input.okText)}</button>
       </div>`;
+}
+
+function recoveryKindLabel(notice: ConfigRecoveryNotice): string {
+  switch (notice.kind) {
+    case "state":
+      return "应用状态";
+    case "profileMetadata":
+      return "档案元数据";
+    case "targetMarker":
+      return "活动档案标记";
+    case "targetAuth":
+      return "活动认证配置";
+    case "targetConfig":
+      return "活动模型配置";
+  }
+}
+
+export function renderConfigRecoveryDialog(notices: ConfigRecoveryNotice[]): string {
+  const noticeItems = notices.map((notice) => `
+    <article style="padding:14px;border:1px solid var(--border);border-radius:14px;background:var(--bg-page);">
+      <div style="font-weight:700;color:var(--text-main);margin-bottom:6px;">
+        ${escapeHtml(recoveryKindLabel(notice))}
+      </div>
+      <p style="margin:0 0 8px;color:var(--text-main);line-height:1.5;">
+        ${escapeHtml(notice.summary)}
+      </p>
+      <dl style="margin:0;display:grid;gap:6px;font-size:0.82rem;color:var(--text-muted);">
+        <div><dt style="display:inline;font-weight:600;">损坏文件：</dt><dd style="display:inline;margin:0;overflow-wrap:anywhere;">${escapeHtml(notice.sourcePath)}</dd></div>
+        ${notice.recoveryPath
+          ? `<div><dt style="display:inline;font-weight:600;">恢复文件：</dt><dd style="display:inline;margin:0;overflow-wrap:anywhere;">${escapeHtml(notice.recoveryPath)}</dd></div>`
+          : ""}
+      </dl>
+      <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);font-size:0.88rem;line-height:1.5;color:var(--text-main);">
+        <strong>你需要做什么：</strong>${escapeHtml(notice.action)}
+      </div>
+    </article>
+  `).join("");
+
+  return `
+    <section
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="config-recovery-title"
+      data-role="config-recovery-dialog"
+      style="width:min(620px,calc(100vw - 40px));max-height:calc(100vh - 56px);display:flex;flex-direction:column;background:var(--bg-panel);border:1px solid var(--border);border-radius:22px;box-shadow:var(--shadow-lg);color:var(--text-main);overflow:hidden;"
+    >
+      <header style="padding:24px 26px 16px;">
+        <h2 id="config-recovery-title" style="margin:0 0 8px;font-size:1.25rem;">检测到配置文件损坏</h2>
+        <p style="margin:0;color:var(--text-muted);line-height:1.55;">
+          应用已跳过损坏内容并继续启动。有效配置仍可正常使用，请按下方说明处理受影响文件。
+        </p>
+      </header>
+      <div style="padding:0 26px 18px;overflow:auto;display:grid;gap:10px;">
+        <h3 style="margin:0;font-size:0.92rem;">发现的问题与已自动处理</h3>
+        ${noticeItems}
+      </div>
+      <footer style="padding:16px 26px 22px;border-top:1px solid var(--border);display:flex;gap:12px;justify-content:flex-end;">
+        <button class="button button-secondary" data-action="open-config-recovery-dir">打开恢复目录</button>
+        <button class="button button-primary" data-action="acknowledge-config-recovery">我知道了</button>
+      </footer>
+    </section>
+  `;
 }
 
 export function renderAppShell(input: AppShellInput): string {

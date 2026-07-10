@@ -434,7 +434,7 @@ git commit -m "feat: expose config recovery actions"
 - Modify: `tests/app-chrome-renderers.test.ts`
 - Modify: `tests/app-chrome-dialogs.test.ts`
 
-- [ ] **Step 1: 写入安全渲染失败测试**
+- [x] **Step 1: 写入安全渲染失败测试**
 
 ```ts
 test("renders config recovery details and actions without trusting file paths", async () => {
@@ -457,7 +457,7 @@ test("renders config recovery details and actions without trusting file paths", 
 }
 ```
 
-- [ ] **Step 2: 写入 DOM 行为失败测试**
+- [x] **Step 2: 写入 DOM 行为失败测试**
 
 ```ts
 test("config recovery dialog only resolves through its two explicit actions", async () => {
@@ -471,13 +471,13 @@ test("config recovery dialog only resolves through its two explicit actions", as
 });
 ```
 
-- [ ] **Step 3: 运行测试确认失败**
+- [x] **Step 3: 运行测试确认失败**
 
 Run: `npm test -- tests/app-chrome-renderers.test.ts tests/app-chrome-dialogs.test.ts`
 
 Expected: FAIL，缺少两个恢复弹框导出。
 
-- [ ] **Step 4: 实现类型、渲染和弹框生命周期**
+- [x] **Step 4: 实现类型、渲染和弹框生命周期**
 
 在 `desktop-types.ts` 增加：
 
@@ -501,13 +501,13 @@ export type ConfigRecoveryNotice = {
 
 `renderConfigRecoveryDialog` 使用 `escapeHtml` 渲染三段内容，包含滚动区域、`打开恢复目录` 与 `我知道了`。`showConfigRecoveryDialog` 创建 `role="alertdialog"` 的遮罩，点击遮罩和按 Escape 均不关闭，只在两个按钮点击时移除并返回 `"openRecoveryDir" | "acknowledge"`。
 
-- [ ] **Step 5: 运行弹框单测**
+- [x] **Step 5: 运行弹框单测**
 
 Run: `npm test -- tests/app-chrome-renderers.test.ts tests/app-chrome-dialogs.test.ts`
 
 Expected: 新增和既有测试全部 PASS。
 
-- [ ] **Step 6: 提交弹框组件**
+- [x] **Step 6: 提交弹框组件**
 
 ```bash
 git add src/desktop-types.ts src/app-preview-data.ts src/app-chrome-renderers.ts src/app-chrome-dialogs.ts tests/app-chrome-renderers.test.ts tests/app-chrome-dialogs.test.ts

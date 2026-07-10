@@ -14,6 +14,7 @@ export function createPreviewAppSnapshot(nowIso = new Date().toISOString()): App
     lastSwitchProfileId: "profile-2",
     lastSwitchedAt: nowIso,
     codexUsageApiEnabled: true,
+    configRecoveryNotices: [],
     profiles: [
       {
         id: "profile-1",
