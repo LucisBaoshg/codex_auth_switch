@@ -130,6 +130,20 @@ export function renderCardsPage(input: CardsPageInput): string {
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
             <span>同步本地配置</span>
           </button>
+          <button
+            class="button button-secondary"
+            data-action="refresh-all-codex-usage"
+            title="连接 API 接口以获取并更新所有配置的最新额度使用情况"
+            ${input.busy || hasPendingActionPrefix(input.pendingActions, codexUsageActionPrefix) ? "disabled" : ""}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;"><line x1="12" y1="1" x2="12" y2="23"></line><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
+            <span>${hasPendingAction(input.pendingActions, refreshAllUsageActionKey) ? "更新中..." : "剩余用量"}</span>
+          </button>
+          ${renderProfileLayoutToggle({
+            layout: input.layout,
+            busy: input.busy,
+          })}
+          <span class="content-actions-divider" aria-hidden="true"></span>
           <button class="button button-primary" data-role="add-card" data-action="new-profile" ${input.busy ? "disabled" : ""}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
             新建配置
@@ -140,24 +154,6 @@ export function renderCardsPage(input: CardsPageInput): string {
       ${renderUnsavedCurrentAccountBanner(input)}
 
       <section class="grid-container">
-        <div class="section-header">
-          <h3 class="section-title">已保存的配置文件</h3>
-          <div class="section-actions">
-            <button
-              class="button button-secondary section-toolbar-button"
-              data-action="refresh-all-codex-usage"
-              title="连接 API 接口以获取并更新所有配置的最新额度使用情况"
-              ${input.busy || hasPendingActionPrefix(input.pendingActions, codexUsageActionPrefix) ? "disabled" : ""}
-            >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"></line><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
-              <span>${hasPendingAction(input.pendingActions, refreshAllUsageActionKey) ? "更新中..." : "更新额度"}</span>
-            </button>
-            ${renderProfileLayoutToggle({
-              layout: input.layout,
-              busy: input.busy,
-            })}
-          </div>
-        </div>
         ${
           input.layout === "list"
             ? renderProfileList(input)
@@ -197,7 +193,7 @@ export function renderProfileList(input: ProfileCollectionRenderInput): string {
                 ${
                   live
                     ? `<span class="profile-row-status profile-row-status-live">生效中</span>`
-                    : `<button class="button button-secondary profile-row-switch" data-action="switch" data-id="${profile.id}" data-name="${escapeHtml(profile.name)}" ${input.busy ? "disabled" : ""}>应用</button>`
+                    : `<button class="button button-secondary profile-row-switch" data-action="switch" data-id="${profile.id}" data-name="${escapeHtml(profile.name)}" ${input.busy ? "disabled" : ""}>启用</button>`
                 }
                 </span>
                 <span class="profile-row-utility-actions" data-role="profile-row-secondary-actions">
@@ -213,7 +209,7 @@ export function renderProfileList(input: ProfileCollectionRenderInput): string {
                             data-name="${escapeHtml(profile.name)}"
                             ${input.busy || refreshingCodexUsage || refreshingAllCodexUsage ? "disabled" : ""}
                           >
-                            ${refreshingCodexUsage ? "刷新中..." : "额度"}
+                            ${refreshingCodexUsage ? "刷新中..." : "用量"}
                           </button>
                         `
                         : `
@@ -222,7 +218,7 @@ export function renderProfileList(input: ProfileCollectionRenderInput): string {
                             data-action="enable-codex-usage"
                             ${input.busy || refreshingAllCodexUsage ? "disabled" : ""}
                           >
-                            启用额度
+                            启用用量
                           </button>
                         `
                       : `
@@ -233,7 +229,7 @@ export function renderProfileList(input: ProfileCollectionRenderInput): string {
                           data-name="${escapeHtml(profile.name)}"
                           ${input.busy || refreshingThirdPartyUsage || refreshingAllCodexUsage ? "disabled" : ""}
                         >
-                          ${refreshingThirdPartyUsage ? "刷新中..." : refreshingAllCodexUsage ? "等待中..." : "额度"}
+                          ${refreshingThirdPartyUsage ? "刷新中..." : refreshingAllCodexUsage ? "等待中..." : "用量"}
                         </button>
                       `
                   }
@@ -308,7 +304,7 @@ export function renderProfileGrid(input: ProfileCollectionRenderInput): string {
                   <p class="card-date">更新于：${formatDateTime(profile.updatedAt)}</p>
                   ${input.snapshot.activeProfileId === profile.id
                     ? `<div class="env-active-label"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg> 环境生效中</div>`
-                    : `<button class="button button-secondary" style="width:100%" data-action="switch" data-id="${profile.id}" data-name="${escapeHtml(profile.name)}" ${input.busy ? "disabled" : ""}>应用此配置</button>`}
+                    : `<button class="button button-secondary" style="width:100%" data-action="switch" data-id="${profile.id}" data-name="${escapeHtml(profile.name)}" ${input.busy ? "disabled" : ""}>启用此配置</button>`}
                 </div>
 
                 <div class="card-secondary-actions" style="align-self: flex-end; padding-bottom: 2px; display: flex; gap: 4px;">

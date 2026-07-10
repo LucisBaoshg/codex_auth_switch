@@ -161,7 +161,36 @@ body {
 .content-actions {
   display: flex;
   align-items: center;
-  gap: 12px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+/* Keep every control in the single header toolbar the same height — and the
+   same height as the in-row action buttons (34px) so the page has one button
+   scale instead of several. */
+.content-actions > .button {
+  height: 34px;
+  padding: 0 14px;
+  font-size: 0.84rem;
+}
+
+.content-actions .profile-layout-toggle {
+  height: 34px;
+  box-sizing: border-box;
+  padding: 3px;
+}
+
+.content-actions .profile-layout-button {
+  display: inline-flex;
+  align-items: center;
+}
+
+.content-actions-divider {
+  width: 1px;
+  height: 22px;
+  background: var(--border);
+  margin: 0 2px;
 }
 
 
@@ -742,10 +771,16 @@ p { margin: 0; }
 }
 
 .profile-row-primary-action {
-  display: inline-flex;
-  justify-content: stretch;
+  display: flex;
   flex: 0 0 auto;
   width: 76px;
+}
+
+/* Force the active badge and the 启用 button to the same full-slot size so
+   they never differ by content length (生效中 vs 启用). */
+.profile-row-primary-action > * {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .profile-row-utility-actions,
@@ -774,6 +809,7 @@ p { margin: 0; }
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  box-sizing: border-box;
   min-width: 68px;
   height: 34px;
   padding: 0 10px;

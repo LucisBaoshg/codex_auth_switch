@@ -38,3 +38,49 @@ export function restoreMainScrollIfSamePage(options: RestoreMainScrollOptions): 
     }
   });
 }
+
+export type NestedScrollTops = Record<string, number>;
+
+export function captureNestedScrollTops(appRoot: ParentNode): NestedScrollTops {
+  const scrollTops: NestedScrollTops = {};
+  appRoot.querySelectorAll<HTMLElement>("[data-scroll-key]").forEach((element) => {
+    const key = element.dataset.scrollKey;
+    if (key) {
+      scrollTops[key] = element.scrollTop;
+    }
+  });
+  return scrollTops;
+}
+
+export type RestoreNestedScrollOptions = {
+  appRoot: ParentNode;
+  previousPageKey: string | null;
+  previousScrollTops: NestedScrollTops;
+  currentView: string;
+  requestAnimationFrame?: (callback: () => void) => void;
+};
+
+export function restoreNestedScrollTopsIfSamePage(options: RestoreNestedScrollOptions): void {
+  const {
+    appRoot,
+    previousPageKey,
+    previousScrollTops,
+    currentView,
+    requestAnimationFrame,
+  } = options;
+
+  if (!previousPageKey || previousPageKey !== renderedPageKeyForView(currentView)) return;
+
+  const restore = (): void => {
+    if (currentRenderedPageKey(appRoot) !== previousPageKey) return;
+    appRoot.querySelectorAll<HTMLElement>("[data-scroll-key]").forEach((element) => {
+      const key = element.dataset.scrollKey;
+      if (key && Object.prototype.hasOwnProperty.call(previousScrollTops, key)) {
+        element.scrollTop = previousScrollTops[key];
+      }
+    });
+  };
+
+  restore();
+  requestAnimationFrame?.(restore);
+}

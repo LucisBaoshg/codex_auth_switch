@@ -128,15 +128,19 @@ export async function POST(
       }
     }
 
-    const visibility = normalizeProfileVisibility(rawVisibility, sharedWith);
-    let resolvedSharedWith: string[];
-    try {
-      resolvedSharedWith = resolveSharedWithForVisibility(visibility, sharedWith, await readKnownUsers());
-    } catch (error) {
-      return NextResponse.json(
-        { error: error instanceof Error ? error.message : "Invalid share targets" },
-        { status: 400, headers: noStoreHeaders },
-      );
+    const hasShareScopeUpdate = rawVisibility !== undefined || sharedWith !== undefined;
+    let visibility: ReturnType<typeof normalizeProfileVisibility> | undefined;
+    let resolvedSharedWith: string[] | undefined;
+    if (hasShareScopeUpdate) {
+      visibility = normalizeProfileVisibility(rawVisibility, sharedWith);
+      try {
+        resolvedSharedWith = resolveSharedWithForVisibility(visibility, sharedWith, await readKnownUsers());
+      } catch (error) {
+        return NextResponse.json(
+          { error: error instanceof Error ? error.message : "Invalid share targets" },
+          { status: 400, headers: noStoreHeaders },
+        );
+      }
     }
     const updated = await updateProfileMetadata(id, principal, {
       name,

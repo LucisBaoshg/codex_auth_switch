@@ -32,7 +32,9 @@ import {
   resolveOfficialOauthProfileId,
 } from "./profile-selection";
 import {
+  captureNestedScrollTops,
   currentRenderedPageKey,
+  restoreNestedScrollTopsIfSamePage,
   restoreMainScrollIfSamePage,
 } from "./scroll-restoration";
 import {
@@ -2628,6 +2630,7 @@ function render(): void {
   const previousMain = app.querySelector<HTMLElement>(".app-main-content");
   const previousPageKey = currentRenderedPageKey(app);
   const previousScrollTop = previousMain?.scrollTop ?? 0;
+  const previousNestedScrollTops = captureNestedScrollTops(app);
   const snapshot = state.snapshot;
 
   let content = "";
@@ -2713,12 +2716,20 @@ function render(): void {
   });
 
   bindEvents();
+  const requestAnimationFrame = window.requestAnimationFrame?.bind(window);
   restoreMainScrollIfSamePage({
     appRoot: app,
     previousPageKey,
     previousScrollTop,
     currentView: state.view,
-    requestAnimationFrame: window.requestAnimationFrame?.bind(window),
+    requestAnimationFrame,
+  });
+  restoreNestedScrollTopsIfSamePage({
+    appRoot: app,
+    previousPageKey,
+    previousScrollTops: previousNestedScrollTops,
+    currentView: state.view,
+    requestAnimationFrame,
   });
 }
 

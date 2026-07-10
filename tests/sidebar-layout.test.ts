@@ -115,7 +115,7 @@ test("keeps the default profile list concise with metric chips and quick probe a
   expect(liveRow?.querySelector('[data-role="profile-row-summary"]')).toBeNull();
   expect(liveRow?.querySelector('[data-role="profile-row-updated"]')).toBeNull();
   expect(liveRow?.textContent).not.toContain("更新");
-  expect(liveRow?.querySelector('[data-action="refresh-third-party-usage"]')?.textContent).toContain("额度");
+  expect(liveRow?.querySelector('[data-action="refresh-third-party-usage"]')?.textContent).toContain("用量");
   expect(liveRow?.querySelector('[data-action="refresh-third-party-latency"]')?.textContent).toContain("测速");
   expect(liveRow?.querySelector('[data-action="view-profile-details"]')?.textContent?.trim()).toBe("");
   expect(liveRow?.querySelector('[data-action="view-profile-details"]')?.getAttribute("aria-label")).toContain("查看和编辑");
@@ -132,7 +132,7 @@ test("shows only quota quick action for official profiles in the default list", 
   );
 
   expect(officialRow).not.toBeNull();
-  expect(officialRow?.querySelector('[data-action="refresh-codex-usage"]')?.textContent).toContain("额度");
+  expect(officialRow?.querySelector('[data-action="refresh-codex-usage"]')?.textContent).toContain("用量");
   expect(officialRow?.querySelector('[data-action="refresh-third-party-latency"]')).toBeNull();
   expect(officialRow?.querySelector('[data-role="profile-row-updated"]')).toBeNull();
 });
@@ -291,7 +291,7 @@ test("marks failed official usage refreshes in the list and detail page", async 
   const row = Array.from(document.querySelectorAll('[data-role="profile-row"]')).find((candidate) =>
     candidate.textContent?.includes("Broken OAuth"),
   );
-  expect(row?.textContent).toContain("额度");
+  expect(row?.textContent).toContain("用量");
   expect(row?.textContent).toContain("失败");
 
   document
@@ -300,7 +300,7 @@ test("marks failed official usage refreshes in the list and detail page", async 
   await flushUi();
   await flushUi();
 
-  expect(document.body.textContent).toContain("额度刷新失败");
+  expect(document.body.textContent).toContain("用量刷新失败");
   expect(document.body.textContent).toContain("ChatGPT access token");
 });
 
@@ -2410,9 +2410,13 @@ test("edits recipients for an owned shared profile and shows its share count in 
   const bobCheckbox = document.querySelector<HTMLInputElement>('.shared-profile-edit-user-checkbox[value="Ding-B"]');
   expect(bobCheckbox).not.toBeNull();
   expect(bobCheckbox!.type).toBe("checkbox");
+  const editUserList = document.querySelector<HTMLElement>('[data-role="share-user-list"]');
+  expect(editUserList).not.toBeNull();
+  editUserList!.scrollTop = 96;
   bobCheckbox!.checked = true;
   bobCheckbox!.dispatchEvent(new Event("change", { bubbles: true }));
   await flushUi();
+  expect(document.querySelector<HTMLElement>('[data-role="share-user-list"]')?.scrollTop).toBe(96);
 
   document
     .querySelector<HTMLButtonElement>('[data-action="save-shared-profile-users"]')

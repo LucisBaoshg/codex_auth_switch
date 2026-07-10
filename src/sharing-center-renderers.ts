@@ -24,6 +24,7 @@ export type ShareUserCheckboxListInput = {
   loading: boolean;
   selectedUserIds: string[];
   checkboxClass: string;
+  scrollKey?: string;
 };
 
 export type ShareUserPickerInput = {
@@ -124,8 +125,10 @@ export function renderShareUserCheckboxList(input: ShareUserCheckboxListInput): 
     `;
   }
 
+  const scrollKey = input.scrollKey ?? `share-user-list:${input.checkboxClass}`;
+
   return `
-    <div class="sharing-user-list" data-role="share-user-list">
+    <div class="sharing-user-list" data-role="share-user-list" data-scroll-key="${escapeHtml(scrollKey)}">
       ${input.users
         .map(
           (user) => `
@@ -159,6 +162,7 @@ export function renderShareUserPicker(input: ShareUserPickerInput): string {
     loading: input.loading,
     selectedUserIds: input.shareDraft.selectedUserIds,
     checkboxClass: "share-user-checkbox",
+    scrollKey: "local-share-user-list",
   });
 }
 
@@ -173,6 +177,7 @@ export function renderSharedProfileEditUserPicker(input: SharedProfileEditUserPi
     loading: input.loading,
     selectedUserIds: draft.selectedUserIds,
     checkboxClass: "shared-profile-edit-user-checkbox",
+    scrollKey: `shared-profile-edit-user-list:${draft.profileId}`,
   });
 }
 

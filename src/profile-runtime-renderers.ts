@@ -64,9 +64,9 @@ export function renderCodexUsagePanel(
   const updated = usage ? formatDateTime(usage.updatedAt) : "还没有";
   const refreshingUsage = hasPendingAction(context.pendingActions, usageRefreshActionKey(profile.id));
   const refreshingAllUsage = hasPendingAction(context.pendingActions, refreshAllUsageActionKey);
-  const usageButtonLabel = refreshingUsage ? "刷新中..." : "刷新额度";
+  const usageButtonLabel = refreshingUsage ? "刷新中..." : "刷新用量";
   const usageUpdatedCopy = refreshingUsage
-    ? "正在刷新额度…"
+    ? "正在刷新用量…"
     : refreshingAllUsage
       ? "批量刷新中…"
       : `更新于：${updated}`;
@@ -97,14 +97,14 @@ export function renderCodexUsagePanel(
                 data-action="enable-codex-usage"
                 ${context.busy || refreshingAllUsage ? "disabled" : ""}
               >
-                启用额度查询
+                启用用量查询
               </button>
             `
         }
       </div>
       ${
         usageError
-          ? `<p class="latency-panel-error">额度刷新失败：${escapeHtml(usageError)}</p>`
+          ? `<p class="latency-panel-error">用量刷新失败：${escapeHtml(usageError)}</p>`
           : `
             <div class="usage-progress-list">
               ${renderUsageProgressRow("5H", primaryWindow)}
@@ -344,7 +344,7 @@ export function renderProfileRowMetrics(profile: ProfileSummary): string {
     if (usage?.error) {
       return `
         <span class="profile-row-metric profile-row-metric-error" data-role="profile-row-metric">
-          <span>额度</span>
+          <span>用量</span>
           <strong>失败</strong>
         </span>
         <span class="profile-row-metric profile-row-metric-muted" data-role="profile-row-metric">

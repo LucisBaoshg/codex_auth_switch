@@ -828,7 +828,7 @@ export function renderEditorRuntimePanel(input: EditorRuntimePanelInput): string
         ${
           live
             ? ""
-            : `<button class="button button-secondary" data-action="switch" data-id="${input.profile.id}" data-name="${escapeHtml(input.profile.name)}" ${input.busy ? "disabled" : ""}>应用此配置</button>`
+            : `<button class="button button-secondary" data-action="switch" data-id="${input.profile.id}" data-name="${escapeHtml(input.profile.name)}" ${input.busy ? "disabled" : ""}>启用此配置</button>`
         }
       </div>
       ${renderCodexUsagePanel(input.snapshot, input.profile, runtimeContext)}
