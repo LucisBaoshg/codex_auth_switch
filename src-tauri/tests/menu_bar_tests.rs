@@ -128,6 +128,7 @@ fn snapshot(active_profile_id: Option<&str>, profiles: Vec<ProfileSummary>) -> A
         last_switched_at: None,
         codex_usage_api_enabled: true,
         profiles,
+        config_recovery_notices: Vec::new(),
     }
 }
 

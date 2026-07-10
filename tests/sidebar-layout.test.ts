@@ -37,6 +37,100 @@ async function switchToGridLayout(): Promise<void> {
   await flushUi();
 }
 
+function configRecoverySnapshot() {
+  return {
+    targetDir: "/Users/example/.codex",
+    usingDefaultTargetDir: true,
+    targetExists: true,
+    targetAuthExists: true,
+    targetConfigExists: true,
+    targetUpdatedAt: "2026-07-10T00:00:00Z",
+    targetAuthTypeLabel: null,
+    activeProfileId: null,
+    lastSelectedProfileId: null,
+    lastSwitchProfileId: null,
+    lastSwitchedAt: null,
+    codexUsageApiEnabled: false,
+    profiles: [],
+    configRecoveryNotices: [{
+      id: "notice-1",
+      kind: "profileMetadata",
+      sourcePath: "/profiles/one/meta.json",
+      recoveryPath: "/recovery/profiles/one/meta.json",
+      profileId: "one",
+      summary: "档案 one 的 meta.json 无法解析",
+      action: "重新导入这个档案。",
+      occurredAt: "2026-07-10T00:00:00Z",
+    }],
+  };
+}
+
+test("acknowledges config recovery notice and does not show it twice", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "load_snapshot") return configRecoverySnapshot();
+    if (command === "acknowledge_config_recovery") return null;
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  await import("../src/main");
+  await flushUi();
+
+  expect(document.querySelector('[data-role="config-recovery-dialog"]')).not.toBeNull();
+  document
+    .querySelector<HTMLButtonElement>('[data-action="acknowledge-config-recovery"]')
+    ?.click();
+  await flushUi();
+
+  expect(invokeMock).toHaveBeenCalledWith("acknowledge_config_recovery", {
+    noticeIds: ["notice-1"],
+  });
+  expect(document.querySelector('[data-role="config-recovery-dialog"]')).toBeNull();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="refresh"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  expect(document.querySelector('[data-role="config-recovery-dialog"]')).toBeNull();
+});
+
+test("opens recovery directory before acknowledging config recovery", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "load_snapshot") return configRecoverySnapshot();
+    if (command === "open_config_recovery_dir") return null;
+    if (command === "acknowledge_config_recovery") return null;
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  await import("../src/main");
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="open-config-recovery-dir"]')
+    ?.click();
+  await flushUi();
+  await flushUi();
+
+  expect(invokeMock).toHaveBeenCalledWith("open_config_recovery_dir", undefined);
+  expect(invokeMock).toHaveBeenCalledWith("acknowledge_config_recovery", {
+    noticeIds: ["notice-1"],
+  });
+  const openOrder = invokeMock.mock.invocationCallOrder.find((_, index) =>
+    invokeMock.mock.calls[index]?.[0] === "open_config_recovery_dir"
+  );
+  const acknowledgeOrder = invokeMock.mock.invocationCallOrder.find((_, index) =>
+    invokeMock.mock.calls[index]?.[0] === "acknowledge_config_recovery"
+  );
+  expect(openOrder).toBeLessThan(acknowledgeOrder!);
+});
+
 test("renders the default profile list without a left sidebar", async () => {
   await import("../src/main");
   await flushUi();

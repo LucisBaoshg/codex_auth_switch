@@ -1,7 +1,7 @@
 use chrono::{SecondsFormat, TimeZone, Utc};
 use codex_auth_switch_lib::core::{
-    codex_restart_plan_for_platform, restart_codex_script, CodexRestartPlatform, ProfileInput,
-    ProfileManager,
+    codex_restart_plan_for_platform, restart_codex_script, CodexRestartPlatform,
+    ConfigRecoveryKind, ProfileInput, ProfileManager,
 };
 use filetime::{set_file_mtime, FileTime};
 use rusqlite::Connection;
@@ -229,6 +229,166 @@ fn temp_manager() -> (TempDir, TempDir, ProfileManager) {
     .expect("create manager");
 
     (app_dir, target_dir, manager)
+}
+
+fn recovery_profile_input(name: &str, api_key: &str) -> ProfileInput {
+    ProfileInput {
+        name: name.into(),
+        notes: String::new(),
+        auth_json: api_key_auth_json(api_key),
+        config_toml: third_party_config_toml("gpt-5"),
+    }
+}
+
+#[test]
+fn load_or_default_quarantines_corrupt_state_and_keeps_running() {
+    let (app_dir, _target_dir, _manager) = temp_manager();
+    fs::write(app_dir.path().join("state.json"), vec![0_u8; 64]).unwrap();
+
+    let reloaded = ProfileManager::load_or_default(app_dir.path().to_path_buf())
+        .expect("corrupt state must not stop startup");
+    let notices = reloaded.pending_config_recovery_notices();
+
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].kind, ConfigRecoveryKind::State);
+    assert!(Path::new(notices[0].recovery_path.as_deref().unwrap()).exists());
+    serde_json::from_str::<serde_json::Value>(
+        &fs::read_to_string(app_dir.path().join("state.json")).unwrap(),
+    )
+    .expect("replacement state must be valid json");
+}
+
+#[test]
+fn snapshot_quarantines_nul_filled_metadata_and_keeps_valid_profiles() {
+    let (app_dir, _target_dir, manager) = temp_manager();
+    let broken = manager
+        .import_profile(recovery_profile_input("Broken", "sk-broken"))
+        .unwrap();
+    let valid = manager
+        .import_profile(recovery_profile_input("Valid", "sk-valid"))
+        .unwrap();
+    let broken_dir = app_dir.path().join("profiles").join(&broken.id);
+    let saved_auth = fs::read(broken_dir.join("auth.json")).unwrap();
+    let saved_config = fs::read(broken_dir.join("config.toml")).unwrap();
+    fs::write(broken_dir.join("meta.json"), vec![0_u8; 1342]).unwrap();
+
+    let snapshot = manager.snapshot().expect("bad metadata must be isolated");
+
+    assert_eq!(
+        snapshot
+            .profiles
+            .iter()
+            .map(|profile| profile.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![valid.id]
+    );
+    assert_eq!(snapshot.config_recovery_notices.len(), 1);
+    assert_eq!(
+        snapshot.config_recovery_notices[0].kind,
+        ConfigRecoveryKind::ProfileMetadata
+    );
+    assert_eq!(fs::read(broken_dir.join("auth.json")).unwrap(), saved_auth);
+    assert_eq!(
+        fs::read(broken_dir.join("config.toml")).unwrap(),
+        saved_config
+    );
+    assert!(!broken_dir.join("meta.json").exists());
+
+    let recovery_path = PathBuf::from(
+        snapshot.config_recovery_notices[0]
+            .recovery_path
+            .as_deref()
+            .unwrap(),
+    );
+    let second_snapshot = manager.snapshot().expect("second snapshot stays healthy");
+    let recovery_files = fs::read_dir(recovery_path.parent().unwrap())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("meta.corrupt-")
+        })
+        .count();
+    assert_eq!(recovery_files, 1);
+    assert_eq!(second_snapshot.config_recovery_notices.len(), 1);
+}
+
+#[test]
+fn snapshot_quarantines_corrupt_target_marker_and_detects_profile_by_hash() {
+    let (_app_dir, target_dir, mut manager) = temp_manager();
+    let profile = manager
+        .import_profile(recovery_profile_input("Current", "sk-current"))
+        .unwrap();
+    manager.switch_profile(&profile.id).unwrap();
+    fs::write(target_dir.path().join("codex-auth-switch.json"), b"\0\0\0").unwrap();
+
+    let snapshot = manager
+        .snapshot()
+        .expect("bad marker must not stop snapshot");
+
+    assert_eq!(
+        snapshot.active_profile_id.as_deref(),
+        Some(profile.id.as_str())
+    );
+    assert!(snapshot
+        .config_recovery_notices
+        .iter()
+        .any(|notice| notice.kind == ConfigRecoveryKind::TargetMarker));
+    assert!(!target_dir.path().join("codex-auth-switch.json").exists());
+}
+
+#[test]
+fn snapshot_reports_invalid_live_auth_without_modifying_it() {
+    let (_app_dir, target_dir, manager) = temp_manager();
+    fs::write(target_dir.path().join("auth.json"), "{broken").unwrap();
+    fs::write(
+        target_dir.path().join("config.toml"),
+        official_config_toml("gpt-5"),
+    )
+    .unwrap();
+
+    let snapshot = manager
+        .snapshot()
+        .expect("bad live auth must degrade to unknown");
+
+    assert_eq!(snapshot.active_profile_id, None);
+    assert_eq!(snapshot.target_auth_type_label, None);
+    assert_eq!(
+        fs::read_to_string(target_dir.path().join("auth.json")).unwrap(),
+        "{broken"
+    );
+    assert!(snapshot
+        .config_recovery_notices
+        .iter()
+        .any(|notice| notice.kind == ConfigRecoveryKind::TargetAuth));
+}
+
+#[test]
+fn snapshot_reports_invalid_live_config_without_modifying_it() {
+    let (_app_dir, target_dir, manager) = temp_manager();
+    fs::write(
+        target_dir.path().join("auth.json"),
+        api_key_auth_json("sk-live"),
+    )
+    .unwrap();
+    fs::write(target_dir.path().join("config.toml"), "model = [broken").unwrap();
+
+    let snapshot = manager
+        .snapshot()
+        .expect("bad live config must degrade to unknown");
+
+    assert_eq!(snapshot.active_profile_id, None);
+    assert_eq!(snapshot.target_auth_type_label, None);
+    assert_eq!(
+        fs::read_to_string(target_dir.path().join("config.toml")).unwrap(),
+        "model = [broken"
+    );
+    assert!(snapshot
+        .config_recovery_notices
+        .iter()
+        .any(|notice| notice.kind == ConfigRecoveryKind::TargetConfig));
 }
 
 #[test]

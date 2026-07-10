@@ -8,9 +8,10 @@ use crate::core::{
     set_pac_proxy_selected_option as write_pac_proxy_selected_option,
     set_pac_proxy_selected_services as write_pac_proxy_selected_services, AppSnapshot,
     CodexMessage, CodexSessionInfo, CodexUsageStatsFilter, CodexUsageStatsSnapshot,
-    InstallLocationStatus, LegacyThirdPartyMigrationResult, ModelProviderSummary, PacProxyStatus,
-    ProfileDocument, ProfileInput, ProfileManager, SessionRecoveryReport, SessionRepairResult,
-    ThirdPartyWebsocketsDefaultResult, UpdateCheckResult, UpdateInstallRequest,
+    ConfigRecoveryNotice, InstallLocationStatus, LegacyThirdPartyMigrationResult,
+    ModelProviderSummary, PacProxyStatus, ProfileDocument, ProfileInput, ProfileManager,
+    SessionRecoveryReport, SessionRepairResult, ThirdPartyWebsocketsDefaultResult,
+    UpdateCheckResult, UpdateInstallRequest,
 };
 use crate::menu_bar::{
     install_menu_bar, menu_bar_refresh_target, sync_menu_bar_pac_proxy, sync_menu_bar_usage,
@@ -18,11 +19,44 @@ use crate::menu_bar::{
 };
 use chrono::{DateTime, Utc};
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Listener, Manager};
 
 const MENU_BAR_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+
+#[derive(Default)]
+struct PendingConfigRecoveryState(Mutex<Vec<ConfigRecoveryNotice>>);
+
+impl PendingConfigRecoveryState {
+    fn from_notices(notices: Vec<ConfigRecoveryNotice>) -> Self {
+        let state = Self::default();
+        state.merge(notices);
+        state
+    }
+
+    fn merge(&self, notices: Vec<ConfigRecoveryNotice>) -> Vec<ConfigRecoveryNotice> {
+        let mut pending = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        for notice in notices {
+            if !pending.iter().any(|existing| existing.id == notice.id) {
+                pending.push(notice);
+            }
+        }
+        pending.clone()
+    }
+
+    fn remove(&self, notice_ids: &[String]) {
+        let mut pending = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        pending.retain(|notice| !notice_ids.contains(&notice.id));
+    }
+
+    #[cfg(test)]
+    fn ids(&self) -> Vec<String> {
+        let pending = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        pending.iter().map(|notice| notice.id.clone()).collect()
+    }
+}
 
 #[derive(serde::Serialize)]
 struct NetworkHttpResponse {
@@ -386,6 +420,24 @@ fn open_target_dir(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn open_config_recovery_dir(app: AppHandle) -> Result<(), String> {
+    manager_from_app(&app)?
+        .open_config_recovery_dir()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn acknowledge_config_recovery(app: AppHandle, notice_ids: Vec<String>) -> Result<(), String> {
+    manager_from_app(&app)?
+        .acknowledge_config_recovery(&notice_ids)
+        .map_err(|error| error.to_string())?;
+    if let Some(state) = app.try_state::<PendingConfigRecoveryState>() {
+        state.remove(&notice_ids);
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn restart_codex() -> Result<(), String> {
     restart_codex_app().map_err(|error| error.to_string())
 }
@@ -593,7 +645,10 @@ async fn rename_codex_session(
 }
 
 fn snapshot_and_sync(app: &AppHandle, manager: &ProfileManager) -> Result<AppSnapshot, String> {
-    let snapshot = manager.snapshot().map_err(|error| error.to_string())?;
+    let mut snapshot = manager.snapshot().map_err(|error| error.to_string())?;
+    if let Some(state) = app.try_state::<PendingConfigRecoveryState>() {
+        snapshot.config_recovery_notices = state.merge(snapshot.config_recovery_notices);
+    }
     sync_menu_bar_usage(app, &snapshot).map_err(|error| error.to_string())?;
     Ok(snapshot)
 }
@@ -674,6 +729,9 @@ pub fn run() {
             let app_data_dir = app.path().app_data_dir()?;
             let manager = ProfileManager::load_or_default(app_data_dir)?;
             let snapshot = manager.snapshot()?;
+            app.manage(PendingConfigRecoveryState::from_notices(
+                snapshot.config_recovery_notices.clone(),
+            ));
             install_menu_bar(app, &snapshot)?;
             spawn_menu_bar_usage_refresher(app.handle().clone());
             Ok(())
@@ -700,6 +758,8 @@ pub fn run() {
             refresh_profile_third_party_usage,
             refresh_all_codex_usage,
             open_target_dir,
+            open_config_recovery_dir,
+            acknowledge_config_recovery,
             restart_codex,
             open_external_url,
             fix_session_database,
@@ -721,4 +781,40 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Codex 助手");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{ConfigRecoveryKind, ConfigRecoveryNotice};
+
+    fn notice(id: &str) -> ConfigRecoveryNotice {
+        ConfigRecoveryNotice {
+            id: id.into(),
+            kind: ConfigRecoveryKind::State,
+            source_path: "/tmp/state.json".into(),
+            recovery_path: None,
+            profile_id: None,
+            summary: "state.json 损坏".into(),
+            action: "检查目标目录".into(),
+            occurred_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn merge_pending_recovery_notices_is_stable_and_deduplicated() {
+        let state = PendingConfigRecoveryState::from_notices(vec![notice("one"), notice("two")]);
+
+        let merged = state.merge(vec![notice("two"), notice("three")]);
+
+        assert_eq!(
+            merged
+                .iter()
+                .map(|notice| notice.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["one", "two", "three"]
+        );
+        state.remove(&["two".into()]);
+        assert_eq!(state.ids(), vec!["one", "three"]);
+    }
 }

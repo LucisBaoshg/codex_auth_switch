@@ -97,3 +97,26 @@ test("renders native confirm dialog copy and action styling safely", async () =>
   expect(normalHtml).toContain("background:var(--accent)");
   expect(normalHtml).toContain("rgba(99,102,241,0.2)");
 });
+
+test("renders config recovery details and actions without trusting file paths", async () => {
+  expect(existsSync(join(root, "src/app-chrome-renderers.ts"))).toBe(true);
+  const { renderConfigRecoveryDialog } = await import(renderersImportPath);
+
+  const html = renderConfigRecoveryDialog([{
+    id: "notice-1",
+    kind: "profileMetadata",
+    sourcePath: "<profile>/meta.json",
+    recoveryPath: "/recovery/<meta>.json",
+    profileId: "profile-1",
+    summary: "配置 <损坏>",
+    action: "重新导入 & 检查",
+    occurredAt: "2026-07-10T00:00:00Z",
+  }]);
+
+  expect(html).toContain("检测到配置文件损坏");
+  expect(html).toContain("&lt;profile&gt;/meta.json");
+  expect(html).toContain("/recovery/&lt;meta&gt;.json");
+  expect(html).toContain("重新导入 &amp; 检查");
+  expect(html).toContain('data-action="open-config-recovery-dir"');
+  expect(html).toContain('data-action="acknowledge-config-recovery"');
+});

@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import {
   renderAppShell,
 } from "./app-chrome-renderers";
-import { nativeConfirm } from "./app-chrome-dialogs";
+import { nativeConfirm, showConfigRecoveryDialog } from "./app-chrome-dialogs";
 import type { FlashKind } from "./html-utils";
 import {
   profileInputFromDocument,
@@ -106,6 +106,7 @@ import {
 import { createPreviewAppSnapshot } from "./app-preview-data";
 import type {
   AppSnapshot,
+  ConfigRecoveryNotice,
   CodexUsageStatsFilter,
   CodexUsageStatsSnapshot,
   InstallLocationStatus,
@@ -257,6 +258,8 @@ function formatErrorMessage(error: unknown): string {
 }
 
 const state = createDesktopState(loadNetworkSharingSettings());
+const shownConfigRecoveryNoticeIds = new Set<string>();
+let configRecoveryDialogInFlight = false;
 
 let flashTimeoutId: number | null = null;
 const promptedRemoteUpdateKeys = new Set<string>();
@@ -304,6 +307,34 @@ function endPendingAction(key: string): void {
 function setSnapshot(snapshot: AppSnapshot): void {
   applySnapshotToDesktopState(state, snapshot);
   render();
+  void presentConfigRecoveryNotices(snapshot.configRecoveryNotices ?? []);
+}
+
+async function presentConfigRecoveryNotices(
+  notices: ConfigRecoveryNotice[],
+): Promise<void> {
+  if (configRecoveryDialogInFlight || !isTauriRuntime) {
+    return;
+  }
+  const pending = notices.filter((notice) => !shownConfigRecoveryNoticeIds.has(notice.id));
+  if (pending.length === 0) {
+    return;
+  }
+
+  configRecoveryDialogInFlight = true;
+  const noticeIds = pending.map((notice) => notice.id);
+  try {
+    const result = await showConfigRecoveryDialog(pending);
+    if (result === "openRecoveryDir") {
+      await desktopInvoke<void>("open_config_recovery_dir");
+    }
+    await desktopInvoke<void>("acknowledge_config_recovery", { noticeIds });
+    noticeIds.forEach((noticeId) => shownConfigRecoveryNoticeIds.add(noticeId));
+  } catch (error) {
+    setFlash("error", `处理配置恢复提示失败：${formatErrorMessage(error)}`);
+  } finally {
+    configRecoveryDialogInFlight = false;
+  }
 }
 
 async function symbioticThirdPartyConfigInputFromDraft(
