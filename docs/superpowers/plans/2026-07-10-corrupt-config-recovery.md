@@ -520,7 +520,7 @@ git commit -m "feat: add corrupt config recovery dialog"
 - Modify: `src/main.ts:1-20,257-310,423-445`
 - Modify: `tests/sidebar-layout.test.ts`
 
-- [ ] **Step 1: 写入“我知道了”集成失败测试**
+- [x] **Step 1: 写入“我知道了”集成失败测试**
 
 Tauri 模拟的 `load_snapshot` 返回一个恢复事件；导入 `main` 后断言弹框出现，点击 `我知道了`，并断言：
 
@@ -531,7 +531,7 @@ expect(invokeMock).toHaveBeenCalledWith("acknowledge_config_recovery", {
 expect(document.querySelector('[data-role="config-recovery-dialog"]')).toBeNull();
 ```
 
-- [ ] **Step 2: 写入“打开恢复目录”集成失败测试**
+- [x] **Step 2: 写入“打开恢复目录”集成失败测试**
 
 点击 `打开恢复目录` 后按顺序断言：
 
@@ -544,13 +544,13 @@ expect(invokeMock).toHaveBeenCalledWith("acknowledge_config_recovery", {
 
 再次返回相同事件并刷新快照，断言当前进程不再次显示相同 ID。
 
-- [ ] **Step 3: 运行集成测试确认失败**
+- [x] **Step 3: 运行集成测试确认失败**
 
 Run: `npm test -- tests/sidebar-layout.test.ts -t 'config recovery'`
 
 Expected: FAIL，没有弹框或命令调用。
 
-- [ ] **Step 4: 实现快照触发、去重和命令调用**
+- [x] **Step 4: 实现快照触发、去重和命令调用**
 
 在 `main.ts` 引入 `showConfigRecoveryDialog`，维护：
 
@@ -561,7 +561,7 @@ let configRecoveryDialogInFlight = false;
 
 `setSnapshot` 后调用 `void presentConfigRecoveryNotices(snapshot.configRecoveryNotices ?? [])`。函数过滤已显示 ID、设置 in-flight、等待弹框结果；如果结果为 `openRecoveryDir`，先调用 `open_config_recovery_dir`；随后调用 `acknowledge_config_recovery`。只有确认命令成功后才把 ID 加入集合；失败时用现有 `setFlash("error", ...)` 显示错误，并允许后续重试。
 
-- [ ] **Step 5: 运行前端测试和构建**
+- [x] **Step 5: 运行前端测试和构建**
 
 Run: `npm test`
 
@@ -571,7 +571,7 @@ Run: `npm run build`
 
 Expected: TypeScript 检查和 Vite 构建成功。
 
-- [ ] **Step 6: 运行完整 Rust 验证**
+- [x] **Step 6: 运行完整 Rust 验证**
 
 Run: `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`
 
@@ -579,7 +579,7 @@ Run: `cargo test --manifest-path src-tauri/Cargo.toml`
 
 Expected: 所有 Rust 测试 PASS。
 
-- [ ] **Step 7: 提交前端集成**
+- [x] **Step 7: 提交前端集成**
 
 ```bash
 git add src/main.ts tests/sidebar-layout.test.ts
