@@ -21,7 +21,7 @@ mod updates;
 
 use config_recovery::{
     acknowledge_pending_notices, atomic_write_json, merge_recovery_notices,
-    quarantine_corrupt_file, read_pending_notices, record_pending_notices,
+    quarantine_corrupt_file, read_pending_notices, record_pending_notices, recovery_dir,
     stable_invalid_file_notice,
 };
 pub use config_recovery::{ConfigRecoveryKind, ConfigRecoveryNotice};
@@ -2926,6 +2926,28 @@ impl ProfileManager {
         } else {
             Err(AppError::Message(
                 "Failed to open the Codex directory.".into(),
+            ))
+        }
+    }
+
+    pub fn open_config_recovery_dir(&self) -> Result<(), AppError> {
+        let recovery_dir = recovery_dir(&self.app_data_dir);
+        fs::create_dir_all(&recovery_dir)?;
+
+        #[cfg(target_os = "macos")]
+        let status = Command::new("open").arg(&recovery_dir).status()?;
+
+        #[cfg(target_os = "windows")]
+        let status = Command::new("explorer").arg(&recovery_dir).status()?;
+
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let status = Command::new("xdg-open").arg(&recovery_dir).status()?;
+
+        if status.success() {
+            Ok(())
+        } else {
+            Err(AppError::Message(
+                "Failed to open the recovery directory.".into(),
             ))
         }
     }

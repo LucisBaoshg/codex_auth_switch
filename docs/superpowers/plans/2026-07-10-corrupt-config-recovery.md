@@ -369,7 +369,7 @@ git commit -m "fix: tolerate invalid active Codex config"
 - Modify: `src-tauri/src/lib.rs:1-70,595-700`
 - Modify: `src-tauri/src/core/config_recovery.rs`
 
-- [ ] **Step 1: 写入纯函数失败测试**
+- [x] **Step 1: 写入纯函数失败测试**
 
 在 `lib.rs` 的 `#[cfg(test)]` 模块测试进程内与快照事件按 ID 合并，以及确认后只移除指定 ID：
 
@@ -384,13 +384,13 @@ fn merge_pending_recovery_notices_is_stable_and_deduplicated() {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml merge_pending_recovery_notices_is_stable_and_deduplicated -- --nocapture`
 
 Expected: FAIL，`PendingConfigRecoveryState` 尚不存在。
 
-- [ ] **Step 3: 实现桥接与命令**
+- [x] **Step 3: 实现桥接与命令**
 
 实现：
 
@@ -409,7 +409,7 @@ fn open_config_recovery_dir(app: AppHandle) -> Result<(), String>;
 
 把两个命令加入 `generate_handler!`。
 
-- [ ] **Step 4: 运行 Rust 测试与格式检查**
+- [x] **Step 4: 运行 Rust 测试与格式检查**
 
 Run: `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`
 
@@ -417,7 +417,7 @@ Run: `cargo test --manifest-path src-tauri/Cargo.toml`
 
 Expected: 所有 Rust 测试 PASS。
 
-- [ ] **Step 5: 提交 Tauri 桥接**
+- [x] **Step 5: 提交 Tauri 桥接**
 
 ```bash
 git add src-tauri/src/lib.rs src-tauri/src/core/config_recovery.rs
