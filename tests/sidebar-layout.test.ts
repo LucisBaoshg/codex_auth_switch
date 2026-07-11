@@ -4069,19 +4069,21 @@ test("lays out local profile details in a tabbed overview / config view", async 
   });
 
   await import("../src/main");
-  await flushUi();
-  await flushUi();
+  await vi.waitFor(() => {
+    expect(
+      document.querySelector('[data-action="view-profile-details"][data-id="local-oauth"]'),
+    ).not.toBeNull();
+  }, { timeout: 3000 });
 
   document
     .querySelector<HTMLButtonElement>('[data-action="view-profile-details"][data-id="local-oauth"]')
     ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-  await flushUi();
-  await flushUi();
-  await flushUi();
 
-  const layout = document.querySelector('[data-role="editor-detail-layout"]');
-
-  expect(layout).not.toBeNull();
+  const layout = await vi.waitFor(() => {
+    const element = document.querySelector('[data-role="editor-detail-layout"]');
+    expect(element).not.toBeNull();
+    return element;
+  }, { timeout: 3000 });
   // Tabbed detail view: tab bar first, then the active tab panel.
   expect(layout?.children.item(0)?.getAttribute("data-role")).toBe("editor-detail-tabs");
   expect(layout?.children.item(1)?.getAttribute("data-role")).toBe("editor-tab-panel");
@@ -4096,9 +4098,10 @@ test("lays out local profile details in a tabbed overview / config view", async 
   document
     .querySelector<HTMLButtonElement>('[data-action="editor-detail-config"]')
     ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-  await flushUi();
+  await vi.waitFor(() => {
+    expect(document.querySelector('[data-role="editor-config-section"] #editor-auth-json')).not.toBeNull();
+  }, { timeout: 3000 });
 
-  expect(document.querySelector('[data-role="editor-config-section"] #editor-auth-json')).not.toBeNull();
   expect(document.querySelector('[data-role="editor-summary-section"]')).toBeNull();
 });
 
