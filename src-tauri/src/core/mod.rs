@@ -992,7 +992,7 @@ impl ProfileManager {
             }
         }
 
-        profiles.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        profiles.sort_by_key(|profile| std::cmp::Reverse(profile.updated_at));
         Ok((profiles, notices))
     }
 
@@ -1619,7 +1619,7 @@ impl ProfileManager {
                 }
             });
 
-            for (t, file_size) in threads.into_iter().zip(file_sizes.into_iter()) {
+            for (t, file_size) in threads.into_iter().zip(file_sizes) {
                 list.push(CodexSessionInfo {
                     id: t.id,
                     rollout_path: t.rollout_path.map(|p| p.to_string_lossy().to_string()),
