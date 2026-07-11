@@ -8,6 +8,8 @@
     "build": "tsc && vite build",
     "preview": "vite preview --host 127.0.0.1 --port 1420",
     "test": "vitest run",
+    "clean": "bash scripts/cleanup-workspace.sh",
+    "prepare": "git config core.hooksPath .githooks",
     "tauri": "tauri",
     "build:mac:release-local": "PATH=\"$PATH:/opt/homebrew/bin:/opt/homebrew/sbin\" ./node_modules/.bin/tauri build --bundles app,dmg"
   },
