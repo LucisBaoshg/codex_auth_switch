@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use uuid::Uuid;
 
-const INTERNAL_UPDATE_BASE_URL: &str = "http://tc-github-mirror.ite.tool4seller.com";
+const INTERNAL_UPDATE_BASE_URL: &str = "https://tc-github-mirror.ite.tool4seller.com";
 const INTERNAL_UPDATE_APP_ID: &str = "codex-auth-switch";
 const UPDATE_KIND_INSTALLER: &str = "installer";
 const UPDATE_KIND_IN_APP: &str = "in_app_update";
@@ -211,7 +211,17 @@ pub fn check_for_update() -> Result<UpdateCheckResult, AppError> {
     })
 }
 
+fn require_https_url(url: &str, action: &str) -> Result<(), AppError> {
+    if !url.starts_with("https://") {
+        return Err(AppError::Message(format!(
+            "{action}被拒绝：更新链接必须使用 HTTPS（收到 {url}）。"
+        )));
+    }
+    Ok(())
+}
+
 pub fn install_update(payload: UpdateInstallRequest) -> Result<(), AppError> {
+    require_https_url(&payload.download_url, "安装更新")?;
     match payload.kind.as_str() {
         UPDATE_KIND_INSTALLER => open_url(&payload.download_url),
         UPDATE_KIND_IN_APP => install_in_app_update(&payload),
@@ -244,14 +254,14 @@ fn install_location_status_for_path(path: &Path) -> InstallLocationStatus {
             };
         }
 
-        return InstallLocationStatus {
+        InstallLocationStatus {
             update_safe: false,
             requires_applications_install: true,
             install_path: install_root.display().to_string(),
             message: Some(
                 "当前应用不在 Applications 文件夹中。请先将 Codex 助手拖到 Applications 后再重新打开，然后再执行更新。".into(),
             ),
-        };
+        }
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -481,8 +491,8 @@ fn normalize_version_string(version: &str) -> String {
 }
 
 fn open_url(url: &str) -> Result<(), AppError> {
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return Err(AppError::Message("仅允许打开 http/https 链接。".into()));
+    if !url.starts_with("https://") {
+        return Err(AppError::Message("仅允许打开 https 链接。".into()));
     }
 
     #[cfg(target_os = "macos")]
@@ -505,8 +515,25 @@ fn open_url(url: &str) -> Result<(), AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::install_location_status_for_path;
+    use super::{install_location_status_for_path, require_https_url, INTERNAL_UPDATE_BASE_URL};
     use std::path::Path;
+
+    #[test]
+    fn update_base_url_uses_https() {
+        assert!(INTERNAL_UPDATE_BASE_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn https_urls_are_accepted_for_updates() {
+        assert!(require_https_url("https://mirror.example.com/pkg.tar.gz", "下载").is_ok());
+    }
+
+    #[test]
+    fn plain_http_urls_are_rejected_for_updates() {
+        assert!(require_https_url("http://mirror.example.com/pkg.tar.gz", "下载").is_err());
+        assert!(require_https_url("javascript:alert(1)", "下载").is_err());
+        assert!(require_https_url("file:///tmp/pkg.tar.gz", "下载").is_err());
+    }
 
     #[test]
     fn install_location_check_accepts_system_applications_bundle() {

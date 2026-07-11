@@ -21,6 +21,10 @@ export function getFlashIcon(kind: FlashKind): string {
   }
 }
 
+export function isSafeLinkUrl(url: string): boolean {
+  return /^https?:\/\//i.test(url.trim());
+}
+
 export function formatMessageText(text: string): string {
   let escaped = escapeHtml(text);
 
@@ -29,7 +33,15 @@ export function formatMessageText(text: string): string {
   });
 
   escaped = escaped.replace(/`([^`\n]+)`/g, "<code>$1</code>");
-  escaped = escaped.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" class="chat-link">$1</a>');
+  escaped = escaped.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, label, url) => {
+    // Session content can come from other users; only http(s) may become a
+    // clickable link, otherwise javascript:/data: URLs would run inside the
+    // webview with full IPC access.
+    if (!isSafeLinkUrl(url)) {
+      return match;
+    }
+    return `<a href="${url}" target="_blank" rel="noopener noreferrer" class="chat-link">${label}</a>`;
+  });
   escaped = escaped.split("\n").join("<br>");
 
   return escaped;
