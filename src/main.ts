@@ -154,19 +154,51 @@ import {
   selectOwnNetworkProfiles,
   selectSessionRenderState,
 } from "./desktop-state";
+import {
+  beginPendingAction,
+  clearFlash,
+  desktopInvoke,
+  endPendingAction,
+  errorMessage,
+  formatErrorMessage,
+  isTauriRuntime,
+  registerRender,
+  setBusy,
+  setFlash,
+  state,
+} from "./app-runtime";
+import {
+  networkErrorMessageFromBody,
+  networkHttpRequest,
+  networkUnauthorizedError,
+  parseNetworkJson,
+  type NetworkHttpResponse,
+} from "./network-http";
+import {
+  defaultPacProxyOptions,
+  pacProxyOptionByKey,
+  previewPacProxyStatus,
+  selectedPacProxyOptionLabel,
+} from "./pac-proxy-presets";
+import { createPreviewCodexUsageStats } from "./usage-preview-data";
+import {
+  archiveCodexSession,
+  batchDeleteSessions,
+  deleteCodexSession,
+  deleteProjectSessions,
+  fetchCodexSessionMessages,
+  fetchCodexSessions,
+  refreshSessionDetailPane,
+  refreshSessionsListView,
+  renameCodexSession,
+} from "./session-actions";
 import "./styles.css";
 
 const desktopLoginPollIntervalMs =
   typeof process !== "undefined" && process.env.NODE_ENV === "test" ? 10 : 2000;
 const sharedAuthAutoSyncIntervalMs = 15000;
 
-const isTauriRuntime = "__TAURI_INTERNALS__" in window;
 const appRoot = document.querySelector<HTMLDivElement>("#app");
-
-type NetworkHttpResponse = {
-  status: number;
-  body: string;
-};
 
 if (!appRoot) {
   throw new Error("App root was not found.");
@@ -174,135 +206,13 @@ if (!appRoot) {
 
 const app = appRoot;
 
-function networkUnauthorizedError(actionLabel: string): Error {
-  if (!hasNetworkAccessToken(state.networkSharing)) {
-    state.networkAuthRequired = true;
-    return new Error("请先使用钉钉 SSO 登录企业共享中心。");
-  }
-
-  state.networkAuthRequired = false;
-  return new Error(`${actionLabel}未通过服务端权限校验，已保留当前登录状态。请刷新共享中心或重新登录后再试。`);
-}
-
-function networkErrorMessageFromBody(body: string, fallback: string): string {
-  try {
-    const parsed = JSON.parse(body) as { error?: string };
-    return parsed.error || fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function parseNetworkJson<T>(body: string, fallback: string): T {
-  try {
-    return JSON.parse(body) as T;
-  } catch {
-    throw new Error(fallback);
-  }
-}
-
-async function networkHttpRequest(
-  method: "GET" | "POST",
-  url: string,
-  actionLabel: string,
-  options: {
-    token?: string | null;
-    body?: string | null;
-    contentType?: string;
-  } = {},
-): Promise<NetworkHttpResponse> {
-  const token = options.token?.trim() || null;
-  const body = options.body ?? null;
-  if (isTauriRuntime) {
-    try {
-      return await desktopInvoke<NetworkHttpResponse>("network_request", {
-        method,
-        url,
-        token,
-        body,
-      });
-    } catch (error) {
-      throw new Error(`${actionLabel}请求失败：${errorMessage(error)}`);
-    }
-  }
-
-  try {
-    const headers: HeadersInit = {};
-    if (token) {
-      headers.Authorization = `Bearer ${token}`;
-    }
-    if (body !== null) {
-      headers["Content-Type"] = options.contentType ?? "application/json";
-    }
-    const response = await fetch(url, {
-      method,
-      cache: "no-store",
-      ...(Object.keys(headers).length > 0 ? { headers } : {}),
-      ...(body !== null ? { body } : {}),
-    });
-    return {
-      status: response.status,
-      body: await response.text(),
-    };
-  } catch (error) {
-    throw new Error(`${actionLabel}请求失败：${errorMessage(error)}`);
-  }
-}
-
-function formatErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-const state = createDesktopState(loadNetworkSharingSettings());
 const shownConfigRecoveryNoticeIds = new Set<string>();
 let configRecoveryDialogInFlight = false;
 
-let flashTimeoutId: number | null = null;
 const promptedRemoteUpdateKeys = new Set<string>();
 let remoteUpdateCheckInFlight = false;
 let sharedAuthWriteBackInFlight = false;
 const checkedRemoteVersionProfileIds = new Set<string>();
-
-function setFlash(kind: FlashKind, text: string): void {
-  state.flash = { kind, text };
-  render();
-
-  if (flashTimeoutId !== null) {
-    window.clearTimeout(flashTimeoutId);
-  }
-  flashTimeoutId = window.setTimeout(() => {
-    state.flash = null;
-    flashTimeoutId = null;
-    render();
-  }, 4000);
-}
-
-function clearFlash(): void {
-  state.flash = null;
-  if (flashTimeoutId !== null) {
-    window.clearTimeout(flashTimeoutId);
-    flashTimeoutId = null;
-  }
-}
-
-function setBusy(nextBusy: boolean): void {
-  state.busy = nextBusy;
-  render();
-}
-
-function beginPendingAction(key: string): void {
-  state.pendingActions.add(key);
-  render();
-}
-
-function endPendingAction(key: string): void {
-  state.pendingActions.delete(key);
-  render();
-}
 
 function setSnapshot(snapshot: AppSnapshot): void {
   applySnapshotToDesktopState(state, snapshot);
@@ -410,17 +320,6 @@ function applyEditorDocument(document: ProfileDocument): void {
   state.editor = createEditorFromDocument(document);
 }
 
-async function desktopInvoke<T>(
-  command: string,
-  args?: Record<string, unknown>,
-): Promise<T> {
-  if (!isTauriRuntime) {
-    throw new Error("当前是浏览器预览模式。请使用 `npm run tauri dev` 启动桌面端。");
-  }
-
-  return invoke<T>(command, args);
-}
-
 function remoteUpdatedAtFromNetworkProfile(profile: NetworkProfile): string | null {
   return profile.contentUpdatedAt ?? profile.updatedAt ?? profile.createdAt ?? null;
 }
@@ -472,148 +371,6 @@ async function refreshSnapshot(): Promise<void> {
     state.busy = false;
     render();
   }
-}
-
-function createPreviewCodexUsageStats(): CodexUsageStatsSnapshot {
-  const updatedAt = new Date().toISOString();
-  return {
-    updatedAt,
-    filter: state.usageStatsFilter,
-    sync: {
-      imported: 3,
-      skipped: 2,
-      filesScanned: 4,
-      errors: [],
-    },
-    summary: {
-      totalRequests: 18,
-      totalCostUsd: "0.387250",
-      totalInputTokens: 48230,
-      totalOutputTokens: 12680,
-      totalCacheReadTokens: 39200,
-      totalCacheCreationTokens: 0,
-      totalReasoningOutputTokens: 5860,
-      realTotalTokens: 100110,
-      cacheHitRate: 39200 / (48230 + 39200),
-    },
-    trends: [
-      {
-        date: "2026-06-06",
-        requestCount: 5,
-        totalCostUsd: "0.082100",
-        totalInputTokens: 12600,
-        totalOutputTokens: 2800,
-        totalCacheReadTokens: 9200,
-        totalCacheCreationTokens: 0,
-        totalReasoningOutputTokens: 920,
-        realTotalTokens: 24600,
-      },
-      {
-        date: "2026-06-07",
-        requestCount: 7,
-        totalCostUsd: "0.163900",
-        totalInputTokens: 18600,
-        totalOutputTokens: 5200,
-        totalCacheReadTokens: 15400,
-        totalCacheCreationTokens: 0,
-        totalReasoningOutputTokens: 2380,
-        realTotalTokens: 39200,
-      },
-      {
-        date: "2026-06-08",
-        requestCount: 6,
-        totalCostUsd: "0.141250",
-        totalInputTokens: 17030,
-        totalOutputTokens: 4680,
-        totalCacheReadTokens: 14600,
-        totalCacheCreationTokens: 0,
-        totalReasoningOutputTokens: 2560,
-        realTotalTokens: 36310,
-      },
-    ],
-    modelBreakdown: [
-      {
-        name: "gpt-5.4",
-        requestCount: 12,
-        totalCostUsd: "0.301300",
-        totalInputTokens: 34200,
-        totalOutputTokens: 9820,
-        totalCacheReadTokens: 28800,
-        totalCacheCreationTokens: 0,
-        totalReasoningOutputTokens: 4720,
-        realTotalTokens: 72820,
-      },
-      {
-        name: "gpt-5.4-mini",
-        requestCount: 6,
-        totalCostUsd: "0.085950",
-        totalInputTokens: 14030,
-        totalOutputTokens: 2860,
-        totalCacheReadTokens: 10400,
-        totalCacheCreationTokens: 0,
-        totalReasoningOutputTokens: 1140,
-        realTotalTokens: 27290,
-      },
-    ],
-    effortBreakdown: [
-      {
-        name: "high",
-        requestCount: 9,
-        totalCostUsd: "0.268400",
-        totalInputTokens: 27600,
-        totalOutputTokens: 8360,
-        totalCacheReadTokens: 21400,
-        totalCacheCreationTokens: 0,
-        totalReasoningOutputTokens: 4620,
-        realTotalTokens: 57360,
-      },
-      {
-        name: "medium",
-        requestCount: 9,
-        totalCostUsd: "0.118850",
-        totalInputTokens: 20630,
-        totalOutputTokens: 4320,
-        totalCacheReadTokens: 17800,
-        totalCacheCreationTokens: 0,
-        totalReasoningOutputTokens: 1240,
-        realTotalTokens: 42750,
-      },
-    ],
-    availableModels: ["gpt-5.4", "gpt-5.4-mini"],
-    availableEfforts: ["high", "medium"],
-    logs: [
-      {
-        requestId: "codex_session:preview-a:3",
-        sessionId: "preview-a",
-        model: "gpt-5.4",
-        provider: "openai",
-        effort: "high",
-        createdAt: updatedAt,
-        inputTokens: 2250,
-        outputTokens: 760,
-        cacheReadTokens: 1800,
-        cacheCreationTokens: 0,
-        reasoningOutputTokens: 420,
-        totalCostUsd: "0.017475",
-        sourcePath: "/Users/example/.codex/sessions/2026/06/08/rollout-preview-a.jsonl",
-      },
-      {
-        requestId: "codex_session:preview-b:2",
-        sessionId: "preview-b",
-        model: "gpt-5.4-mini",
-        provider: "openai",
-        effort: "medium",
-        createdAt: "2026-06-08T08:12:00Z",
-        inputTokens: 1680,
-        outputTokens: 520,
-        cacheReadTokens: 980,
-        cacheCreationTokens: 0,
-        reasoningOutputTokens: 180,
-        totalCostUsd: "0.004335",
-        sourcePath: "/Users/example/.codex/sessions/2026/06/08/rollout-preview-b.jsonl",
-      },
-    ],
-  };
 }
 
 function usageFilterPayload(): { filter: CodexUsageStatsFilter } {
@@ -690,20 +447,6 @@ async function loadUsageStats(options: { showSuccess?: boolean } = {}): Promise<
     render();
   }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 async function loadAppVersion(): Promise<void> {
   if (!isTauriRuntime) {
@@ -2128,41 +1871,6 @@ function startSharedAuthAutoSync(): void {
   }, sharedAuthAutoSyncIntervalMs);
 }
 
-function defaultPacProxyOptions(): PacProxyStatus["pacOptions"] {
-  return [
-    { key: "jp", label: "日本（Japan）", url: "http://10.12.0.24/proxy.pac" },
-    { key: "us", label: "美国（US）", url: "http://10.12.0.24/proxy-us.pac" },
-    { key: "ca", label: "加拿大（Canada）", url: "http://10.12.0.24/proxy-ca.pac" },
-  ];
-}
-
-function pacProxyOptionByKey(selectedPacKey: string): PacProxyStatus["pacOptions"][number] {
-  return defaultPacProxyOptions().find((option) => option.key === selectedPacKey)
-    ?? defaultPacProxyOptions()[0];
-}
-
-function selectedPacProxyOptionLabel(status: PacProxyStatus): string {
-  return status.pacOptions.find((option) => option.key === status.selectedPacKey)?.label
-    ?? status.pacUrl;
-}
-
-function previewPacProxyStatus(enabled: boolean = false, selectedPacKey: string = "jp"): PacProxyStatus {
-  const availableServices = ["Ethernet", "Wi-Fi", "iPhone USB"];
-  const selectedServices = ["Ethernet", "Wi-Fi"];
-  const selectedOption = pacProxyOptionByKey(selectedPacKey);
-  return {
-    supported: true,
-    enabled,
-    pacUrl: selectedOption.url,
-    selectedPacKey: selectedOption.key,
-    pacOptions: defaultPacProxyOptions(),
-    availableServices,
-    selectedServices,
-    services: enabled ? selectedServices : [],
-    message: "当前是浏览器预览模式，不会修改系统代理。",
-  };
-}
-
 async function loadPacProxyStatus(options: { silent?: boolean } = {}): Promise<void> {
   state.pacProxyLoading = true;
   render();
@@ -2762,238 +2470,6 @@ function render(): void {
     currentView: state.view,
     requestAnimationFrame,
   });
-}
-
-function refreshSessionsListView(): void {
-  const listScroll = document.querySelector(".sessions-list-scroll");
-  if (listScroll) {
-    listScroll.innerHTML = renderSessionsListHtml(selectSessionRenderState(state));
-  }
-}
-
-function refreshSessionDetailPane(): void {
-  const detailPane = document.querySelector(".sessions-detail-pane");
-  if (detailPane) {
-    detailPane.innerHTML = renderSessionDetailHtml(selectSessionRenderState(state));
-  }
-}
-
-async function fetchCodexSessions(): Promise<void> {
-  if (!isTauriRuntime) {
-    state.sessions = createPreviewCodexSessions(Date.now());
-    state.selectedSessionId = null;
-    state.sessionMessages = [];
-    render();
-    return;
-  }
-
-  // Only show the list-wide loading spinner on initial load (when list is empty)
-  // to prevent UI layout flash when navigating between active views
-  const isFirstLoad = state.sessions.length === 0;
-  if (isFirstLoad) {
-    state.sessionsLoading = true;
-    refreshSessionsListView();
-  }
-  try {
-    const list = await desktopInvoke<CodexSessionInfo[]>("list_codex_sessions");
-    state.sessions = list;
-
-    // Preserve the active session selection if it remains in the new list
-    if (state.selectedSessionId) {
-      const exists = list.some(s => s.id === state.selectedSessionId);
-      if (!exists) {
-        state.selectedSessionId = null;
-        state.sessionMessages = [];
-      }
-    }
-  } catch (error) {
-    setFlash("error", `获取会话失败: ${formatErrorMessage(error)}`);
-  } finally {
-    state.sessionsLoading = false;
-    refreshSessionsListView();
-    refreshSessionDetailPane();
-  }
-}
-
-async function fetchCodexSessionMessages(threadId: string): Promise<void> {
-  if (!isTauriRuntime) {
-    state.selectedSessionId = threadId;
-    state.sessionMessages = createPreviewCodexSessionMessages();
-    state.showAllMessages = false;
-    refreshSessionDetailPane();
-    return;
-  }
-
-  state.messagesLoading = true;
-  state.showAllMessages = false;
-  refreshSessionDetailPane();
-  try {
-    const messages = await desktopInvoke<CodexMessage[]>("get_codex_session_messages", { threadId });
-    state.selectedSessionId = threadId;
-    state.sessionMessages = messages;
-  } catch (error) {
-    setFlash("error", `获取会话消息失败: ${formatErrorMessage(error)}`);
-  } finally {
-    state.messagesLoading = false;
-    refreshSessionDetailPane();
-  }
-}
-
-async function renameCodexSession(threadId: string, title: string): Promise<void> {
-  if (!isTauriRuntime) {
-    const session = state.sessions.find(s => s.id === threadId);
-    if (session) session.title = title;
-    setFlash("success", "会话重命名成功");
-    refreshSessionsListView();
-    refreshSessionDetailPane();
-    return;
-  }
-
-  setBusy(true);
-  try {
-    await desktopInvoke("rename_codex_session", { threadId, newTitle: title });
-    const session = state.sessions.find(s => s.id === threadId);
-    if (session) session.title = title;
-    setFlash("success", "会话重命名成功");
-  } catch (error) {
-    setFlash("error", `重命名失败: ${formatErrorMessage(error)}`);
-  } finally {
-    setBusy(false);
-    refreshSessionsListView();
-    refreshSessionDetailPane();
-  }
-}
-
-async function archiveCodexSession(threadId: string, archive: boolean): Promise<void> {
-  if (!isTauriRuntime) {
-    const session = state.sessions.find(s => s.id === threadId);
-    if (session) {
-      session.archived = archive;
-      session.rolloutPath = archive
-        ? "/Users/example/.codex/archived_sessions/rollout-mock.jsonl"
-        : "/Users/example/.codex/sessions/2026/05/21/rollout-mock.jsonl";
-    }
-    setFlash("success", archive ? "会话归档成功" : "会话已取消归档");
-    refreshSessionsListView();
-    refreshSessionDetailPane();
-    return;
-  }
-
-  setBusy(true);
-  try {
-    await desktopInvoke("archive_codex_session", { threadId, archive });
-    const list = await desktopInvoke<CodexSessionInfo[]>("list_codex_sessions");
-    state.sessions = list;
-    const session = list.find(s => s.id === threadId);
-    if (session) {
-      const messages = await desktopInvoke<CodexMessage[]>("get_codex_session_messages", { threadId });
-      state.sessionMessages = messages;
-    } else {
-      state.selectedSessionId = null;
-      state.sessionMessages = [];
-    }
-    setFlash("success", archive ? "会话归档成功" : "会话已取消归档");
-  } catch (error) {
-    setFlash("error", `归档操作失败: ${formatErrorMessage(error)}`);
-  } finally {
-    setBusy(false);
-    refreshSessionsListView();
-    refreshSessionDetailPane();
-  }
-}
-
-async function deleteCodexSession(threadId: string): Promise<void> {
-  const confirmed = await nativeConfirm("您确定要物理删除该会话及其对话文件吗？此操作无法撤销，物理文件将被彻底删除以释放磁盘空间！", "确认物理删除", true);
-  if (!confirmed) return;
-
-  if (!isTauriRuntime) {
-    state.sessions = state.sessions.filter(s => s.id !== threadId);
-    if (state.selectedSessionId === threadId) {
-      state.selectedSessionId = null;
-      state.sessionMessages = [];
-    }
-    setFlash("success", "会话已物理删除");
-    refreshSessionsListView();
-    refreshSessionDetailPane();
-    return;
-  }
-
-  setBusy(true);
-  try {
-    await desktopInvoke("delete_codex_session", { threadId });
-    state.sessions = state.sessions.filter(s => s.id !== threadId);
-    if (state.selectedSessionId === threadId) {
-      state.selectedSessionId = null;
-      state.sessionMessages = [];
-    }
-    setFlash("success", "会话及文件已物理删除");
-  } catch (error) {
-    setFlash("error", `删除会话失败: ${formatErrorMessage(error)}`);
-  } finally {
-    setBusy(false);
-    refreshSessionsListView();
-    refreshSessionDetailPane();
-  }
-}
-
-async function deleteProjectSessions(cwd: string, sessionIds: string[]): Promise<void> {
-  const confirmed = await nativeConfirm(
-    `您确定要物理清空项目 "${cwd}" 的所有会话文件吗？共包含 ${sessionIds.length} 个会话。此操作无法撤销！`,
-    "确认清空项目会话",
-    true
-  );
-  if (!confirmed) return;
-
-  if (!isTauriRuntime) {
-    state.sessions = state.sessions.filter(s => !sessionIds.includes(s.id));
-    setFlash("success", "已成功清理该项目的所有会话");
-    render();
-    return;
-  }
-
-  setBusy(true);
-  try {
-    for (const id of sessionIds) {
-      await desktopInvoke("delete_codex_session", { threadId: id });
-    }
-    state.sessions = state.sessions.filter(s => !sessionIds.includes(s.id));
-    setFlash("success", "已成功物理清理该项目的所有会话文件");
-  } catch (error) {
-    setFlash("error", `清理项目会话失败: ${formatErrorMessage(error)}`);
-  } finally {
-    setBusy(false);
-    render();
-  }
-}
-
-async function batchDeleteSessions(sessionIds: string[]): Promise<void> {
-  const confirmed = await nativeConfirm(
-    `您确定要批量物理删除选中的 ${sessionIds.length} 个会话及其文件吗？此操作无法撤销！`,
-    "确认批量删除",
-    true
-  );
-  if (!confirmed) return;
-
-  if (!isTauriRuntime) {
-    state.sessions = state.sessions.filter(s => !sessionIds.includes(s.id));
-    setFlash("success", "已成功删除选中的会话");
-    render();
-    return;
-  }
-
-  setBusy(true);
-  try {
-    for (const id of sessionIds) {
-      await desktopInvoke("delete_codex_session", { threadId: id });
-    }
-    state.sessions = state.sessions.filter(s => !sessionIds.includes(s.id));
-    setFlash("success", "已成功批量物理删除选中的会话文件");
-  } catch (error) {
-    setFlash("error", `批量删除会话失败: ${formatErrorMessage(error)}`);
-  } finally {
-    setBusy(false);
-    render();
-  }
 }
 
 function bindEvents(): void {
@@ -3693,6 +3169,7 @@ function bindEvents(): void {
   });
 }
 
+registerRender(render);
 render();
 if (state.networkSharing.token.trim()) {
   void fetchNetworkCurrentUser({ silent: true });

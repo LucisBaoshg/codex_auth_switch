@@ -140,12 +140,15 @@ test("moves HTML and message text helpers out of the desktop entrypoint", () => 
   expect(mainTs).not.toContain("function formatMessageText");
 });
 
-test("keeps single-file error formatting helper in the desktop entrypoint", () => {
+test("keeps error formatting helpers in the shared app runtime", () => {
   const mainTs = readProjectFile("src/main.ts");
+  const appRuntimeTs = readProjectFile("src/app-runtime.ts");
 
   expect(existsSync(join(root, "src/error-utils.ts"))).toBe(false);
   expect(mainTs).not.toContain('from "./error-utils"');
-  expect(mainTs).toContain("function formatErrorMessage");
+  expect(mainTs).not.toContain("function formatErrorMessage");
+  expect(appRuntimeTs).toContain("function formatErrorMessage");
+  expect(mainTs).toContain('from "./app-runtime"');
 });
 
 test("moves app chrome renderers out of the desktop entrypoint", () => {
