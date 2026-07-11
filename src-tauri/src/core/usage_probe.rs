@@ -30,7 +30,10 @@ pub(crate) fn fetch_codex_usage_snapshot(auth_json: &str) -> Result<CodexUsageSn
     parse_codex_usage_response(&body, auth_json)
 }
 
-pub(crate) fn parse_codex_usage_response(body: &str, auth_json: &str) -> Result<CodexUsageSnapshot, AppError> {
+pub(crate) fn parse_codex_usage_response(
+    body: &str,
+    auth_json: &str,
+) -> Result<CodexUsageSnapshot, AppError> {
     let root = serde_json::from_str::<serde_json::Value>(body)?;
     let rate_limit = root.get("rate_limit");
     let primary = rate_limit
@@ -125,7 +128,10 @@ pub(crate) fn ceil_minutes(seconds: i64) -> Option<i64> {
     Some((seconds + 59) / 60)
 }
 
-pub(crate) fn fetch_third_party_usage_snapshot(auth_json: &str, config_toml: &str) -> ThirdPartyUsageSnapshot {
+pub(crate) fn fetch_third_party_usage_snapshot(
+    auth_json: &str,
+    config_toml: &str,
+) -> ThirdPartyUsageSnapshot {
     match resolve_third_party_probe_target(auth_json, config_toml) {
         Ok(target) if target.provider_name.eq_ignore_ascii_case("ylscode") => {
             fetch_ylscode_usage_snapshot(&target)
@@ -138,7 +144,9 @@ pub(crate) fn fetch_third_party_usage_snapshot(auth_json: &str, config_toml: &st
     }
 }
 
-pub(crate) fn fetch_ylscode_usage_snapshot(target: &ThirdPartyProbeTarget) -> ThirdPartyUsageSnapshot {
+pub(crate) fn fetch_ylscode_usage_snapshot(
+    target: &ThirdPartyProbeTarget,
+) -> ThirdPartyUsageSnapshot {
     let timeout = third_party_usage_timeout();
     let response = build_http_agent(timeout)
         .get(&ylscode_usage_endpoint())
@@ -227,7 +235,9 @@ pub(crate) fn parse_ylscode_usage_response(body: &str, provider: &str) -> ThirdP
     }
 }
 
-pub(crate) fn parse_ylscode_usage_quota(value: &serde_json::Value) -> Option<ThirdPartyUsageQuotaSnapshot> {
+pub(crate) fn parse_ylscode_usage_quota(
+    value: &serde_json::Value,
+) -> Option<ThirdPartyUsageQuotaSnapshot> {
     if !value.is_object() {
         return None;
     }
@@ -259,7 +269,9 @@ pub(crate) fn parse_ylscode_usage_quota(value: &serde_json::Value) -> Option<Thi
     })
 }
 
-pub(crate) fn parse_ylscode_subscription(value: &serde_json::Value) -> Option<ThirdPartySubscriptionSnapshot> {
+pub(crate) fn parse_ylscode_subscription(
+    value: &serde_json::Value,
+) -> Option<ThirdPartySubscriptionSnapshot> {
     if !value.is_object() {
         return None;
     }
@@ -546,7 +558,7 @@ pub(crate) fn probe_third_party_stream(
 
     match response {
         Ok(response) => {
-            let status_code = Some(response.status() as u16);
+            let status_code = Some(response.status());
             let mut reader = BufReader::new(response.into_reader());
             let mut ttft_ms = None;
 
@@ -615,7 +627,7 @@ pub(crate) fn probe_third_party_stream(
             latency_probe_failure(
                 Some(target.wire_api.clone()),
                 Some(target.model.clone()),
-                Some(code as u16),
+                Some(code),
                 Some(started.elapsed().as_millis() as u64),
                 format!(
                     "上游返回 HTTP {}{}",
@@ -645,7 +657,9 @@ pub(crate) fn probe_third_party_stream(
     }
 }
 
-pub(crate) fn next_sse_event(reader: &mut impl BufRead) -> Result<Option<SseEvent>, std::io::Error> {
+pub(crate) fn next_sse_event(
+    reader: &mut impl BufRead,
+) -> Result<Option<SseEvent>, std::io::Error> {
     let mut event = None;
     let mut data_lines = Vec::new();
     let mut saw_payload = false;
@@ -734,7 +748,10 @@ pub(crate) fn latency_probe_failure(
     }
 }
 
-pub(crate) fn third_party_usage_failure(provider: Option<String>, error: String) -> ThirdPartyUsageSnapshot {
+pub(crate) fn third_party_usage_failure(
+    provider: Option<String>,
+    error: String,
+) -> ThirdPartyUsageSnapshot {
     ThirdPartyUsageSnapshot {
         provider,
         remaining: None,

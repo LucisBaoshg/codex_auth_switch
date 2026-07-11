@@ -149,6 +149,7 @@ fn temp_manager() -> (TempDir, TempDir, ProfileManager) {
 
 struct TestServer {
     base_url: String,
+    #[allow(clippy::type_complexity)]
     responses: Arc<Mutex<HashMap<String, (String, String, String, Duration)>>>,
     requests: Arc<Mutex<Vec<String>>>,
     shutdown: Arc<AtomicBool>,

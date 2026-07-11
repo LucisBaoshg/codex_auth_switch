@@ -23,7 +23,9 @@ pub(crate) fn validate_config_toml(contents: &str) -> Result<(), AppError> {
         .map_err(|error| AppError::InvalidConfigToml(error.to_string()))
 }
 
-pub(crate) fn parse_toml_table(contents: &str) -> Result<toml::map::Map<String, toml::Value>, AppError> {
+pub(crate) fn parse_toml_table(
+    contents: &str,
+) -> Result<toml::map::Map<String, toml::Value>, AppError> {
     if contents.trim().is_empty() {
         return Ok(toml::map::Map::new());
     }
@@ -197,7 +199,10 @@ pub(crate) fn managed_config_hash(auth_json: &str, contents: &str) -> Result<Str
     Ok(sha256_bytes(serialized.as_bytes()))
 }
 
-pub(crate) fn normalize_config_toml_for_auth(auth_json: &str, config_toml: &str) -> Result<String, AppError> {
+pub(crate) fn normalize_config_toml_for_auth(
+    auth_json: &str,
+    config_toml: &str,
+) -> Result<String, AppError> {
     let table = parse_toml_table(config_toml)?;
     let mut normalized = shared_config_table(&table);
     let mut managed = managed_config_table(auth_json, &table)?;
@@ -278,7 +283,11 @@ pub(crate) fn migrate_legacy_third_party_config_toml(
     )))
 }
 
-pub(crate) fn standard_third_party_config_toml(base_url: &str, model: &str, review_model: &str) -> String {
+pub(crate) fn standard_third_party_config_toml(
+    base_url: &str,
+    model: &str,
+    review_model: &str,
+) -> String {
     format!(
         r#"openai_base_url = "{}"
 supports_websockets = false
@@ -338,7 +347,10 @@ pub(crate) fn merge_profile_managed_config(
         .map_err(|error| AppError::Message(error.to_string()))
 }
 
-pub(crate) fn merge_features_table(target: &mut toml::map::Map<String, toml::Value>, value: toml::Value) {
+pub(crate) fn merge_features_table(
+    target: &mut toml::map::Map<String, toml::Value>,
+    value: toml::Value,
+) {
     let toml::Value::Table(next_features) = value else {
         target.insert("features".to_string(), value);
         return;
@@ -359,7 +371,10 @@ pub(crate) fn merge_features_table(target: &mut toml::map::Map<String, toml::Val
     target.insert("features".to_string(), toml::Value::Table(merged_features));
 }
 
-pub(crate) fn detect_auth_type_label(auth_json: &str, config_toml: &str) -> Result<String, AppError> {
+pub(crate) fn detect_auth_type_label(
+    auth_json: &str,
+    config_toml: &str,
+) -> Result<String, AppError> {
     let auth = serde_json::from_str::<serde_json::Value>(auth_json)
         .map_err(|error| AppError::InvalidAuthJson(error.to_string()))?;
     let config = parse_toml_table(config_toml)?;
@@ -732,8 +747,10 @@ pub(crate) fn refresh_oauth_auth_json_for_switch(auth_json: &str) -> Result<Stri
     }
 }
 
-
-pub(crate) fn suggested_profile_name(auth_json: &str, config_toml: &str) -> Result<String, AppError> {
+pub(crate) fn suggested_profile_name(
+    auth_json: &str,
+    config_toml: &str,
+) -> Result<String, AppError> {
     let auth_type_label = detect_auth_type_label(auth_json, config_toml)?;
 
     if auth_type_label == "官方 OAuth" {

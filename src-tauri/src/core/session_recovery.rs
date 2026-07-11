@@ -509,7 +509,8 @@ pub(crate) const ALL_PROFILE_SCALAR_KEYS: &[&str] = &[
     "web_search",
     "network_access",
 ];
-pub(crate) const ALL_PROFILE_TABLE_KEYS: &[&str] = &["model_providers", "tui", "sandbox_workspace_write"];
+pub(crate) const ALL_PROFILE_TABLE_KEYS: &[&str] =
+    &["model_providers", "tui", "sandbox_workspace_write"];
 pub(crate) const DEFAULT_CODEX_USAGE_ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/usage";
 pub(crate) const DEFAULT_YLSCODE_USAGE_ENDPOINT: &str = "https://code.ylsagi.com/codex/info";
 pub(crate) const REFRESH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";

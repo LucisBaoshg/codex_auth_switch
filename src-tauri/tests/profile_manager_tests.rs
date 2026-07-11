@@ -599,7 +599,7 @@ fn seed_recovery_database_at(db_path: &Path, threads: &[RecoveryThreadSeed]) {
     if let Some(parent) = db_path.parent() {
         fs::create_dir_all(parent).expect("create recovery db parent");
     }
-    let conn = Connection::open(&db_path).expect("open recovery db");
+    let conn = Connection::open(db_path).expect("open recovery db");
     conn.execute_batch(
         "CREATE TABLE threads (
             id TEXT PRIMARY KEY,

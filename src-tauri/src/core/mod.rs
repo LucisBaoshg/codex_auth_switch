@@ -14,16 +14,17 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 use uuid::Uuid;
 
+mod auth_config;
 mod config_recovery;
 mod pac_proxy;
-mod restart;
-mod updates;
-mod auth_config;
 mod profile_io;
+mod restart;
 mod session_recovery;
+mod updates;
 mod usage_probe;
 mod usage_stats;
 
+pub(crate) use auth_config::*;
 use config_recovery::{
     acknowledge_pending_notices, atomic_write_json, merge_recovery_notices,
     quarantine_corrupt_file, read_pending_notices, record_pending_notices, recovery_dir,
@@ -40,18 +41,17 @@ pub use pac_proxy::{
     MacosAutoProxyStatus, PacProxyOption, PacProxyStatus, DEFAULT_PAC_PROXY_KEY, PAC_PROXY_CA_URL,
     PAC_PROXY_URL, PAC_PROXY_US_URL,
 };
+pub use profile_io::*;
 pub use restart::{
     codex_restart_plan_for_platform, restart_codex_app, restart_codex_script, CodexRestartPlatform,
 };
-pub(crate) use auth_config::*;
-pub use profile_io::*;
 pub(crate) use session_recovery::*;
-pub(crate) use usage_probe::*;
-pub(crate) use usage_stats::*;
 pub use updates::{
     check_for_update, check_install_location, install_update, InstallLocationStatus,
     UpdateCheckResult, UpdateInstallRequest,
 };
+pub(crate) use usage_probe::*;
+pub(crate) use usage_stats::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -108,6 +108,7 @@ pub struct CodexUsageStatsSnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(Default)]
 pub struct CodexUsageStatsFilter {
     #[serde(default)]
     pub start_date: Option<String>,
@@ -117,17 +118,6 @@ pub struct CodexUsageStatsFilter {
     pub model: Option<String>,
     #[serde(default)]
     pub effort: Option<String>,
-}
-
-impl Default for CodexUsageStatsFilter {
-    fn default() -> Self {
-        Self {
-            start_date: None,
-            end_date: None,
-            model: None,
-            effort: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1470,10 +1460,7 @@ impl ProfileManager {
                     imported += 1;
                     self.import_remote_profile(&detail.id, payload)?
                 };
-            let remote_updated_at = detail
-                .content_updated_at
-                .clone()
-                .or_else(|| detail.updated_at.clone());
+            let remote_updated_at = detail.content_updated_at.or(detail.updated_at);
             let profile = self.set_profile_remote_metadata(
                 &profile.id,
                 detail.id.clone(),
@@ -1615,7 +1602,7 @@ impl ProfileManager {
             let mut file_sizes = vec![None; num_items];
 
             std::thread::scope(|s| {
-                let chunk_size = (num_items + num_workers - 1) / num_workers;
+                let chunk_size = num_items.div_ceil(num_workers);
                 let t_chunks = threads.chunks(chunk_size);
                 let s_chunks = file_sizes.chunks_mut(chunk_size);
 
@@ -3276,6 +3263,7 @@ impl ProfileManager {
         Ok(Some(provider))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compose_profile_metadata(
         &self,
         id: String,
@@ -3631,10 +3619,11 @@ impl ProfileManager {
         let config_hash = managed_config_hash(&auth_json, &config_toml)?;
 
         if let Some(marker) = self.read_target_marker()? {
-            if marker.auth_hash == auth_hash && marker.config_hash == config_hash {
-                if self.load_profile_summary(&marker.profile_id)?.is_some() {
-                    return Ok(());
-                }
+            if marker.auth_hash == auth_hash
+                && marker.config_hash == config_hash
+                && self.load_profile_summary(&marker.profile_id)?.is_some()
+            {
+                return Ok(());
             }
         }
 
@@ -3792,4 +3781,3 @@ struct ResolvedCodexUsageAuthSource {
     config_toml: String,
     should_sync_runtime_state: bool,
 }
-

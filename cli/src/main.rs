@@ -1,12 +1,16 @@
 #[allow(dead_code)]
 #[path = "../../src-tauri/src/core/mod.rs"]
+#[allow(unused_imports)]
 mod core;
 
 use chrono::{DateTime, Local, Utc};
-use core::{default_cli_app_data_dir, CodexUsageSnapshot, CodexUsageWindow, ProfileManager, ProfileSummary};
+use core::{
+    default_cli_app_data_dir, CodexUsageSnapshot, CodexUsageWindow, ProfileManager, ProfileSummary,
+};
 use std::path::PathBuf;
 
-const DEFAULT_REMOTE_PROFILES_URL: &str = "https://codex-helper.ite.tool4seller.com/codex/api/profiles";
+const DEFAULT_REMOTE_PROFILES_URL: &str =
+    "https://codex-helper.ite.tool4seller.com/codex/api/profiles";
 
 fn main() {
     if let Err(error) = run() {
@@ -198,7 +202,13 @@ fn print_profiles(profiles: Vec<ProfileSummary>) {
             let updated = profile
                 .codex_usage
                 .as_ref()
-                .map(|usage| usage.updated_at.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
+                .map(|usage| {
+                    usage
+                        .updated_at
+                        .with_timezone(&Local)
+                        .format("%Y-%m-%d %H:%M")
+                        .to_string()
+                })
                 .unwrap_or_else(|| "-".to_string());
 
             widths[0] = widths[0].max(label.len());
@@ -234,10 +244,7 @@ fn print_profiles(profiles: Vec<ProfileSummary>) {
         w4 = widths[4],
         w5 = widths[5],
     );
-    println!(
-        "{}",
-        "-".repeat(widths.iter().sum::<usize>() + 10)
-    );
+    println!("{}", "-".repeat(widths.iter().sum::<usize>() + 10));
 
     for row in rows {
         println!(
@@ -262,11 +269,11 @@ fn short_id(id: &str) -> &str {
     &id[..id.len().min(8)]
 }
 
-fn select_window<'a>(
-    usage: &'a CodexUsageSnapshot,
+fn select_window(
+    usage: &CodexUsageSnapshot,
     minutes: i64,
     fallback_primary: bool,
-) -> Option<&'a CodexUsageWindow> {
+) -> Option<&CodexUsageWindow> {
     if let Some(primary) = usage.primary.as_ref() {
         if primary.window_minutes == Some(minutes) {
             return Some(primary);

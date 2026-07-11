@@ -100,7 +100,9 @@ pub fn repair_illegal_config_toml(config_toml: &str) -> String {
     }
 }
 
-pub(crate) fn session_model_provider_key_from_config_toml(config_toml: &str) -> Result<String, AppError> {
+pub(crate) fn session_model_provider_key_from_config_toml(
+    config_toml: &str,
+) -> Result<String, AppError> {
     let table = parse_toml_table(config_toml)?;
     let provider = table
         .get("model_provider")
@@ -333,7 +335,6 @@ pub(crate) fn primary_state_database_path(target_dir: &Path) -> Option<PathBuf> 
         })
         .map(|candidate| candidate.path)
 }
-
 
 pub(crate) fn state_database_candidate(path: PathBuf) -> Option<StateDatabaseCandidate> {
     let name = path.file_name()?.to_string_lossy().to_string();

@@ -1,6 +1,8 @@
 use super::*;
 
-pub(crate) fn initialize_codex_usage_stats_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
+pub(crate) fn initialize_codex_usage_stats_schema(
+    conn: &Connection,
+) -> Result<(), rusqlite::Error> {
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS codex_usage_logs (
@@ -100,8 +102,10 @@ pub(crate) fn import_codex_usage_file(
     session_path: &Path,
 ) -> Result<CodexUsageStatsSyncResult, AppError> {
     let file = fs::File::open(session_path)?;
-    let mut sync = CodexUsageStatsSyncResult::default();
-    sync.files_scanned = 1;
+    let mut sync = CodexUsageStatsSyncResult {
+        files_scanned: 1,
+        ..Default::default()
+    };
     let mut session_id: Option<String> = None;
     let mut model = "unknown".to_string();
     let mut provider = "unknown".to_string();
@@ -394,7 +398,6 @@ pub(crate) fn strip_date_suffix(model: &str) -> String {
     model.to_string()
 }
 
-
 pub(crate) fn codex_usage_price_for_model(model: &str) -> Option<CodexUsagePrice> {
     let normalized = normalize_codex_usage_model(model);
     match normalized.as_str() {
@@ -522,14 +525,9 @@ pub(crate) fn normalize_usage_filter_value(value: Option<String>) -> Option<Stri
     }
 }
 
-pub(crate) fn usage_filter_params<'a>(
-    filter: &'a CodexUsageStatsFilter,
-) -> (
-    Option<&'a str>,
-    Option<&'a str>,
-    Option<&'a str>,
-    Option<&'a str>,
-) {
+pub(crate) fn usage_filter_params(
+    filter: &CodexUsageStatsFilter,
+) -> (Option<&str>, Option<&str>, Option<&str>, Option<&str>) {
     (
         filter.start_date.as_deref(),
         filter.end_date.as_deref(),
@@ -544,7 +542,6 @@ pub(crate) const CODEX_USAGE_FILTER_SQL: &str = "
     AND (?3 IS NULL OR model = ?3)
     AND (?4 IS NULL OR effort = ?4)
 ";
-
 
 impl CodexUsageAggregate {
     pub(crate) fn real_total_tokens(self) -> i64 {
