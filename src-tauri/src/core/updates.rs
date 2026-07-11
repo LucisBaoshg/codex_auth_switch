@@ -545,6 +545,9 @@ mod tests {
         assert!(!status.requires_applications_install);
     }
 
+    // Only macOS enforces the Applications-folder requirement; on other
+    // platforms install_location_status_for_path always reports update_safe.
+    #[cfg(target_os = "macos")]
     #[test]
     fn install_location_check_flags_non_applications_bundle() {
         let status = install_location_status_for_path(Path::new(
