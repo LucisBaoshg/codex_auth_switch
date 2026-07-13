@@ -772,3 +772,36 @@ pub(crate) fn truncate_probe_error(value: &str) -> String {
     }
     compact.chars().take(120).collect::<String>() + "..."
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_quota_decimals_with_currency_formatting() {
+        assert_eq!(parse_quota_decimal("$1,234.50"), Some(1234.5));
+        assert_eq!(parse_quota_decimal("  42 "), Some(42.0));
+        assert_eq!(parse_quota_decimal("n/a"), None);
+    }
+
+    #[test]
+    fn formats_whole_numbers_compactly() {
+        assert_eq!(format_compact_number(5.0), "5");
+        assert_eq!(format_compact_number(5.25), "5.25");
+    }
+
+    #[test]
+    fn truncates_and_compacts_probe_errors() {
+        assert_eq!(truncate_probe_error("a  b\n c"), "a b c");
+        let long = "x".repeat(200);
+        let truncated = truncate_probe_error(&long);
+        assert_eq!(truncated.chars().count(), 123);
+        assert!(truncated.ends_with("..."));
+    }
+
+    #[test]
+    fn parses_rfc3339_timestamps_to_utc() {
+        assert!(parse_utc_datetime("2026-07-12T00:00:00+08:00").is_some());
+        assert!(parse_utc_datetime("not-a-date").is_none());
+    }
+}

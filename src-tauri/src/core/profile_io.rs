@@ -385,3 +385,31 @@ pub(crate) fn latest_thread_updated_ms(path: &Path) -> Option<i64> {
 
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_remote_profiles_url_idempotently() {
+        assert_eq!(
+            normalize_remote_profiles_url("https://example.com/api/"),
+            "https://example.com/api/profiles"
+        );
+        assert_eq!(
+            normalize_remote_profiles_url("https://example.com/api/profiles"),
+            "https://example.com/api/profiles"
+        );
+    }
+
+    #[test]
+    fn repairs_reserved_openai_provider_key() {
+        let fixed =
+            repair_illegal_config_toml("[model_providers.openai]\nmodel_provider = \"openai\"\n");
+        assert!(fixed.contains("[model_providers.openai_custom]"));
+        assert!(fixed.contains("model_provider = \"openai_custom\""));
+
+        let untouched = repair_illegal_config_toml("model = \"gpt-5.5\"\n");
+        assert_eq!(untouched, "model = \"gpt-5.5\"\n");
+    }
+}

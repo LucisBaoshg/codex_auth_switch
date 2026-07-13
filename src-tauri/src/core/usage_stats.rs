@@ -839,3 +839,49 @@ pub(crate) fn read_codex_usage_stats_logs(
     }
     Ok(logs)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_model_names_and_strips_date_suffixes() {
+        assert_eq!(normalize_codex_usage_model("openai/GPT-5.5"), "gpt-5.5");
+        assert_eq!(normalize_codex_usage_model("gpt-4o-2024-08-06"), "gpt-4o");
+        assert_eq!(normalize_codex_usage_model("gpt-4o-20240806"), "gpt-4o");
+        assert_eq!(
+            normalize_codex_usage_model("  claude-opus-4-8  "),
+            "claude-opus-4-8"
+        );
+    }
+
+    #[test]
+    fn strip_date_suffix_keeps_non_date_endings() {
+        assert_eq!(strip_date_suffix("gpt-4-turbo"), "gpt-4-turbo");
+        assert_eq!(strip_date_suffix("model-2024-13"), "model-2024-13");
+        assert_eq!(strip_date_suffix("x"), "x");
+    }
+
+    #[test]
+    fn extracts_provider_from_prefix_or_model_family() {
+        assert_eq!(extract_codex_usage_provider("openai/gpt-5.5"), "openai");
+        assert_eq!(extract_codex_usage_provider("gpt-4o"), "openai");
+        assert_eq!(extract_codex_usage_provider("claude-sonnet-5"), "anthropic");
+        assert_eq!(extract_codex_usage_provider("gemini-2.5-pro"), "google");
+        assert_eq!(extract_codex_usage_provider("deepseek-v3"), "deepseek");
+        assert_eq!(extract_codex_usage_provider("llama-3"), "unknown");
+    }
+
+    #[test]
+    fn normalizes_effort_with_unknown_fallback() {
+        assert_eq!(normalize_codex_usage_effort("  HIGH "), "high");
+        assert_eq!(normalize_codex_usage_effort(""), "unknown");
+    }
+
+    #[test]
+    fn formats_usd_with_six_decimals_and_floor_at_zero() {
+        assert_eq!(format_usd(0.1234567), "0.123457");
+        assert_eq!(format_usd(-1.0), "0.000000");
+        assert_eq!(format_usd(2.0), "2.000000");
+    }
+}

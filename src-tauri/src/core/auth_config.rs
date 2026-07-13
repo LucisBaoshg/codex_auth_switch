@@ -778,3 +778,52 @@ pub(crate) fn sha256_bytes(bytes: &[u8]) -> String {
     hasher.update(bytes);
     format!("{:x}", hasher.finalize())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escapes_toml_basic_strings() {
+        assert_eq!(escape_toml_basic_string(r#"a"b\c"#), r#"a\"b\\c"#);
+    }
+
+    #[test]
+    fn validates_auth_json_and_config_toml() {
+        assert!(validate_auth_json("{\"auth_mode\":\"chatgpt\"}").is_ok());
+        assert!(validate_auth_json("not json").is_err());
+        assert!(validate_config_toml("model = \"gpt-5.5\"\n").is_ok());
+        assert!(validate_config_toml("model = [unclosed\n").is_err());
+    }
+
+    #[test]
+    fn detects_official_oauth_auth() {
+        assert!(is_official_oauth_auth("{\"auth_mode\":\"chatgpt\"}").unwrap());
+        assert!(is_official_oauth_auth("{\"tokens\":{}}").unwrap());
+        assert!(!is_official_oauth_auth("{\"OPENAI_API_KEY\":\"sk-x\"}").unwrap());
+    }
+
+    #[test]
+    fn labels_auth_types_from_auth_and_config() {
+        assert_eq!(
+            detect_auth_type_label("{\"auth_mode\":\"chatgpt\"}", "").unwrap(),
+            "官方 OAuth"
+        );
+        assert_eq!(
+            detect_auth_type_label("{\"OPENAI_API_KEY\":\"sk-x\"}", "").unwrap(),
+            "API Key"
+        );
+        assert_eq!(
+            detect_auth_type_label(
+                "{\"OPENAI_API_KEY\":\"sk-x\"}",
+                "openai_base_url = \"https://relay.example.com/v1\"\n",
+            )
+            .unwrap(),
+            "第三方 API"
+        );
+        assert_eq!(
+            detect_auth_type_label("{}", "").unwrap(),
+            unknown_auth_type_label()
+        );
+    }
+}

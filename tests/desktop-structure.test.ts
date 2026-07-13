@@ -35,7 +35,8 @@ test("moves session markdown export DOM helper out of the desktop entrypoint", (
   }
 
   const sessionExportTs = readProjectFile("src/session-export.ts");
-  expect(mainTs).toContain('from "./session-export"');
+  const sessionActionsTs = readProjectFile("src/session-actions.ts");
+  expect(sessionActionsTs).toContain('from "./session-export"');
   expect(mainTs).not.toContain("function exportCodexSessionToMarkdown");
   expect(mainTs).not.toContain("new Blob([md]");
   expect(mainTs).not.toContain("URL.createObjectURL");
