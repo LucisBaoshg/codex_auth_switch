@@ -5119,6 +5119,38 @@ p { margin: 0; }
   font-size: 0.82rem;
 }
 
+.shared-version-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: 8px;
+}
+
+.shared-version-status p.shared-version-verify-result {
+  border-radius: 8px;
+  padding: 6px 9px;
+  font-weight: 650;
+}
+
+.shared-version-status p.shared-version-verify-result[data-state="checking"] {
+  background-color: rgba(100, 116, 139, 0.12);
+  color: var(--text-muted);
+}
+
+.shared-version-status p.shared-version-verify-result[data-state="valid"] {
+  background-color: var(--success-bg);
+  color: var(--success);
+}
+
+.shared-version-status p.shared-version-verify-result[data-state="skipped"] {
+  background-color: rgba(100, 116, 139, 0.12);
+  color: var(--text-muted);
+}
+
+.shared-version-status p.shared-version-verify-result[data-state="invalid"] {
+  background-color: var(--danger-bg);
+  color: var(--danger);
+}
+
 /* Code Editor Styling */
 .code-editor-card {
   display: flex;

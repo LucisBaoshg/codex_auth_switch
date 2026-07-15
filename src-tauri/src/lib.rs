@@ -8,10 +8,10 @@ use crate::core::{
     set_pac_proxy_selected_option as write_pac_proxy_selected_option,
     set_pac_proxy_selected_services as write_pac_proxy_selected_services, AppSnapshot,
     CodexMessage, CodexSessionInfo, CodexUsageStatsFilter, CodexUsageStatsSnapshot,
-    ConfigRecoveryNotice, InstallLocationStatus, LegacyThirdPartyMigrationResult,
-    ModelProviderSummary, PacProxyStatus, ProfileDocument, ProfileInput, ProfileManager,
-    SessionRecoveryReport, SessionRepairResult, ThirdPartyWebsocketsDefaultResult,
-    UpdateCheckResult, UpdateInstallRequest,
+    ConfigRecoveryNotice, ConfigUsageValidation, InstallLocationStatus,
+    LegacyThirdPartyMigrationResult, ModelProviderSummary, PacProxyStatus, ProfileDocument,
+    ProfileInput, ProfileManager, SessionRecoveryReport, SessionRepairResult,
+    ThirdPartyWebsocketsDefaultResult, UpdateCheckResult, UpdateInstallRequest,
 };
 use crate::menu_bar::{
     install_menu_bar, menu_bar_refresh_target, sync_menu_bar_pac_proxy, sync_menu_bar_usage,
@@ -374,6 +374,18 @@ async fn refresh_profile_third_party_usage(
     .await?;
     sync_menu_bar_usage(&app_for_sync, &snapshot).map_err(|error| error.to_string())?;
     Ok(snapshot)
+}
+
+#[tauri::command]
+async fn validate_profile_config_usage(
+    auth_json: String,
+    config_toml: String,
+) -> Result<ConfigUsageValidation, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::core::validate_config_usage(&auth_json, &config_toml)
+    })
+    .await
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -756,6 +768,7 @@ pub fn run() {
             refresh_profile_codex_usage,
             refresh_profile_latency_probe,
             refresh_profile_third_party_usage,
+            validate_profile_config_usage,
             refresh_all_codex_usage,
             open_target_dir,
             open_config_recovery_dir,

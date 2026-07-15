@@ -42,6 +42,16 @@ export type EditorPageShellInput = {
   bodyContentHtml: string;
 };
 
+export type SharedUpdateCheckResult = {
+  key: string;
+  status: "checking" | "valid" | "invalid" | "skipped";
+  message: string | null;
+};
+
+export function sharedUpdateCheckKey(remoteProfile: NetworkProfile): string {
+  return [remoteProfile.id, remoteProfile.contentVersion ?? "", remoteProfile.contentHash ?? ""].join(":");
+}
+
 export type EditorPageInput = {
   snapshot: AppSnapshot | null;
   editor: EditorState;
@@ -50,6 +60,7 @@ export type EditorPageInput = {
   remoteVersionCheckAttempted: boolean;
   busy: boolean;
   pendingActions: ReadonlySet<string>;
+  sharedUpdateCheck?: SharedUpdateCheckResult | null;
 };
 
 export type ThirdPartyConfigFieldsInput = {
@@ -79,6 +90,7 @@ export type EditorBasicInfoCardInput = {
   deleteDisabled?: boolean;
   deleteDisabledReason?: string;
   metadataHtml?: string;
+  sharedUpdateCheck?: SharedUpdateCheckResult | null;
 };
 
 export type EditorMetadataCardInput = {
@@ -109,6 +121,7 @@ export type EditorLayoutInput = {
   pendingActions: ReadonlySet<string>;
   showDetailTabs: boolean;
   detailTab: EditorDetailTab;
+  sharedUpdateCheck?: SharedUpdateCheckResult | null;
 };
 
 export function renderThirdPartyConfigFields(input: ThirdPartyConfigFieldsInput): string {
@@ -437,6 +450,7 @@ export function renderEditorPage(input: EditorPageInput): string {
     pendingActions: input.pendingActions,
     showDetailTabs,
     detailTab,
+    sharedUpdateCheck: input.sharedUpdateCheck ?? null,
   });
 
   return renderEditorPageShell({
@@ -512,6 +526,7 @@ export function renderEditorLayout(input: EditorLayoutInput): string {
     deleteDisabled,
     deleteDisabledReason: deleteDisabled ? activeProfileDeleteMessage : "",
     metadataHtml: metadataCardHtml,
+    sharedUpdateCheck: input.sharedUpdateCheck ?? null,
   });
   const runtimePanelHtml = renderEditorRuntimePanel({
     snapshot: input.snapshot,
@@ -667,6 +682,21 @@ function renderSharedVersionStatus(input: EditorBasicInfoCardInput): string {
     `;
   }
 
+  const check =
+    input.sharedUpdateCheck && input.sharedUpdateCheck.key === sharedUpdateCheckKey(input.remoteProfile)
+      ? input.sharedUpdateCheck
+      : null;
+  const checking = check?.status === "checking";
+  const checkDetail = check?.message?.trim();
+  const checkResultHtml = check
+    ? {
+        checking: `<p class="shared-version-verify-result" data-role="shared-version-verify-result" data-state="checking">正在通过 usage 接口验证新版本配置…</p>`,
+        valid: `<p class="shared-version-verify-result" data-role="shared-version-verify-result" data-state="valid">✓ 新版本配置有效（usage 接口验证通过），可以放心更新。</p>`,
+        skipped: `<p class="shared-version-verify-result" data-role="shared-version-verify-result" data-state="skipped">该配置类型暂不支持 usage 验证${checkDetail ? `：${escapeHtml(checkDetail)}` : "。"}</p>`,
+        invalid: `<p class="shared-version-verify-result" data-role="shared-version-verify-result" data-state="invalid">✗ 新版本配置无效，请勿更新${checkDetail ? `：${escapeHtml(checkDetail)}` : "。"}</p>`,
+      }[check.status]
+    : "";
+
   return `
     <div class="shared-version-status" data-role="shared-version-status" data-state="stale">
       <div class="shared-version-main">
@@ -674,14 +704,25 @@ function renderSharedVersionStatus(input: EditorBasicInfoCardInput): string {
         <span class="shared-version-pill shared-version-pill-stale">${escapeHtml(remoteVersion)}</span>
       </div>
       <p>本地 ${escapeHtml(localVersion)} · 共享中心 ${escapeHtml(remoteVersion)}${remoteUpdatedAt ? ` · ${escapeHtml(formatDateTime(remoteUpdatedAt))}` : ""}</p>
-      <button
-        class="button button-primary button-full"
-        data-action="update-shared-profile-from-cloud"
-        data-id="${escapeHtml(input.editor.profileId)}"
-        ${input.busy ? "disabled" : ""}
-      >
-        更新到最新版
-      </button>
+      ${checkResultHtml}
+      <div class="shared-version-actions">
+        <button
+          class="button button-secondary button-full"
+          data-action="verify-shared-profile-update"
+          data-id="${escapeHtml(input.editor.profileId)}"
+          ${input.busy || checking ? "disabled" : ""}
+        >
+          ${checking ? "验证中…" : "先验证有效性"}
+        </button>
+        <button
+          class="button button-primary button-full"
+          data-action="update-shared-profile-from-cloud"
+          data-id="${escapeHtml(input.editor.profileId)}"
+          ${input.busy || checking ? "disabled" : ""}
+        >
+          更新到最新版
+        </button>
+      </div>
     </div>
   `;
 }

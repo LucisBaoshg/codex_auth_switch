@@ -25,6 +25,8 @@ import {
 } from "./profile-editor-state";
 import {
   renderEditorPage,
+  sharedUpdateCheckKey,
+  type SharedUpdateCheckResult,
 } from "./profile-editor-renderers";
 import {
   getOfficialOauthProfiles,
@@ -106,6 +108,7 @@ import { createPreviewAppSnapshot } from "./app-preview-data";
 import type {
   AppSnapshot,
   ConfigRecoveryNotice,
+  ConfigUsageValidation,
   CodexUsageStatsFilter,
   CodexUsageStatsSnapshot,
   InstallLocationStatus,
@@ -207,6 +210,8 @@ let configRecoveryDialogInFlight = false;
 const promptedRemoteUpdateKeys = new Set<string>();
 let remoteUpdateCheckInFlight = false;
 let sharedAuthWriteBackInFlight = false;
+let lastFailedWriteBackValidationKey: string | null = null;
+let sharedUpdateCheck: SharedUpdateCheckResult | null = null;
 const checkedRemoteVersionProfileIds = new Set<string>();
 
 function setSnapshot(snapshot: AppSnapshot): void {
@@ -1128,6 +1133,17 @@ async function syncActiveSharedAuthWriteBack(): Promise<void> {
       return;
     }
 
+    // 同一份未变化的授权内容验证失败后不再重复探测/提示，内容变化后会重新验证。
+    const validationKey = `${activeProfile.id}\n${document.authJson}`;
+    if (lastFailedWriteBackValidationKey === validationKey) {
+      return;
+    }
+    if (!(await validateConfigUsageBeforeSync(document.authJson, document.configToml, "同步共享授权"))) {
+      lastFailedWriteBackValidationKey = validationKey;
+      return;
+    }
+    lastFailedWriteBackValidationKey = null;
+
     const base = sharedAuthWriteBackBase(activeProfile, remoteProfile);
     const response = await networkHttpRequest(
       "POST",
@@ -1195,6 +1211,80 @@ function remoteUpdatePromptKey(profile: NetworkProfile): string {
   ].join(":");
 }
 
+async function validateConfigUsageBeforeSync(
+  authJson: string,
+  configToml: string,
+  actionLabel: string,
+): Promise<boolean> {
+  if (!isTauriRuntime) {
+    return true;
+  }
+
+  let validation: ConfigUsageValidation;
+  try {
+    validation = await desktopInvoke<ConfigUsageValidation>("validate_profile_config_usage", {
+      authJson,
+      configToml,
+    });
+  } catch (error) {
+    setFlash(
+      "error",
+      `${actionLabel}已取消：配置有效性验证失败：${error instanceof Error ? error.message : String(error)}`,
+    );
+    return false;
+  }
+
+  if (validation.status === "invalid") {
+    const detail = validation.message?.trim();
+    setFlash(
+      "error",
+      `${actionLabel}已取消：该配置未通过 usage 接口验证${detail ? `：${detail}` : "。"}`,
+    );
+    return false;
+  }
+
+  return true;
+}
+
+async function verifySharedProfileUpdateFromCloud(
+  localProfile: ProfileSummary | null | undefined,
+): Promise<void> {
+  const remoteProfileId = localProfile?.remoteProfileId?.trim();
+  const remoteProfile = remoteProfileId
+    ? state.networkProfiles.find((profile) => profile.id === remoteProfileId) ?? null
+    : null;
+  if (!localProfile || !remoteProfile) {
+    setFlash("info", "没有找到对应的共享中心配置，无法验证。");
+    render();
+    return;
+  }
+
+  const key = sharedUpdateCheckKey(remoteProfile);
+  sharedUpdateCheck = { key, status: "checking", message: null };
+  render();
+
+  try {
+    const document = await fetchNetworkProfileDocument(remoteProfile.id);
+    if (!isTauriRuntime) {
+      sharedUpdateCheck = { key, status: "skipped", message: "浏览器预览模式无法执行 usage 验证" };
+      render();
+      return;
+    }
+    const validation = await desktopInvoke<ConfigUsageValidation>("validate_profile_config_usage", {
+      authJson: document.authJson,
+      configToml: document.configToml,
+    });
+    sharedUpdateCheck = { key, status: validation.status, message: validation.message ?? null };
+  } catch (error) {
+    sharedUpdateCheck = {
+      key,
+      status: "invalid",
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+  render();
+}
+
 async function updateLocalSharedProfileFromCloud(
   localProfile: ProfileSummary,
   remoteProfile: NetworkProfile,
@@ -1210,6 +1300,21 @@ async function updateLocalSharedProfileFromCloud(
 
   try {
     const document = await fetchNetworkProfileDocument(remoteProfile.id);
+
+    state.busyDialog = {
+      title: "验证共享配置",
+      message: "正在通过 usage 接口验证最新共享配置是否有效。",
+    };
+    render();
+    if (!(await validateConfigUsageBeforeSync(document.authJson, document.configToml, "更新共享配置"))) {
+      return;
+    }
+
+    state.busyDialog = {
+      title: "更新共享配置",
+      message: "正在更新本地档案。",
+    };
+    render();
     const updateSnapshot = await desktopInvoke<AppSnapshot>("update_profile", {
       profileId: localProfile.id,
       payload: profileInputFromDocument(document),
@@ -1455,6 +1560,10 @@ async function downloadAndApplyNetworkProfile(networkProfileId: string, profileN
   try {
     const document = await fetchNetworkProfileDocument(networkProfileId);
 
+    if (!(await validateConfigUsageBeforeSync(document.authJson, document.configToml, "下载并应用"))) {
+      return;
+    }
+
     const payload: ProfileInput = {
       name: profileName,
       notes: document.notes,
@@ -1639,6 +1748,9 @@ async function shareLocalProfileToNetwork(): Promise<void> {
     );
     if (visibility === "selected" && sharedWith.length === 0) {
       setFlash("error", "请选择至少一位共享对象，或切换为全部员工可见。");
+      return;
+    }
+    if (!(await validateConfigUsageBeforeSync(document.authJson, document.configToml, "共享配置"))) {
       return;
     }
     const headers = networkAuthHeaders(state.networkSharing);
@@ -2421,6 +2533,7 @@ function render(): void {
         : false,
       busy: state.busy,
       pendingActions: state.pendingActions,
+      sharedUpdateCheck,
     });
   }
 
@@ -2823,6 +2936,15 @@ function bindEvents(): void {
         await openEditorForCurrentAccount();
       } else if (action === "view-profile-details" && button.dataset.id) {
         await openEditorForProfile(button.dataset.id);
+      } else if (action === "verify-shared-profile-update" && button.dataset.id) {
+        const localProfile = state.snapshot?.profiles.find((profile) => profile.id === button.dataset.id);
+        if (localProfile?.remoteProfileId?.trim() && !state.networkProfiles.some((profile) => profile.id === localProfile.remoteProfileId)) {
+          const didLoadRemoteProfiles = await fetchNetworkProfiles({ checkActiveProfileUpdate: false });
+          if (!didLoadRemoteProfiles) {
+            return;
+          }
+        }
+        await verifySharedProfileUpdateFromCloud(localProfile);
       } else if (action === "update-shared-profile-from-cloud" && button.dataset.id) {
         const localProfile = state.snapshot?.profiles.find((profile) => profile.id === button.dataset.id);
         if (localProfile?.remoteProfileId?.trim() && !state.networkProfiles.some((profile) => profile.id === localProfile.remoteProfileId)) {

@@ -207,6 +207,12 @@ export type PacProxyStatus = {
   message: string | null;
 };
 
+export type ConfigUsageValidation = {
+  status: "valid" | "invalid" | "skipped";
+  kind: string;
+  message: string | null;
+};
+
 export type InstallLocationStatus = {
   updateSafe: boolean;
   requiresApplicationsInstall: boolean;

@@ -64,6 +64,70 @@ pub(crate) fn parse_codex_usage_response(
     })
 }
 
+pub(crate) fn validate_config_usage(auth_json: &str, config_toml: &str) -> ConfigUsageValidation {
+    match is_official_oauth_auth(auth_json) {
+        Ok(true) => match fetch_codex_usage_snapshot(auth_json) {
+            Ok(_) => {
+                config_usage_validation(ConfigUsageValidationStatus::Valid, "officialOauth", None)
+            }
+            Err(error) => config_usage_validation(
+                ConfigUsageValidationStatus::Invalid,
+                "officialOauth",
+                Some(error.to_string()),
+            ),
+        },
+        Ok(false) => validate_third_party_config_usage(auth_json, config_toml),
+        Err(error) => config_usage_validation(
+            ConfigUsageValidationStatus::Invalid,
+            "unknown",
+            Some(error.to_string()),
+        ),
+    }
+}
+
+fn validate_third_party_config_usage(auth_json: &str, config_toml: &str) -> ConfigUsageValidation {
+    match resolve_third_party_probe_target(auth_json, config_toml) {
+        Ok(target) if target.provider_name.eq_ignore_ascii_case("ylscode") => {
+            let snapshot = fetch_ylscode_usage_snapshot(&target);
+            match snapshot.error {
+                None => {
+                    config_usage_validation(ConfigUsageValidationStatus::Valid, "thirdParty", None)
+                }
+                Some(error) => config_usage_validation(
+                    ConfigUsageValidationStatus::Invalid,
+                    "thirdParty",
+                    Some(error),
+                ),
+            }
+        }
+        Ok(target) => config_usage_validation(
+            ConfigUsageValidationStatus::Skipped,
+            "thirdParty",
+            Some(format!(
+                "第三方 provider「{}」暂不支持 usage 校验，已跳过验证。",
+                target.provider_name
+            )),
+        ),
+        Err(error) => config_usage_validation(
+            ConfigUsageValidationStatus::Skipped,
+            "unknown",
+            Some(format!("该配置暂不支持 usage 校验，已跳过验证：{error}")),
+        ),
+    }
+}
+
+fn config_usage_validation(
+    status: ConfigUsageValidationStatus,
+    kind: &str,
+    message: Option<String>,
+) -> ConfigUsageValidation {
+    ConfigUsageValidation {
+        status,
+        kind: kind.into(),
+        message,
+    }
+}
+
 pub(crate) fn codex_usage_failure_snapshot(error: String) -> CodexUsageSnapshot {
     CodexUsageSnapshot {
         source: "api".into(),
@@ -803,5 +867,41 @@ mod tests {
     fn parses_rfc3339_timestamps_to_utc() {
         assert!(parse_utc_datetime("2026-07-12T00:00:00+08:00").is_some());
         assert!(parse_utc_datetime("not-a-date").is_none());
+    }
+
+    #[test]
+    fn validate_config_usage_flags_unparseable_auth_json_as_invalid() {
+        let validation = validate_config_usage("not-json", "");
+        assert_eq!(validation.status, ConfigUsageValidationStatus::Invalid);
+        assert_eq!(validation.kind, "unknown");
+        assert!(validation.message.is_some());
+    }
+
+    #[test]
+    fn validate_config_usage_skips_unsupported_third_party_provider() {
+        let auth_json = r#"{"OPENAI_API_KEY":"sk-test"}"#;
+        let config_toml = r#"
+model = "gpt-5"
+model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://api.example.com/v1"
+wire_api = "responses"
+"#;
+        let validation = validate_config_usage(auth_json, config_toml);
+        assert_eq!(validation.status, ConfigUsageValidationStatus::Skipped);
+        assert_eq!(validation.kind, "thirdParty");
+        assert!(validation
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("custom")));
+    }
+
+    #[test]
+    fn validate_config_usage_skips_when_probe_target_cannot_be_resolved() {
+        let validation = validate_config_usage("{}", "");
+        assert_eq!(validation.status, ConfigUsageValidationStatus::Skipped);
+        assert_eq!(validation.kind, "unknown");
+        assert!(validation.message.is_some());
     }
 }

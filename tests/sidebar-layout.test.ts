@@ -1966,6 +1966,7 @@ test("shares a selected local profile to the enterprise sharing center for every
   };
 
   invokeMock.mockImplementation(async (command: string) => {
+    if (command === "validate_profile_config_usage") return { status: "valid", kind: "officialOauth", message: null };
     if (command === "load_snapshot") return snapshot;
     if (command === "get_profile_document") {
       return {
@@ -2051,6 +2052,126 @@ test("shares a selected local profile to the enterprise sharing center for every
   expect(profilePostBodies[0].get("visibility")).toBe("public");
   expect(profilePostBodies[0].get("sharedWith")).toBe("[]");
   expect(await (profilePostBodies[0].get("file1") as File).text()).toContain("sk-test");
+});
+
+test("blocks sharing to the enterprise sharing center when usage validation fails", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
+  localStorage.setItem("codex-auth-switch.networkProfileToken", "cas_test_token");
+
+  const snapshot = {
+    targetDir: "/Users/example/.codex",
+    usingDefaultTargetDir: true,
+    targetExists: true,
+    targetAuthExists: true,
+    targetConfigExists: true,
+    targetUpdatedAt: "2026-03-25T00:00:00Z",
+    targetAuthTypeLabel: "官方 OAuth",
+    activeProfileId: "profile-2",
+    lastSelectedProfileId: "profile-2",
+    lastSwitchProfileId: "profile-2",
+    lastSwitchedAt: "2026-03-25T00:00:00Z",
+    codexUsageApiEnabled: false,
+    profiles: [
+      {
+        id: "profile-2",
+        name: "ChatGPT Pro",
+        notes: "官方账号",
+        authTypeLabel: "官方 OAuth",
+        createdAt: "2026-03-24T00:00:00Z",
+        updatedAt: "2026-03-24T13:24:00Z",
+        authHash: "auth-2",
+        configHash: "config-2",
+        codexUsage: null,
+        thirdPartyLatency: null,
+        thirdPartyUsage: null,
+      },
+    ],
+  };
+
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "validate_profile_config_usage") {
+      return { status: "invalid", kind: "officialOauth", message: "Failed to fetch Codex usage: 401 Unauthorized" };
+    }
+    if (command === "load_snapshot") return snapshot;
+    if (command === "get_profile_document") {
+      return {
+        id: "profile-2",
+        name: "ChatGPT Pro",
+        notes: "官方账号",
+        authTypeLabel: "官方 OAuth",
+        createdAt: "2026-03-24T00:00:00Z",
+        updatedAt: "2026-03-24T13:24:00Z",
+        authJson: '{"tokens":{"access_token":"expired"}}',
+        configToml: "",
+        loadedFromTarget: false,
+        hasTargetChanges: false,
+      };
+    }
+    throw new Error(`unexpected command: ${command}`);
+  });
+
+  const profilePostBodies: FormData[] = [];
+  const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = input.toString();
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/users") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ users: [] }),
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles" && init?.method === "POST") {
+      profilePostBodies.push(init.body as FormData);
+      return {
+        ok: true,
+        status: 201,
+        json: async () => ({ id: "remote-1" }),
+      };
+    }
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => [],
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  await import("../src/main");
+  await flushUi();
+  await flushUi();
+  await flushUi();
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="nav-sharing"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  await flushUi();
+
+  document.querySelector<HTMLInputElement>("#share-visibility-public")!.checked = true;
+  document
+    .querySelector<HTMLInputElement>("#share-visibility-public")
+    ?.dispatchEvent(new Event("change", { bubbles: true }));
+
+  document
+    .querySelector<HTMLButtonElement>('[data-action="share-local-profile"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  await flushUi();
+  await flushUi();
+
+  expect(invokeMock).toHaveBeenCalledWith("validate_profile_config_usage", {
+    authJson: '{"tokens":{"access_token":"expired"}}',
+    configToml: "",
+  });
+  expect(profilePostBodies).toHaveLength(0);
+  expect(document.body.textContent).toContain("未通过 usage 接口验证");
+  expect(document.body.textContent).toContain("401 Unauthorized");
 });
 
 test("shares a local profile to selected known SSO users from the sharing center", async () => {
@@ -2176,6 +2297,7 @@ test("re-sharing an owned local profile updates the existing enterprise shared p
   const updateBodies: Record<string, unknown>[] = [];
 
   invokeMock.mockImplementation(async (command: string) => {
+    if (command === "validate_profile_config_usage") return { status: "valid", kind: "officialOauth", message: null };
     if (command === "load_snapshot") return snapshot;
     if (command === "get_profile_document") {
       return {
@@ -2321,6 +2443,7 @@ test("re-sharing warns when the enterprise backend does not return content versi
   ];
 
   invokeMock.mockImplementation(async (command: string) => {
+    if (command === "validate_profile_config_usage") return { status: "valid", kind: "officialOauth", message: null };
     if (command === "load_snapshot") return snapshot;
     if (command === "get_profile_document") {
       return {
@@ -2387,6 +2510,8 @@ test("re-sharing warns when the enterprise backend does not return content versi
   document
     .querySelector<HTMLButtonElement>('[data-action="share-local-profile"]')
     ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  await flushUi();
   await flushUi();
   await flushUi();
   await flushUi();
@@ -3292,6 +3417,7 @@ test("prompts to update and restarts Codex when the active shared profile has a 
   };
 
   invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+    if (command === "validate_profile_config_usage") return { status: "valid", kind: "officialOauth", message: null };
     if (command === "load_snapshot") return initialSnapshot;
     if (command === "update_profile") {
       expect(args).toEqual({
@@ -3501,6 +3627,7 @@ test("shows a stale shared profile version notice in local profile details and u
   };
 
   invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+    if (command === "validate_profile_config_usage") return { status: "valid", kind: "officialOauth", message: null };
     if (command === "load_snapshot") return initialSnapshot;
     if (command === "get_pac_proxy_status") {
       return {
@@ -3642,8 +3769,30 @@ test("shows a stale shared profile version notice in local profile details and u
   expect(document.querySelector('[data-role="shared-version-status"]')?.textContent).toContain("共享中心 v2");
 
   document
+    .querySelector<HTMLButtonElement>('[data-action="verify-shared-profile-update"][data-id="local-shared-oauth"]')
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  await flushUi();
+  await flushUi();
+  await flushUi();
+  await flushUi();
+
+  expect(invokeMock).toHaveBeenCalledWith("validate_profile_config_usage", {
+    authJson: '{"auth_mode":"chatgpt","tokens":{"refresh_token":"new-refresh"}}',
+    configToml: 'model = "gpt-5.5"\n',
+  });
+  expect(
+    document.querySelector('[data-role="shared-version-verify-result"]')?.getAttribute("data-state"),
+  ).toBe("valid");
+  expect(document.querySelector('[data-role="shared-version-verify-result"]')?.textContent).toContain(
+    "新版本配置有效",
+  );
+
+  document
     .querySelector<HTMLButtonElement>('[data-action="update-shared-profile-from-cloud"][data-id="local-shared-oauth"]')
     ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await flushUi();
+  await flushUi();
   await flushUi();
   await flushUi();
   await flushUi();
@@ -3837,6 +3986,7 @@ test("relinks a missing shared profile to the unique same-name cloud profile whe
   };
 
   invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+    if (command === "validate_profile_config_usage") return { status: "valid", kind: "officialOauth", message: null };
     if (command === "load_snapshot") return initialSnapshot;
     if (command === "get_pac_proxy_status") {
       return {
@@ -4174,6 +4324,7 @@ test("writes back refreshed shared auth on startup when the active target change
   };
 
   invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+    if (command === "validate_profile_config_usage") return { status: "valid", kind: "officialOauth", message: null };
     if (command === "load_snapshot") return initialSnapshot;
     if (command === "get_pac_proxy_status") {
       return {

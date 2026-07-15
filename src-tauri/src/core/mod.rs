@@ -93,6 +93,22 @@ pub struct CodexUsageSnapshot {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConfigUsageValidationStatus {
+    Valid,
+    Invalid,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigUsageValidation {
+    pub status: ConfigUsageValidationStatus,
+    pub kind: String,
+    pub message: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexUsageStatsSnapshot {
