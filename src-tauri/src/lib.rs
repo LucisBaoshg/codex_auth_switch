@@ -583,10 +583,13 @@ fn set_pac_proxy_selected_option(
 }
 
 #[tauri::command]
-async fn list_codex_sessions(app: AppHandle) -> Result<Vec<CodexSessionInfo>, String> {
+async fn list_codex_sessions(
+    app: AppHandle,
+    include_file_sizes: Option<bool>,
+) -> Result<Vec<CodexSessionInfo>, String> {
     run_blocking_manager_task(app, move |manager| {
         manager
-            .list_codex_sessions()
+            .list_codex_sessions_with_file_sizes(include_file_sizes.unwrap_or(true))
             .map_err(|error| error.to_string())
     })
     .await
@@ -637,6 +640,16 @@ async fn delete_codex_session(app: AppHandle, thread_id: String) -> Result<(), S
     run_blocking_manager_task(app, move |manager| {
         manager
             .delete_codex_session(&thread_id)
+            .map_err(|error| error.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn delete_codex_sessions(app: AppHandle, thread_ids: Vec<String>) -> Result<usize, String> {
+    run_blocking_manager_task(app, move |manager| {
+        manager
+            .delete_codex_sessions(&thread_ids)
             .map_err(|error| error.to_string())
     })
     .await
@@ -790,6 +803,7 @@ pub fn run() {
             get_codex_session_messages,
             archive_codex_session,
             delete_codex_session,
+            delete_codex_sessions,
             rename_codex_session
         ])
         .run(tauri::generate_context!())

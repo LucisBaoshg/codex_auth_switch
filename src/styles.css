@@ -2560,6 +2560,49 @@ p { margin: 0; }
   padding: 12px 16px;
 }
 
+.sessions-list-content {
+  min-height: calc(100% - 54px);
+}
+
+.session-pagination {
+  position: sticky;
+  bottom: -12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 12px -16px -12px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border-light);
+  background: var(--bg-panel);
+}
+
+.session-page-status {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+.session-page-button {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  background: var(--bg-page);
+  color: var(--text-main);
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.session-page-button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.session-page-button:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
 /* Collapsible Details grouping style */
 .workspace-group {
   margin-bottom: 12px;
@@ -2638,6 +2681,8 @@ p { margin: 0; }
   border-radius: 10px;
   border: 1px solid var(--border);
   background-color: var(--bg-panel);
+  content-visibility: auto;
+  contain-intrinsic-size: auto 70px;
   cursor: pointer;
   transition: all 0.2s;
   user-select: none;
@@ -3796,12 +3841,47 @@ p { margin: 0; }
 
 /* --- Session Cleanup Styles --- */
 .cleanup-page-container {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100vh;
   overflow-y: auto;
   background-color: var(--bg-page);
   padding: 32px 48px;
+}
+
+.cleanup-operation-status {
+  position: fixed;
+  top: 20px;
+  right: 24px;
+  z-index: 1200;
+  display: none;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-md);
+  color: var(--text-main);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.cleanup-operation-status .busy-dialog-spinner {
+  width: 18px;
+  height: 18px;
+  border-width: 2px;
+}
+
+.cleanup-page-container[aria-busy="true"] .cleanup-operation-status {
+  display: flex;
+}
+
+.cleanup-page-container[aria-busy="true"] .cleanup-sections-wrapper,
+.cleanup-page-container[aria-busy="true"] .editor-template-tabs {
+  pointer-events: none;
+  opacity: 0.72;
 }
 
 .cleanup-header {
@@ -3924,6 +4004,18 @@ p { margin: 0; }
   margin-bottom: 16px;
 }
 
+.cleanup-batch-buttons {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.cleanup-delete-all-button {
+  font-weight: 700;
+}
+
 .checkbox-wrapper {
   display: flex;
   align-items: center;
@@ -3939,6 +4031,36 @@ p { margin: 0; }
   border: 1px solid var(--border-light);
   border-radius: 8px;
   background-color: var(--bg-page);
+}
+
+.cleanup-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 16px;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.cleanup-page-button {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  background: var(--bg-page);
+  color: var(--text-main);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.cleanup-page-button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.cleanup-page-button:disabled {
+  cursor: default;
+  opacity: 0.4;
 }
 
 .cleanup-table {

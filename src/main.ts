@@ -204,6 +204,13 @@ if (!appRoot) {
 
 const app = appRoot;
 
+type CachedSessionsPage = {
+  element: HTMLElement;
+  dataKey: string;
+};
+
+let cachedSessionsPage: CachedSessionsPage | null = null;
+
 const shownConfigRecoveryNoticeIds = new Set<string>();
 let configRecoveryDialogInFlight = false;
 
@@ -2472,6 +2479,56 @@ function bindInputValue(selector: string, onInput: (value: string) => void): voi
   });
 }
 
+function sessionViewDataKey(sessions: CodexSessionInfo[]): string {
+  return JSON.stringify(
+    sessions.map((session) => [
+      session.id,
+      session.updatedAtMs,
+      session.cwd,
+      session.title,
+      session.archived,
+      session.modelProvider,
+      session.fileSize,
+    ]),
+  );
+}
+
+function cacheMountedSessionsPage(): void {
+  const element = app.querySelector<HTMLElement>(".sessions-page-container");
+  if (!element) {
+    return;
+  }
+  cachedSessionsPage = {
+    element,
+    dataKey: sessionViewDataKey(state.sessions),
+  };
+}
+
+function restoreCachedSessionsPage(): boolean {
+  const cached = cachedSessionsPage;
+  const mainContent = app.querySelector<HTMLElement>(".app-main-content");
+  if (!cached || !mainContent) {
+    return false;
+  }
+
+  const sessionDataChanged = cached.dataKey !== sessionViewDataKey(state.sessions);
+  mainContent.replaceChildren(cached.element);
+  mainContent.scrollTop = 0;
+  app.querySelectorAll<HTMLElement>(".sidebar-nav .nav-item").forEach((item) => {
+    item.classList.remove("active");
+  });
+  app
+    .querySelector<HTMLElement>('.sidebar-nav [data-action="nav-sessions"]')
+    ?.classList.add("active");
+  cachedSessionsPage = null;
+
+  if (sessionDataChanged) {
+    refreshSessionsListView();
+    refreshSessionDetailPane();
+  }
+  return true;
+}
+
 function render(): void {
   const previousMain = app.querySelector<HTMLElement>(".app-main-content");
   const previousPageKey = currentRenderedPageKey(app);
@@ -2513,6 +2570,8 @@ function render(): void {
       sessions: state.sessions,
       nowMs: Date.now(),
       cleanupFilter: state.cleanupFilter,
+      cleanupProjectPage: state.cleanupProjectPage,
+      cleanupSessionPage: state.cleanupSessionPage,
     });
   } else if (state.view === "usage-stats") {
     content = renderCodexUsageStatsPage({
@@ -2854,9 +2913,15 @@ function bindEvents(): void {
         await deleteSharedProfile(button.dataset.id);
       } else if (action === "nav-sessions") {
         if (state.view !== "sessions") {
+          const needsSessionLoad = state.sessionsFetchedAtMs === null
+            || Date.now() - state.sessionsFetchedAtMs >= 30_000;
           state.view = "sessions";
-          render();
-          await fetchCodexSessions();
+          if (!restoreCachedSessionsPage()) {
+            render();
+          }
+          if (needsSessionLoad) {
+            await fetchCodexSessions();
+          }
         }
       } else if (action === "nav-usage-stats") {
         if (state.view !== "usage-stats") {
@@ -2876,14 +2941,27 @@ function bindEvents(): void {
         render();
       } else if (action === "nav-session-cleanup") {
         if (state.view !== "session-cleanup") {
+          const needsSessionLoad = state.sessionsFetchedAtMs === null
+            || Date.now() - state.sessionsFetchedAtMs >= 30_000;
+          cacheMountedSessionsPage();
           state.view = "session-cleanup";
+          state.cleanupProjectPage = 0;
+          state.cleanupSessionPage = 0;
           render();
-          await fetchCodexSessions();
+          if (needsSessionLoad) {
+            await fetchCodexSessions();
+          }
         }
       } else if (action === "back-to-sessions") {
+        const needsSessionLoad = state.sessionsFetchedAtMs === null
+          || Date.now() - state.sessionsFetchedAtMs >= 30_000;
         state.view = "sessions";
-        render();
-        await fetchCodexSessions();
+        if (!restoreCachedSessionsPage()) {
+          render();
+        }
+        if (needsSessionLoad) {
+          await fetchCodexSessions();
+        }
       } else if (action === "tab-local") {
         state.activeTab = "local";
         render();

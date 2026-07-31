@@ -35,11 +35,15 @@ test("creates desktop state from explicit network sharing settings", async () =>
       checking: false,
       lastResult: null,
     },
+    sessionsFetchedAtMs: null,
     sessionSearchQuery: "",
     sessionFilter: "all",
     sessionSortOrder: "time",
+    sessionPage: 0,
     sessionsLoading: false,
     messagesLoading: false,
+    cleanupProjectPage: 0,
+    cleanupSessionPage: 0,
   });
   expect(state.pendingActions).toBeInstanceOf(Set);
   expect(state.pendingActions.size).toBe(0);
@@ -86,6 +90,7 @@ test("selects session render state from desktop state", async () => {
   state.sessionSearchQuery = "work";
   state.sessionFilter = "active";
   state.sessionSortOrder = "cwd";
+  state.sessionPage = 2;
   state.sessionsLoading = true;
   state.messagesLoading = true;
 
@@ -96,6 +101,7 @@ test("selects session render state from desktop state", async () => {
     sessionSearchQuery: "work",
     sessionFilter: "active",
     sessionSortOrder: "cwd",
+    sessionPage: 2,
     sessionsLoading: true,
     messagesLoading: true,
     showAllMessages: false,

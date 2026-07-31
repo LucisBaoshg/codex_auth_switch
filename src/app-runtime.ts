@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { renderFlash } from "./app-chrome-renderers";
 import type { FlashKind } from "./html-utils";
 import { createDesktopState } from "./desktop-state";
 import { loadNetworkSharingSettings } from "./network-sharing";
@@ -19,9 +20,41 @@ export function render(): void {
 
 let flashTimeoutId: number | null = null;
 
-export function setFlash(kind: FlashKind, text: string): void {
+type RenderOptions = {
+  render?: boolean;
+};
+
+function syncFlashView(): boolean {
+  const appLayout = document.querySelector<HTMLElement>(".app-layout");
+  if (!appLayout) {
+    return false;
+  }
+
+  appLayout.querySelector(":scope > .toast-notification")?.remove();
+  if (!state.flash) {
+    return true;
+  }
+
+  appLayout.insertAdjacentHTML("beforeend", renderFlash(state.flash));
+  appLayout
+    .querySelector<HTMLButtonElement>(":scope > .toast-notification .toast-close")
+    ?.addEventListener("click", () => {
+      clearFlash();
+      syncFlashView();
+    });
+  return true;
+}
+
+export function setFlash(
+  kind: FlashKind,
+  text: string,
+  options: RenderOptions = {},
+): void {
+  const shouldRender = options.render !== false;
   state.flash = { kind, text };
-  render();
+  if (shouldRender || !syncFlashView()) {
+    render();
+  }
 
   if (flashTimeoutId !== null) {
     window.clearTimeout(flashTimeoutId);
@@ -29,7 +62,9 @@ export function setFlash(kind: FlashKind, text: string): void {
   flashTimeoutId = window.setTimeout(() => {
     state.flash = null;
     flashTimeoutId = null;
-    render();
+    if (shouldRender || !syncFlashView()) {
+      render();
+    }
   }, 4000);
 }
 
@@ -41,9 +76,11 @@ export function clearFlash(): void {
   }
 }
 
-export function setBusy(nextBusy: boolean): void {
+export function setBusy(nextBusy: boolean, options: RenderOptions = {}): void {
   state.busy = nextBusy;
-  render();
+  if (options.render !== false) {
+    render();
+  }
 }
 
 export function beginPendingAction(key: string): void {

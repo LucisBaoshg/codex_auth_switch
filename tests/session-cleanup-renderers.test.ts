@@ -123,3 +123,54 @@ test("renders empty cleanup states under 7d filter", async () => {
   expect(html).toContain("没有超过 7 天未活跃的项目");
   expect(html).toContain("没有超过 7 天的旧会话");
 });
+
+test("paginates cleanup projects and old sessions before rendering DOM rows", async () => {
+  const {
+    CLEANUP_PROJECTS_PAGE_SIZE,
+    CLEANUP_SESSIONS_PAGE_SIZE,
+    renderSessionCleanupPage,
+  } = await import(renderersImportPath);
+  const nowMs = Date.UTC(2026, 5, 10);
+  const totalSessions = CLEANUP_SESSIONS_PAGE_SIZE + 5;
+  const sessions = Array.from({ length: totalSessions }, (_, index) =>
+    createSession({
+      id: `stale-${index}`,
+      cwd: `/repo/${index}`,
+      title: `Stale ${index}`,
+      updatedAtMs: Date.UTC(2026, 3, 1),
+    }),
+  );
+
+  const firstPageHtml = renderSessionCleanupPage({
+    sessions,
+    nowMs,
+    cleanupFilter: "7d",
+  });
+  const secondPageHtml = renderSessionCleanupPage({
+    sessions,
+    nowMs,
+    cleanupFilter: "7d",
+    cleanupProjectPage: 2,
+    cleanupSessionPage: 1,
+  });
+
+  expect(firstPageHtml.match(/class="cleanup-project-card"/g)).toHaveLength(
+    CLEANUP_PROJECTS_PAGE_SIZE,
+  );
+  expect(firstPageHtml.match(/class="cleanup-row"/g)).toHaveLength(
+    CLEANUP_SESSIONS_PAGE_SIZE,
+  );
+  expect(firstPageHtml).toContain(`共 ${totalSessions} 个项目`);
+  expect(firstPageHtml).toContain(`共 ${totalSessions} 个会话`);
+  expect(firstPageHtml).toContain(`全选本页旧会话 (${CLEANUP_SESSIONS_PAGE_SIZE})`);
+  expect(firstPageHtml).toContain(`一键清理全部历史会话 (${totalSessions})`);
+  expect(firstPageHtml).toContain('data-action="cleanup-delete-all-old-sessions"');
+
+  expect(secondPageHtml.match(/class="cleanup-project-card"/g)).toHaveLength(
+    totalSessions - CLEANUP_PROJECTS_PAGE_SIZE * 2,
+  );
+  expect(secondPageHtml.match(/class="cleanup-row"/g)).toHaveLength(5);
+  expect(secondPageHtml).toContain("第 3 / 3 页");
+  expect(secondPageHtml).toContain("第 2 / 2 页");
+  expect(secondPageHtml).toContain("全选本页旧会话 (5)");
+});

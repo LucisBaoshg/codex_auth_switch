@@ -75,15 +75,19 @@ export type DesktopState = {
     lastResult: UpdateCheckResult | null;
   };
   sessions: CodexSessionInfo[];
+  sessionsFetchedAtMs: number | null;
   selectedSessionId: string | null;
   sessionMessages: CodexMessage[];
   sessionSearchQuery: string;
   sessionFilter: SessionFilter;
   sessionSortOrder: SessionSortOrder;
+  sessionPage: number;
   sessionsLoading: boolean;
   messagesLoading: boolean;
   showAllMessages: boolean;
   cleanupFilter: CleanupFilter;
+  cleanupProjectPage: number;
+  cleanupSessionPage: number;
   usageStatsFilter: CodexUsageStatsFilter;
   usageStats: CodexUsageStatsSnapshot | null;
   usageStatsLoading: boolean;
@@ -153,15 +157,19 @@ export function createDesktopState(networkSharing: NetworkSharingSettings): Desk
       lastResult: null,
     },
     sessions: [],
+    sessionsFetchedAtMs: null,
     selectedSessionId: null,
     sessionMessages: [],
     sessionSearchQuery: "",
     sessionFilter: "all",
     sessionSortOrder: "time",
+    sessionPage: 0,
     sessionsLoading: false,
     messagesLoading: false,
     showAllMessages: false,
     cleanupFilter: "30d",
+    cleanupProjectPage: 0,
+    cleanupSessionPage: 0,
     usageStatsFilter: defaultUsageStatsFilter(),
     usageStats: null,
     usageStatsLoading: false,
@@ -186,6 +194,7 @@ export function selectSessionRenderState(state: DesktopState): SessionRenderStat
     sessionSearchQuery: state.sessionSearchQuery,
     sessionFilter: state.sessionFilter,
     sessionSortOrder: state.sessionSortOrder,
+    sessionPage: state.sessionPage,
     sessionsLoading: state.sessionsLoading,
     messagesLoading: state.messagesLoading,
     showAllMessages: state.showAllMessages,

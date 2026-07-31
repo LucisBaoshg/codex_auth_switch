@@ -2,12 +2,14 @@ import { escapeHtml, formatMessageText } from "./html-utils";
 import {
   formatSessionFileSize,
   groupSessionsByCwd,
+  UNKNOWN_WORKSPACE_LABEL,
   type CodexMessage,
   type CodexSessionInfo,
 } from "./session-utils";
 
 export type SessionFilter = "all" | "active" | "archived";
 export type SessionSortOrder = "time" | "cwd";
+export const SESSION_LIST_PAGE_SIZE = 80;
 
 export type SessionRenderState = {
   sessions: CodexSessionInfo[];
@@ -16,12 +18,22 @@ export type SessionRenderState = {
   sessionSearchQuery: string;
   sessionFilter: SessionFilter;
   sessionSortOrder: SessionSortOrder;
+  sessionPage: number;
   sessionsLoading: boolean;
   messagesLoading: boolean;
   showAllMessages: boolean;
 };
 
-export function renderSessionsListHtml(state: SessionRenderState): string {
+export type SessionListPageSelection = {
+  sessions: CodexSessionInfo[];
+  totalItems: number;
+  totalPages: number;
+  currentPage: number;
+};
+
+export function selectSessionListPage(
+  state: SessionRenderState,
+): SessionListPageSelection {
   let filtered = state.sessions;
   if (state.sessionFilter === "active") {
     filtered = filtered.filter((session) => !session.archived);
@@ -39,6 +51,37 @@ export function renderSessionsListHtml(state: SessionRenderState): string {
     );
   }
 
+  let ordered: CodexSessionInfo[];
+  if (state.sessionSortOrder === "cwd") {
+    const groups = groupSessionsByCwd(filtered);
+    const orderedCwds = Object.keys(groups).sort((left, right) => {
+      const leftMaxTime = Math.max(...groups[left].map((session) => session.updatedAtMs));
+      const rightMaxTime = Math.max(...groups[right].map((session) => session.updatedAtMs));
+      return rightMaxTime - leftMaxTime;
+    });
+    ordered = orderedCwds.flatMap((cwd) =>
+      groups[cwd].sort((left, right) => right.updatedAtMs - left.updatedAtMs)
+    );
+  } else {
+    ordered = [...filtered].sort((left, right) => right.updatedAtMs - left.updatedAtMs);
+  }
+
+  const totalItems = ordered.length;
+  const totalPages = Math.ceil(totalItems / SESSION_LIST_PAGE_SIZE);
+  const currentPage = totalPages === 0
+    ? 0
+    : Math.min(Math.max(0, state.sessionPage), totalPages - 1);
+  const startIndex = currentPage * SESSION_LIST_PAGE_SIZE;
+
+  return {
+    sessions: ordered.slice(startIndex, startIndex + SESSION_LIST_PAGE_SIZE),
+    totalItems,
+    totalPages,
+    currentPage,
+  };
+}
+
+export function renderSessionsListHtml(state: SessionRenderState): string {
   const selectedSession = state.sessions.find((session) => session.id === state.selectedSessionId);
 
   if (state.sessionsLoading) {
@@ -50,21 +93,26 @@ export function renderSessionsListHtml(state: SessionRenderState): string {
     `;
   }
 
-  if (filtered.length === 0) {
+  const selection = selectSessionListPage(state);
+  if (selection.totalItems === 0) {
     return `<div class="sessions-empty-state">没有找到符合条件的会话</div>`;
   }
 
-  if (state.sessionSortOrder === "cwd") {
-    const groups = groupSessionsByCwd(filtered);
-    const cwdMaxTimes: Record<string, number> = {};
-    for (const cwd of Object.keys(groups)) {
-      cwdMaxTimes[cwd] = Math.max(...groups[cwd].map((session) => session.updatedAtMs));
-    }
+  const paginationHtml = renderSessionPaginationHtml(
+    selection.currentPage,
+    selection.totalPages,
+    selection.totalItems,
+  );
 
-    return Object.keys(groups)
-      .sort((left, right) => cwdMaxTimes[right] - cwdMaxTimes[left])
+  if (state.sessionSortOrder === "cwd") {
+    const pageGroups = groupSessionsByCwd(selection.sessions);
+    const orderedCwds = Array.from(
+      new Set(selection.sessions.map((session) => session.cwd || UNKNOWN_WORKSPACE_LABEL)),
+    );
+
+    const groupsHtml = orderedCwds
       .map((cwd) => {
-        const folderSessions = groups[cwd].sort((left, right) => right.updatedAtMs - left.updatedAtMs);
+        const folderSessions = pageGroups[cwd];
         return `
           <details class="workspace-group" open>
             <summary class="workspace-header">
@@ -80,12 +128,41 @@ export function renderSessionsListHtml(state: SessionRenderState): string {
         `;
       })
       .join("");
+
+    return `<div class="sessions-list-content">${groupsHtml}</div>${paginationHtml}`;
   }
 
-  const sorted = [...filtered].sort((left, right) => right.updatedAtMs - left.updatedAtMs);
-  return `<div class="sessions-linear-list">${sorted
+  return `<div class="sessions-list-content"><div class="sessions-linear-list">${selection.sessions
     .map((session) => renderSessionItemHtml(session, selectedSession))
-    .join("")}</div>`;
+    .join("")}</div></div>${paginationHtml}`;
+}
+
+function renderSessionPaginationHtml(
+  currentPage: number,
+  totalPages: number,
+  totalItems: number,
+): string {
+  return `
+    <nav class="session-pagination" aria-label="会话列表分页">
+      <button
+        class="session-page-button"
+        data-action="session-page-prev"
+        ${currentPage === 0 ? "disabled" : ""}
+        aria-label="上一页"
+      >
+        上一页
+      </button>
+      <span class="session-page-status">第 ${currentPage + 1} / ${totalPages} 页 · 共 ${totalItems} 个</span>
+      <button
+        class="session-page-button"
+        data-action="session-page-next"
+        ${currentPage + 1 >= totalPages ? "disabled" : ""}
+        aria-label="下一页"
+      >
+        下一页
+      </button>
+    </nav>
+  `;
 }
 
 export function renderSessionDetailHtml(state: SessionRenderState): string {
@@ -119,7 +196,8 @@ export function renderSessionDetailHtml(state: SessionRenderState): string {
             <strong>工作目录:</strong> <code title="${escapeHtml(selectedSession.cwd || "")}">${escapeHtml(selectedSession.cwd || "无")}</code>
           </span>
           <span class="meta-item">
-            <strong>大小:</strong> ${formatSessionFileSize(selectedSession.fileSize)}
+            <strong>大小:</strong>
+            <span class="session-detail-file-size" data-session-id="${escapeHtml(selectedSession.id)}">${formatSessionFileSize(selectedSession.fileSize)}</span>
           </span>
           ${selectedSession.modelProvider ? `
             <span class="meta-item">
@@ -220,11 +298,11 @@ function renderSessionItemHtml(
         ${session.archived ? `<span class="session-card-archive-badge">已归档</span>` : ""}
       </div>
       <div class="session-card-details">
-        <span class="session-card-cwd" title="${escapeHtml(session.cwd || "")}">${escapeHtml(session.cwd ? (session.cwd.split(/[/\\]/).pop() || "") : "无目录")}</span>
+          <span class="session-card-cwd" title="${escapeHtml(session.cwd || "")}">${escapeHtml(session.cwd ? (session.cwd.split(/[/\\]/).pop() || "") : "无目录")}</span>
         <div class="session-card-meta">
           <span>${timeStr}</span>
           <span class="dot-separator">•</span>
-          <span>${formatSessionFileSize(session.fileSize)}</span>
+          <span class="session-card-file-size" data-session-id="${escapeHtml(session.id)}">${formatSessionFileSize(session.fileSize)}</span>
         </div>
       </div>
     </div>

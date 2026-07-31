@@ -1,4 +1,11 @@
 use super::*;
+use std::sync::{Mutex, OnceLock};
+
+static SESSION_FILE_SIZE_CACHE: OnceLock<Mutex<HashMap<PathBuf, (i64, u64)>>> = OnceLock::new();
+
+fn session_file_size_cache() -> &'static Mutex<HashMap<PathBuf, (i64, u64)>> {
+    SESSION_FILE_SIZE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 impl ProfileManager {
     pub fn fix_session_database_and_configs(&self) -> Result<(), AppError> {
@@ -31,6 +38,13 @@ impl ProfileManager {
     }
 
     pub fn list_codex_sessions(&self) -> Result<Vec<CodexSessionInfo>, AppError> {
+        self.list_codex_sessions_with_file_sizes(true)
+    }
+
+    pub fn list_codex_sessions_with_file_sizes(
+        &self,
+        include_file_sizes: bool,
+    ) -> Result<Vec<CodexSessionInfo>, AppError> {
         let Some(db_path) = primary_state_database_path(&self.target_dir) else {
             return Ok(Vec::new());
         };
@@ -48,30 +62,67 @@ impl ProfileManager {
         let mut list = Vec::with_capacity(num_items);
 
         if num_items > 0 {
-            let num_workers = std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(4)
-                .min(num_items);
-
             let mut file_sizes = vec![None; num_items];
+            if include_file_sizes {
+                let num_workers = std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(4)
+                    .min(num_items);
 
-            std::thread::scope(|s| {
-                let chunk_size = num_items.div_ceil(num_workers);
-                let t_chunks = threads.chunks(chunk_size);
-                let s_chunks = file_sizes.chunks_mut(chunk_size);
-
-                for (t_chunk, s_chunk) in t_chunks.zip(s_chunks) {
-                    s.spawn(move || {
-                        for (t, s_val) in t_chunk.iter().zip(s_chunk.iter_mut()) {
-                            if let Some(ref p) = t.rollout_path {
-                                if let Ok(m) = fs::metadata(p) {
-                                    *s_val = Some(m.len());
+                if let Ok(mut cache) = session_file_size_cache().lock() {
+                    let active_paths = threads
+                        .iter()
+                        .filter_map(|thread| thread.rollout_path.clone())
+                        .collect::<HashSet<_>>();
+                    cache.retain(|path, _| active_paths.contains(path));
+                    for (index, thread) in threads.iter().enumerate() {
+                        if let Some(path) = thread.rollout_path.as_ref() {
+                            if let Some((cached_updated_at_ms, cached_size)) = cache.get(path) {
+                                if *cached_updated_at_ms == thread.updated_at_ms {
+                                    file_sizes[index] = Some(*cached_size);
                                 }
                             }
                         }
+                    }
+                }
+
+                let has_uncached_paths = threads
+                    .iter()
+                    .zip(file_sizes.iter())
+                    .any(|(thread, size)| thread.rollout_path.is_some() && size.is_none());
+                if has_uncached_paths {
+                    std::thread::scope(|s| {
+                        let chunk_size = num_items.div_ceil(num_workers);
+                        let t_chunks = threads.chunks(chunk_size);
+                        let s_chunks = file_sizes.chunks_mut(chunk_size);
+
+                        for (t_chunk, s_chunk) in t_chunks.zip(s_chunks) {
+                            s.spawn(move || {
+                                for (t, s_val) in t_chunk.iter().zip(s_chunk.iter_mut()) {
+                                    if s_val.is_some() {
+                                        continue;
+                                    }
+                                    if let Some(ref p) = t.rollout_path {
+                                        if let Ok(m) = fs::metadata(p) {
+                                            *s_val = Some(m.len());
+                                        }
+                                    }
+                                }
+                            });
+                        }
                     });
                 }
-            });
+
+                if let Ok(mut cache) = session_file_size_cache().lock() {
+                    for (thread, file_size) in threads.iter().zip(file_sizes.iter()) {
+                        if let (Some(path), Some(size)) =
+                            (thread.rollout_path.as_ref(), file_size.as_ref())
+                        {
+                            cache.insert(path.clone(), (thread.updated_at_ms, *size));
+                        }
+                    }
+                }
+            }
 
             for (t, file_size) in threads.into_iter().zip(file_sizes) {
                 list.push(CodexSessionInfo {
@@ -336,39 +387,69 @@ impl ProfileManager {
     }
 
     pub fn delete_codex_session(&self, thread_id: &str) -> Result<(), AppError> {
+        self.delete_codex_sessions(&[thread_id.to_string()])
+            .map(|_| ())
+    }
+
+    pub fn delete_codex_sessions(&self, thread_ids: &[String]) -> Result<usize, AppError> {
+        if thread_ids.is_empty() {
+            return Ok(0);
+        }
+
         let Some(db_path) = primary_state_database_path(&self.target_dir) else {
             return Err(AppError::Message("No session database found.".into()));
         };
-        let conn = open_valid_state_database(&db_path)
+        let mut conn = open_valid_state_database(&db_path)
             .ok_or_else(|| AppError::Message("Invalid state database.".into()))?;
+        let transaction = conn.transaction().map_err(|error| {
+            AppError::Message(format!(
+                "Failed to start session deletion transaction: {error}"
+            ))
+        })?;
+        let mut unique_ids = HashSet::new();
+        let mut rollout_paths = Vec::new();
+        let mut deleted_count = 0;
 
-        // Query rollout path first
-        let mut stmt = conn.prepare("SELECT rollout_path FROM threads WHERE id = ?1")?;
-        let rollout_path_str: Option<String> = match stmt.query_row([thread_id], |row| row.get(0)) {
-            Ok(val) => val,
-            Err(rusqlite::Error::QueryReturnedNoRows) => None,
-            Err(e) => {
-                return Err(AppError::Message(format!(
-                    "Failed to query thread rollout path: {e}"
-                )))
+        {
+            let mut select_stmt =
+                transaction.prepare("SELECT rollout_path FROM threads WHERE id = ?1")?;
+            let mut delete_stmt = transaction.prepare("DELETE FROM threads WHERE id = ?1")?;
+
+            for thread_id in thread_ids {
+                if !unique_ids.insert(thread_id.as_str()) {
+                    continue;
+                }
+
+                let rollout_path: Option<String> =
+                    match select_stmt.query_row([thread_id], |row| row.get(0)) {
+                        Ok(path) => path,
+                        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                        Err(error) => {
+                            return Err(AppError::Message(format!(
+                                "Failed to query thread rollout path: {error}"
+                            )))
+                        }
+                    };
+                deleted_count += delete_stmt.execute([thread_id]).map_err(|error| {
+                    AppError::Message(format!("Failed to delete thread from database: {error}"))
+                })?;
+                if let Some(path) = rollout_path {
+                    rollout_paths.push(PathBuf::from(path));
+                }
             }
-        };
+        }
 
-        // Delete from database
-        conn.execute("DELETE FROM threads WHERE id = ?1", [thread_id])
-            .map_err(|e| {
-                AppError::Message(format!("Failed to delete thread from database: {e}"))
-            })?;
+        transaction.commit().map_err(|error| {
+            AppError::Message(format!("Failed to commit session deletions: {error}"))
+        })?;
 
-        // Delete rollout file
-        if let Some(path_str) = rollout_path_str {
-            let path = PathBuf::from(&path_str);
+        for path in rollout_paths {
             if path.exists() {
                 let _ = fs::remove_file(&path);
             }
         }
 
-        Ok(())
+        Ok(deleted_count)
     }
 
     pub fn rename_codex_session(&self, thread_id: &str, new_title: &str) -> Result<(), AppError> {
@@ -1036,5 +1117,129 @@ impl ProfileManager {
         if let Ok(serialized) = serde_json::to_string_pretty(&state) {
             let _ = fs::write(path, serialized);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn batch_deletes_unique_sessions_and_rollout_files() {
+        let app_dir = TempDir::new().unwrap();
+        let target_dir = TempDir::new().unwrap();
+        let manager = ProfileManager::new(
+            app_dir.path().to_path_buf(),
+            target_dir.path().to_path_buf(),
+        )
+        .unwrap();
+        let db_path = target_dir.path().join("state_5.sqlite");
+        let first_rollout = target_dir.path().join("first.jsonl");
+        let second_rollout = target_dir.path().join("second.jsonl");
+        let kept_rollout = target_dir.path().join("kept.jsonl");
+        fs::write(&first_rollout, "{}\n").unwrap();
+        fs::write(&second_rollout, "{}\n").unwrap();
+        fs::write(&kept_rollout, "{}\n").unwrap();
+
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                rollout_path TEXT,
+                updated_at_ms INTEGER NOT NULL
+            );",
+        )
+        .unwrap();
+        for (id, path, updated_at_ms) in [
+            ("first", &first_rollout, 1_i64),
+            ("second", &second_rollout, 2_i64),
+            ("kept", &kept_rollout, 3_i64),
+        ] {
+            conn.execute(
+                "INSERT INTO threads (id, rollout_path, updated_at_ms) VALUES (?1, ?2, ?3)",
+                rusqlite::params![id, path.to_string_lossy(), updated_at_ms],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let deleted = manager
+            .delete_codex_sessions(&[
+                "first".into(),
+                "second".into(),
+                "first".into(),
+                "missing".into(),
+            ])
+            .unwrap();
+
+        assert_eq!(deleted, 2);
+        let conn = Connection::open(db_path).unwrap();
+        let remaining: Vec<String> = conn
+            .prepare("SELECT id FROM threads ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(remaining, vec!["kept"]);
+        assert!(!first_rollout.exists());
+        assert!(!second_rollout.exists());
+        assert!(kept_rollout.exists());
+    }
+
+    #[test]
+    fn refreshes_cached_file_size_when_session_timestamp_changes() {
+        let app_dir = TempDir::new().unwrap();
+        let target_dir = TempDir::new().unwrap();
+        let manager = ProfileManager::new(
+            app_dir.path().to_path_buf(),
+            target_dir.path().to_path_buf(),
+        )
+        .unwrap();
+        let db_path = target_dir.path().join("state_5.sqlite");
+        let rollout_path = target_dir.path().join("session.jsonl");
+        fs::write(&rollout_path, "one").unwrap();
+
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                rollout_path TEXT,
+                updated_at INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                cwd TEXT,
+                title TEXT,
+                has_user_event INTEGER NOT NULL,
+                archived INTEGER NOT NULL,
+                model_provider TEXT
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO threads (
+                id, rollout_path, updated_at, updated_at_ms, cwd, title,
+                has_user_event, archived, model_provider
+            ) VALUES (?1, ?2, 1, 1000, '/repo', 'Session', 1, 0, 'openai')",
+            rusqlite::params!["session", rollout_path.to_string_lossy()],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert_eq!(
+            manager.list_codex_sessions_with_file_sizes(false).unwrap()[0].file_size,
+            None
+        );
+        assert_eq!(manager.list_codex_sessions().unwrap()[0].file_size, Some(3));
+        fs::write(&rollout_path, "updated").unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute(
+            "UPDATE threads SET updated_at = 2, updated_at_ms = 2000 WHERE id = 'session'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert_eq!(manager.list_codex_sessions().unwrap()[0].file_size, Some(7));
     }
 }

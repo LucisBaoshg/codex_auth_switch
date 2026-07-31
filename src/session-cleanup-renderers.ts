@@ -8,25 +8,26 @@ import {
 } from "./session-utils";
 
 export type CleanupFilter = "7d" | "30d";
+export const CLEANUP_PROJECTS_PAGE_SIZE = 20;
+export const CLEANUP_SESSIONS_PAGE_SIZE = 50;
 
 export type SessionCleanupRenderState = {
   sessions: CodexSessionInfo[];
   nowMs: number;
   cleanupFilter?: CleanupFilter;
+  cleanupProjectPage?: number;
+  cleanupSessionPage?: number;
 };
 
 export function renderSessionCleanupPage(state: SessionCleanupRenderState): string {
   const filter = state.cleanupFilter || "30d";
-  const windowMs = filter === "7d" ? 7 * 24 * 60 * 60 * 1000 : 30 * 24 * 60 * 60 * 1000;
-  const cleanupCutoffMs = state.nowMs - windowMs;
-  const inactiveProjects = getInactiveSessionProjects(state.sessions, cleanupCutoffMs);
-  const oldSessions = getOldSessions(state.sessions, cleanupCutoffMs);
-  const timeLabel = filter === "7d" ? "7 天" : "1 个月";
-  const projectsHtml = renderInactiveProjects(inactiveProjects, filter);
-  const sessionsHtml = renderOldSessions(oldSessions, filter);
 
   return `
     <div class="cleanup-page-container">
+      <div class="cleanup-operation-status" role="status" aria-live="polite">
+        <span class="busy-dialog-spinner" aria-hidden="true"></span>
+        <span>正在处理会话文件...</span>
+      </div>
       <header class="cleanup-header">
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
           <div style="display: flex; align-items: center; gap: 12px;">
@@ -48,38 +49,81 @@ export function renderSessionCleanupPage(state: SessionCleanupRenderState): stri
       </header>
 
       <div class="cleanup-sections-wrapper">
-        <div class="cleanup-section">
-          <div class="cleanup-section-header">
-            <h3>超过 ${timeLabel}没有任何会话产生的工作空间项目 (${inactiveProjects.length})</h3>
-            <span class="section-desc">这些项目的开发工作可能已经结束，可以安全清理。</span>
-          </div>
-          ${projectsHtml}
-        </div>
-
-        <div class="cleanup-section">
-          <div class="cleanup-section-header">
-            <h3>所有项目中早于 ${timeLabel}的旧会话 (${oldSessions.length})</h3>
-            <span class="section-desc">清理时间久远的聊天记录，保留近期活动。</span>
-          </div>
-          ${sessionsHtml}
-        </div>
+        ${renderSessionCleanupProjectsSection(state)}
+        ${renderSessionCleanupSessionsSection(state)}
       </div>
     </div>
   `;
 }
 
+export function renderSessionCleanupProjectsSection(
+  state: SessionCleanupRenderState,
+): string {
+  const filter = state.cleanupFilter || "30d";
+  const cleanupCutoffMs = cleanupCutoffForFilter(state.nowMs, filter);
+  const inactiveProjects = getInactiveSessionProjects(state.sessions, cleanupCutoffMs);
+  const timeLabel = cleanupTimeLabel(filter);
+  return `
+    <div class="cleanup-section" data-role="cleanup-projects-section">
+      <div class="cleanup-section-header">
+        <h3>超过 ${timeLabel}没有任何会话产生的工作空间项目 (${inactiveProjects.length})</h3>
+        <span class="section-desc">这些项目的开发工作可能已经结束，可以安全清理。</span>
+      </div>
+      ${renderInactiveProjects(inactiveProjects, filter, state.cleanupProjectPage ?? 0)}
+    </div>
+  `;
+}
+
+export function renderSessionCleanupSessionsSection(
+  state: SessionCleanupRenderState,
+): string {
+  const filter = state.cleanupFilter || "30d";
+  const cleanupCutoffMs = cleanupCutoffForFilter(state.nowMs, filter);
+  const oldSessions = getOldSessions(state.sessions, cleanupCutoffMs);
+  const timeLabel = cleanupTimeLabel(filter);
+  return `
+    <div class="cleanup-section" data-role="cleanup-sessions-section">
+      <div class="cleanup-section-header">
+        <h3>所有项目中早于 ${timeLabel}的旧会话 (${oldSessions.length})</h3>
+        <span class="section-desc">清理时间久远的聊天记录，保留近期活动。</span>
+      </div>
+      ${renderOldSessions(oldSessions, filter, state.cleanupSessionPage ?? 0)}
+    </div>
+  `;
+}
+
+function cleanupCutoffForFilter(nowMs: number, filter: CleanupFilter): number {
+  const windowMs = filter === "7d"
+    ? 7 * 24 * 60 * 60 * 1000
+    : SESSION_CLEANUP_WINDOW_MS;
+  return nowMs - windowMs;
+}
+
+function cleanupTimeLabel(filter: CleanupFilter): string {
+  return filter === "7d" ? "7 天" : "1 个月";
+}
+
 function renderInactiveProjects(
   inactiveProjects: ReturnType<typeof getInactiveSessionProjects<CodexSessionInfo>>,
   filter: CleanupFilter,
+  requestedPage: number,
 ): string {
   const timeLabel = filter === "7d" ? "7 天" : "1 个月";
   if (inactiveProjects.length === 0) {
     return `<div class="cleanup-empty-state">没有超过 ${timeLabel}未活跃的项目</div>`;
   }
 
+  const totalPages = Math.ceil(inactiveProjects.length / CLEANUP_PROJECTS_PAGE_SIZE);
+  const currentPage = clampCleanupPage(requestedPage, totalPages);
+  const startIndex = currentPage * CLEANUP_PROJECTS_PAGE_SIZE;
+  const pageProjects = inactiveProjects.slice(
+    startIndex,
+    startIndex + CLEANUP_PROJECTS_PAGE_SIZE,
+  );
+
   return `
     <div class="cleanup-list">
-      ${inactiveProjects
+      ${pageProjects
         .map((project) => {
           const date = new Date(project.lastActiveTime);
           const timeStr = `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`;
@@ -108,24 +152,42 @@ function renderInactiveProjects(
         })
         .join("")}
     </div>
+    ${renderCleanupPaginationHtml("project", currentPage, totalPages, inactiveProjects.length)}
   `;
 }
 
-function renderOldSessions(oldSessions: CodexSessionInfo[], filter: CleanupFilter): string {
+function renderOldSessions(
+  oldSessions: CodexSessionInfo[],
+  filter: CleanupFilter,
+  requestedPage: number,
+): string {
   const timeLabel = filter === "7d" ? "7 天" : "1 个月";
   if (oldSessions.length === 0) {
     return `<div class="cleanup-empty-state">没有超过 ${timeLabel}的旧会话</div>`;
   }
 
+  const totalPages = Math.ceil(oldSessions.length / CLEANUP_SESSIONS_PAGE_SIZE);
+  const currentPage = clampCleanupPage(requestedPage, totalPages);
+  const startIndex = currentPage * CLEANUP_SESSIONS_PAGE_SIZE;
+  const pageSessions = oldSessions.slice(startIndex, startIndex + CLEANUP_SESSIONS_PAGE_SIZE);
+
   return `
     <div class="batch-action-bar">
       <label class="checkbox-wrapper select-all-wrapper">
         <input type="checkbox" id="cleanup-select-all">
-        <span>全选所有旧会话 (${oldSessions.length})</span>
+        <span>全选本页旧会话 (${pageSessions.length})</span>
       </label>
-      <button class="button button-danger" id="cleanup-batch-delete-btn" disabled>
-        批量物理删除 (已选 <span id="cleanup-selected-count">0</span>)
-      </button>
+      <div class="cleanup-batch-buttons">
+        <button class="button button-danger" id="cleanup-batch-delete-btn" disabled>
+          批量物理删除 (已选 <span id="cleanup-selected-count">0</span>)
+        </button>
+        <button
+          class="button button-danger cleanup-delete-all-button"
+          data-action="cleanup-delete-all-old-sessions"
+        >
+          一键清理全部历史会话 (${oldSessions.length})
+        </button>
+      </div>
     </div>
     <div class="cleanup-table-wrapper">
       <table class="cleanup-table">
@@ -140,7 +202,7 @@ function renderOldSessions(oldSessions: CodexSessionInfo[], filter: CleanupFilte
           </tr>
         </thead>
         <tbody>
-          ${oldSessions
+          ${pageSessions
             .map((session) => {
               const date = new Date(session.updatedAtMs);
               const timeStr = `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`;
@@ -168,5 +230,38 @@ function renderOldSessions(oldSessions: CodexSessionInfo[], filter: CleanupFilte
         </tbody>
       </table>
     </div>
+    ${renderCleanupPaginationHtml("session", currentPage, totalPages, oldSessions.length)}
+  `;
+}
+
+function clampCleanupPage(requestedPage: number, totalPages: number): number {
+  return Math.min(Math.max(0, requestedPage), totalPages - 1);
+}
+
+function renderCleanupPaginationHtml(
+  kind: "project" | "session",
+  currentPage: number,
+  totalPages: number,
+  totalItems: number,
+): string {
+  const label = kind === "project" ? "项目" : "会话";
+  return `
+    <nav class="cleanup-pagination" aria-label="${label}分页">
+      <button
+        class="cleanup-page-button"
+        data-action="cleanup-${kind}-page-prev"
+        ${currentPage === 0 ? "disabled" : ""}
+      >
+        上一页
+      </button>
+      <span>第 ${currentPage + 1} / ${totalPages} 页 · 共 ${totalItems} 个${label}</span>
+      <button
+        class="cleanup-page-button"
+        data-action="cleanup-${kind}-page-next"
+        ${currentPage + 1 >= totalPages ? "disabled" : ""}
+      >
+        下一页
+      </button>
+    </nav>
   `;
 }
