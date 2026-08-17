@@ -68,7 +68,10 @@ import {
   renderNetworkAccountSettings,
   renderSidebarLoginStatus,
 } from "./network-account-renderers";
-import { renderSettingsPage } from "./settings-renderers";
+import {
+  renderSettingsPage,
+  type MenuBarUsagePreview,
+} from "./settings-renderers";
 import {
   DEFAULT_NETWORK_PROFILES_API,
   hasNetworkAccessToken,
@@ -113,6 +116,7 @@ import type {
   CodexUsageStatsSnapshot,
   InstallLocationStatus,
   LegacyThirdPartyMigrationResult,
+  MenuBarUsageWindow,
   PacProxyStatus,
   ProfileDocument,
   ProfileSummary,
@@ -129,6 +133,8 @@ import {
 import {
   isOfficialOauthProfile,
   isThirdPartyBackedProfile,
+  remainingPercent,
+  selectUsageWindow,
 } from "./usage-formatters";
 import {
   renderSessionDetailHtml,
@@ -2164,6 +2170,42 @@ async function setCodexUsageApiEnabled(enabled: boolean): Promise<void> {
   }
 }
 
+async function setMenuBarUsageWindow(window: MenuBarUsageWindow): Promise<void> {
+  const currentWindow = state.snapshot?.menuBarUsageWindow ?? "weekly";
+  if (window === currentWindow) {
+    return;
+  }
+
+  setBusy(true);
+  try {
+    if (!isTauriRuntime) {
+      const snapshot = state.snapshot;
+      if (!snapshot) {
+        throw new Error("当前没有可用快照。");
+      }
+      setSnapshot({
+        ...snapshot,
+        menuBarUsageWindow: window,
+      });
+    } else {
+      const snapshot = await desktopInvoke<AppSnapshot>("set_menu_bar_usage_window", { window });
+      setSnapshot(snapshot);
+    }
+
+    setFlash(
+      "success",
+      window === "weekly"
+        ? "工具栏已优先展示周额度。"
+        : "工具栏已切换为 5 小时额度。",
+    );
+  } catch (error) {
+    setFlash("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+
 async function refreshProfileCodexUsage(profileId: string, profileName: string): Promise<void> {
   const actionKey = usageRefreshActionKey(profileId);
   beginPendingAction(actionKey);
@@ -2529,6 +2571,25 @@ function restoreCachedSessionsPage(): boolean {
   return true;
 }
 
+function settingsMenuBarUsagePreview(snapshot: AppSnapshot | null): MenuBarUsagePreview {
+  const activeProfileId = snapshot?.activeProfileId;
+  const activeOfficialProfile = snapshot?.profiles.find(
+    (profile) => profile.id === activeProfileId && isOfficialOauthProfile(profile),
+  );
+  const profile = activeOfficialProfile
+    ?? snapshot?.profiles.find(isOfficialOauthProfile)
+    ?? null;
+  const usage = profile?.codexUsage ?? null;
+  const fiveHour = selectUsageWindow(usage, 300, true);
+  const weekly = selectUsageWindow(usage, 10080, false);
+
+  return {
+    profileName: profile?.name ?? "当前官方账号",
+    fiveHourRemaining: fiveHour ? remainingPercent(fiveHour.usedPercent) : null,
+    weeklyRemaining: weekly ? remainingPercent(weekly.usedPercent) : null,
+  };
+}
+
 function render(): void {
   const previousMain = app.querySelector<HTMLElement>(".app-main-content");
   const previousPageKey = currentRenderedPageKey(app);
@@ -2562,6 +2623,8 @@ function render(): void {
       ),
       pacProxy: state.pacProxy,
       pacProxyLoading: state.pacProxyLoading,
+      menuBarUsageWindow: snapshot?.menuBarUsageWindow ?? "weekly",
+      menuBarUsagePreview: settingsMenuBarUsagePreview(snapshot),
     });
   } else if (state.view === "sessions") {
     content = renderSessionsPage(selectSessionRenderState(state));
@@ -2846,6 +2909,11 @@ function bindEvents(): void {
           state.view = "settings";
           render();
         }
+      } else if (
+        action === "set-menu-bar-usage-window"
+        && (button.dataset.window === "weekly" || button.dataset.window === "fiveHour")
+      ) {
+        await setMenuBarUsageWindow(button.dataset.window);
       } else if (action === "toggle-pac-proxy") {
         await togglePacProxy();
       } else if (action === "select-pac-proxy-option") {

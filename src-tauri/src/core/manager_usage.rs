@@ -9,17 +9,18 @@ impl ProfileManager {
         &self,
         filter: CodexUsageStatsFilter,
     ) -> Result<CodexUsageStatsSnapshot, AppError> {
-        let conn = self.open_usage_stats_connection()?;
+        let mut conn = self.open_usage_stats_connection()?;
         let mut sync = CodexUsageStatsSyncResult::default();
         let mut session_files = collect_codex_session_log_files(&self.target_dir);
         session_files.sort();
         sync.files_scanned = session_files.len() as i64;
 
         for session_path in session_files {
-            match import_codex_usage_file(&conn, &session_path) {
+            match import_codex_usage_file(&mut conn, &session_path) {
                 Ok(file_sync) => {
                     sync.imported += file_sync.imported;
                     sync.skipped += file_sync.skipped;
+                    sync.files_unchanged += file_sync.files_unchanged;
                     sync.errors.extend(file_sync.errors);
                 }
                 Err(error) => sync
@@ -28,9 +29,9 @@ impl ProfileManager {
             }
         }
 
-        if let Err(error) = backfill_zero_costs(&conn) {
+        if let Err(error) = reprice_codex_usage_logs(&conn) {
             sync.errors
-                .push(format!("Failed to backfill usage costs: {error}"));
+                .push(format!("Failed to reprice usage costs: {error}"));
         }
 
         self.read_codex_usage_stats_snapshot(&conn, sync, filter)
@@ -38,6 +39,15 @@ impl ProfileManager {
 
     pub fn set_codex_usage_api_enabled(&mut self, enabled: bool) -> Result<(), AppError> {
         self.state.codex_usage_api_enabled = enabled;
+        self.persist_state()?;
+        Ok(())
+    }
+
+    pub fn set_menu_bar_usage_window(
+        &mut self,
+        window: MenuBarUsageWindow,
+    ) -> Result<(), AppError> {
+        self.state.menu_bar_usage_window = window;
         self.persist_state()?;
         Ok(())
     }

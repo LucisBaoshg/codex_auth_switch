@@ -1,7 +1,7 @@
 use crate::core::{
     get_pac_proxy_status, unsupported_pac_proxy_status, AppSnapshot, CodexUsageCredits,
-    CodexUsageSnapshot, CodexUsageWindow, PacProxyOption, PacProxyStatus, ThirdPartyCreditSnapshot,
-    ThirdPartySubscriptionSnapshot, ThirdPartyUsageQuotaSnapshot,
+    CodexUsageSnapshot, CodexUsageWindow, MenuBarUsageWindow, PacProxyOption, PacProxyStatus,
+    ThirdPartyCreditSnapshot, ThirdPartySubscriptionSnapshot, ThirdPartyUsageQuotaSnapshot,
 };
 use tauri::{
     menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem},
@@ -31,6 +31,8 @@ pub struct MenuBarUsageStatus {
     pub summary: String,
     pub detail_lines: Vec<String>,
     pub progress_percent: Option<u8>,
+    pub ring_segments: u8,
+    pub danger_when_low: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,7 +119,11 @@ pub fn install_menu_bar(app: &mut App<Wry>, snapshot: &AppSnapshot) -> tauri::Re
     menu.append_items(&pac_option_refs)?;
     menu.append_items(&[&show_item, &separator_2, &quit_item])?;
     TrayIconBuilder::with_id(TRAY_ID)
-        .icon(menu_bar_icon(status.progress_percent))
+        .icon(menu_bar_icon(
+            status.progress_percent,
+            status.ring_segments,
+            status.danger_when_low,
+        ))
         .icon_as_template(false)
         .title(&status.title)
         .tooltip(&status.summary)
@@ -165,7 +171,11 @@ pub fn install_menu_bar(app: &mut App<Wry>, snapshot: &AppSnapshot) -> tauri::Re
 pub fn sync_menu_bar_usage(app: &AppHandle<Wry>, snapshot: &AppSnapshot) -> tauri::Result<()> {
     let status = menu_bar_usage_status(snapshot);
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
-        tray.set_icon(Some(menu_bar_icon(status.progress_percent)))?;
+        tray.set_icon(Some(menu_bar_icon(
+            status.progress_percent,
+            status.ring_segments,
+            status.danger_when_low,
+        )))?;
         tray.set_title(Some(&status.title))?;
         tray.set_tooltip(Some(&status.summary))?;
     }
@@ -288,16 +298,28 @@ pub fn menu_bar_usage_status(snapshot: &AppSnapshot) -> MenuBarUsageStatus {
         return third_party_usage_status(&profile.name, profile.third_party_usage.as_ref());
     }
 
-    codex_usage_status(&profile.name, profile.codex_usage.as_ref())
+    codex_usage_status(
+        &profile.name,
+        profile.codex_usage.as_ref(),
+        snapshot.menu_bar_usage_window,
+    )
 }
 
 fn is_third_party_backed_profile(auth_type_label: &str) -> bool {
     matches!(auth_type_label, "第三方 API" | "共生配置")
 }
 
-fn codex_usage_status(name: &str, usage: Option<&CodexUsageSnapshot>) -> MenuBarUsageStatus {
+fn codex_usage_status(
+    name: &str,
+    usage: Option<&CodexUsageSnapshot>,
+    display_window: MenuBarUsageWindow,
+) -> MenuBarUsageStatus {
+    let ring_segments = match display_window {
+        MenuBarUsageWindow::FiveHour => 1,
+        MenuBarUsageWindow::Weekly => 5,
+    };
     let Some(usage) = usage else {
-        return status_without_progress(
+        return status_without_progress_with_segments(
             "--",
             &format!("{name}：还没有额度快照"),
             vec![
@@ -305,11 +327,12 @@ fn codex_usage_status(name: &str, usage: Option<&CodexUsageSnapshot>) -> MenuBar
                 "还没有额度快照".into(),
                 "请在主窗口刷新额度".into(),
             ],
+            ring_segments,
         );
     };
 
     if usage.error.is_some() {
-        return status_without_progress(
+        return status_without_progress_with_segments(
             "!",
             &format!("{name}：额度刷新失败"),
             vec![
@@ -319,33 +342,35 @@ fn codex_usage_status(name: &str, usage: Option<&CodexUsageSnapshot>) -> MenuBar
                     usage.error.as_deref().unwrap_or("未知错误")
                 ),
             ],
+            ring_segments,
         );
     }
 
-    let primary = select_usage_window(usage, 300, true);
+    let five_hour = select_usage_window(usage, 300, true);
     let weekly = select_usage_window(usage, 10080, false);
-    let primary_remaining = primary.map(remaining_percent);
+    let five_hour_remaining = five_hour.map(remaining_percent);
     let weekly_remaining = weekly.map(remaining_percent);
-    let primary_used = primary.map(|window| window.used_percent.clamp(0.0, 100.0).round() as u8);
+    let (selected_label, selected_remaining, secondary_label, secondary_remaining) =
+        match display_window {
+            MenuBarUsageWindow::FiveHour => {
+                ("5H 剩余", five_hour_remaining, "本周剩余", weekly_remaining)
+            }
+            MenuBarUsageWindow::Weekly => {
+                ("本周剩余", weekly_remaining, "5H 剩余", five_hour_remaining)
+            }
+        };
 
-    let title = primary_remaining
+    let title = selected_remaining
         .map(|remaining| format!("{remaining}%"))
         .unwrap_or_else(|| "--".into());
-    let primary_summary = primary_remaining
-        .map(|remaining| format!("5H 剩余 {remaining}%"))
-        .unwrap_or_else(|| "5H 剩余 --".into());
-    let weekly_summary = weekly_remaining
-        .map(|remaining| format!("本周剩余 {remaining}%"))
-        .unwrap_or_else(|| "本周剩余 --".into());
+    let selected_summary = selected_remaining
+        .map(|remaining| format!("{selected_label} {remaining}%"))
+        .unwrap_or_else(|| format!("{selected_label} --"));
 
     let mut detail_lines = vec![
         format!("当前：{name}"),
-        primary_remaining
-            .map(|remaining| format!("5H 剩余：{remaining}%"))
-            .unwrap_or_else(|| "5H 剩余：--".into()),
-        weekly_remaining
-            .map(|remaining| format!("本周剩余：{remaining}%"))
-            .unwrap_or_else(|| "本周剩余：--".into()),
+        format_quota_detail(selected_label, selected_remaining),
+        format_quota_detail(secondary_label, secondary_remaining),
     ];
 
     if let Some(credits) = usage.credits.as_ref().and_then(format_credits) {
@@ -354,9 +379,11 @@ fn codex_usage_status(name: &str, usage: Option<&CodexUsageSnapshot>) -> MenuBar
 
     MenuBarUsageStatus {
         title,
-        summary: format!("{name}：{primary_summary}，{weekly_summary}"),
+        summary: format!("{name}：{selected_summary}"),
         detail_lines,
-        progress_percent: primary_used,
+        progress_percent: selected_remaining,
+        ring_segments,
+        danger_when_low: true,
     }
 }
 
@@ -440,7 +467,23 @@ fn third_party_usage_status(
         summary: format!("{name}：{daily_summary}，{weekly_summary}"),
         detail_lines,
         progress_percent: daily_percent,
+        ring_segments: 1,
+        danger_when_low: false,
     }
+}
+
+fn format_quota_detail(label: &str, remaining: Option<u8>) -> String {
+    match remaining {
+        Some(percent) => format!("{label}：{percent}%  {}", menu_bar_quota_bar(Some(percent))),
+        None => format!("{label}：--  {}", menu_bar_quota_bar(None)),
+    }
+}
+
+pub fn menu_bar_quota_bar(remaining_percent: Option<u8>) -> String {
+    let filled = remaining_percent
+        .map(|percent| ((percent.min(100) as usize * 5) + 50) / 100)
+        .unwrap_or(0);
+    format!("{}{}", "■".repeat(filled), "□".repeat(5 - filled))
 }
 
 fn format_subscription_line(
@@ -480,11 +523,22 @@ fn status_without_progress(
     summary: &str,
     detail_lines: Vec<String>,
 ) -> MenuBarUsageStatus {
+    status_without_progress_with_segments(title, summary, detail_lines, 1)
+}
+
+fn status_without_progress_with_segments(
+    title: &str,
+    summary: &str,
+    detail_lines: Vec<String>,
+    ring_segments: u8,
+) -> MenuBarUsageStatus {
     MenuBarUsageStatus {
         title: title.into(),
         summary: summary.into(),
         detail_lines,
         progress_percent: None,
+        ring_segments,
+        danger_when_low: false,
     }
 }
 
@@ -493,17 +547,28 @@ fn select_usage_window(
     minutes: i64,
     fallback_primary: bool,
 ) -> Option<&CodexUsageWindow> {
-    if usage.primary.as_ref()?.window_minutes == Some(minutes) {
+    if usage
+        .primary
+        .as_ref()
+        .and_then(|window| window.window_minutes)
+        == Some(minutes)
+    {
         return usage.primary.as_ref();
     }
-    if usage.secondary.as_ref()?.window_minutes == Some(minutes) {
+    if usage
+        .secondary
+        .as_ref()
+        .and_then(|window| window.window_minutes)
+        == Some(minutes)
+    {
         return usage.secondary.as_ref();
     }
-    if fallback_primary {
+    let fallback = if fallback_primary {
         usage.primary.as_ref()
     } else {
         usage.secondary.as_ref()
-    }
+    };
+    fallback.filter(|window| window.window_minutes.is_none())
 }
 
 fn remaining_percent(window: &CodexUsageWindow) -> u8 {
@@ -566,7 +631,11 @@ fn show_main_window(app: &AppHandle<Wry>) {
     }
 }
 
-fn menu_bar_icon(progress_percent: Option<u8>) -> tauri::image::Image<'static> {
+fn menu_bar_icon(
+    progress_percent: Option<u8>,
+    ring_segments: u8,
+    danger_when_low: bool,
+) -> tauri::image::Image<'static> {
     let size = 32;
     let center = 15.5_f32;
     let radius = 11.5_f32;
@@ -584,14 +653,22 @@ fn menu_bar_icon(progress_percent: Option<u8>) -> tauri::image::Image<'static> {
                 continue;
             }
 
+            let angle =
+                (dy.atan2(dx) + std::f32::consts::FRAC_PI_2).rem_euclid(std::f32::consts::TAU);
+            let position = angle / std::f32::consts::TAU;
+            if ring_segments > 1 {
+                let sector_position = (position * ring_segments as f32).fract();
+                let gap = 0.1_f32;
+                if sector_position < gap / 2.0 || sector_position > 1.0 - gap / 2.0 {
+                    continue;
+                }
+            }
+
             let index = (y * size + x) * 4;
             let mut color = [130_u8, 142_u8, 160_u8, 210_u8];
             if let Some(progress) = progress {
-                let angle =
-                    (dy.atan2(dx) + std::f32::consts::FRAC_PI_2).rem_euclid(std::f32::consts::TAU);
-                let segment = angle / std::f32::consts::TAU;
-                if segment <= progress {
-                    color = progress_color(progress_percent.unwrap_or(0));
+                if position <= progress {
+                    color = progress_color(progress_percent.unwrap_or(0), danger_when_low);
                 }
             }
             rgba[index] = color[0];
@@ -604,10 +681,15 @@ fn menu_bar_icon(progress_percent: Option<u8>) -> tauri::image::Image<'static> {
     tauri::image::Image::new_owned(rgba, size as u32, size as u32)
 }
 
-fn progress_color(percent: u8) -> [u8; 4] {
-    if percent >= 90 {
+fn progress_color(percent: u8, danger_when_low: bool) -> [u8; 4] {
+    let danger_percent = if danger_when_low {
+        100_u8.saturating_sub(percent)
+    } else {
+        percent
+    };
+    if danger_percent >= 90 {
         [239, 68, 68, 255]
-    } else if percent >= 70 {
+    } else if danger_percent >= 70 {
         [245, 158, 11, 255]
     } else {
         [34, 197, 94, 255]

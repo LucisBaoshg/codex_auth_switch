@@ -18,10 +18,14 @@ test("renders codex usage stats summary, trend and request logs", async () => {
         imported: 3,
         skipped: 0,
         filesScanned: 1,
+        filesUnchanged: 0,
         errors: [],
       },
       summary: {
         totalRequests: 3,
+        pricedRequests: 3,
+        unpricedRequests: 0,
+        longContextRequests: 0,
         totalCostUsd: "0.012345",
         totalInputTokens: 850,
         totalOutputTokens: 325,
@@ -35,6 +39,8 @@ test("renders codex usage stats summary, trend and request logs", async () => {
         {
           date: "2026-06-08",
           requestCount: 3,
+          unpricedRequests: 0,
+          longContextRequests: 0,
           totalCostUsd: "0.012345",
           totalInputTokens: 850,
           totalOutputTokens: 325,
@@ -54,6 +60,8 @@ test("renders codex usage stats summary, trend and request logs", async () => {
         {
           name: "gpt-5.4",
           requestCount: 3,
+          unpricedRequests: 0,
+          longContextRequests: 0,
           totalCostUsd: "0.007263",
           totalInputTokens: 850,
           totalOutputTokens: 325,
@@ -67,6 +75,8 @@ test("renders codex usage stats summary, trend and request logs", async () => {
         {
           name: "high",
           requestCount: 3,
+          unpricedRequests: 0,
+          longContextRequests: 0,
           totalCostUsd: "0.007263",
           totalInputTokens: 850,
           totalOutputTokens: 325,
@@ -83,6 +93,7 @@ test("renders codex usage stats summary, trend and request logs", async () => {
           requestId: "codex_session:session-a:3",
           sessionId: "session-a",
           model: "gpt-5.4",
+          provider: "openai",
           effort: "high",
           createdAt: "2026-06-08T10:02:05Z",
           inputTokens: 250,
@@ -90,7 +101,20 @@ test("renders codex usage stats summary, trend and request logs", async () => {
           cacheReadTokens: 50,
           cacheCreationTokens: 0,
           reasoningOutputTokens: 25,
+          inputCostUsd: "0.000625",
+          outputCostUsd: "0.001125",
+          cacheReadCostUsd: "0.000013",
+          cacheCreationCostUsd: "0.000000",
+          baseTotalCostUsd: "0.007263",
           totalCostUsd: "0.007263",
+          pricingStatus: "priced" as const,
+          pricingModel: "gpt-5.4",
+          pricingVersion: 2,
+          promptInputTokens: 300,
+          longContextApplied: false,
+          longContextThresholdTokens: 272000,
+          inputMultiplier: "1",
+          outputMultiplier: "1",
           sourcePath: "/tmp/session.jsonl",
         },
       ],
@@ -145,4 +169,57 @@ test("renders codex usage stats summary, trend and request logs", async () => {
   expect(htmlTrends).toContain("按日明细");
   expect(htmlTrends).toContain("2026-06-08");
   expect(htmlTrends).not.toContain("codex_session:session-a:3");
+
+  const unpricedHtml = renderCodexUsageStatsPage({
+    ...baseInput,
+    stats: {
+      ...baseInput.stats,
+      summary: {
+        ...baseInput.stats.summary,
+        pricedRequests: 2,
+        unpricedRequests: 1,
+      },
+      logs: [
+        {
+          ...baseInput.stats.logs[0],
+          model: "gpt-future",
+          totalCostUsd: "0.000000",
+          pricingStatus: "unpriced" as const,
+          pricingModel: null,
+        },
+      ],
+    },
+    activeTab: "logs",
+  });
+  expect(unpricedHtml).toContain("1 条未定价");
+  expect(unpricedHtml).toContain("内置价格表暂未包含 gpt-future");
+  expect(unpricedHtml).toContain('status-warning">未定价');
+
+  const longContextHtml = renderCodexUsageStatsPage({
+    ...baseInput,
+    stats: {
+      ...baseInput.stats,
+      summary: {
+        ...baseInput.stats.summary,
+        longContextRequests: 1,
+      },
+      logs: [
+        {
+          ...baseInput.stats.logs[0],
+          promptInputTokens: 300000,
+          longContextApplied: true,
+          longContextThresholdTokens: 272000,
+          inputMultiplier: "2",
+          outputMultiplier: "1.5",
+          baseTotalCostUsd: "0.010000",
+          totalCostUsd: "0.018000",
+        },
+      ],
+    },
+    activeTab: "logs",
+  });
+  expect(longContextHtml).toContain("长上下文 1 条");
+  expect(longContextHtml).toContain("超过 272,000");
+  expect(longContextHtml).toContain("输入倍率 ×2");
+  expect(longContextHtml).toContain('status-long-context">长上下文');
 });

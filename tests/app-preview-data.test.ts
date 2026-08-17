@@ -21,6 +21,7 @@ test("creates browser preview app snapshot from an explicit clock", async () => 
     targetUpdatedAt: nowIso,
     lastSwitchedAt: nowIso,
     codexUsageApiEnabled: true,
+    menuBarUsageWindow: "weekly",
   });
   expect(snapshot.profiles).toHaveLength(2);
   expect(snapshot.profiles[0]).toMatchObject({

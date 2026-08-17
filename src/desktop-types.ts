@@ -71,6 +71,8 @@ export type ConfigRecoveryNotice = {
   occurredAt: string;
 };
 
+export type MenuBarUsageWindow = "fiveHour" | "weekly";
+
 export type AppSnapshot = {
   targetDir: string;
   usingDefaultTargetDir: boolean;
@@ -84,6 +86,7 @@ export type AppSnapshot = {
   lastSwitchProfileId: string | null;
   lastSwitchedAt: string | null;
   codexUsageApiEnabled: boolean;
+  menuBarUsageWindow?: MenuBarUsageWindow;
   profiles: ProfileSummary[];
   configRecoveryNotices?: ConfigRecoveryNotice[];
 };
@@ -92,6 +95,7 @@ export type CodexUsageStatsSyncResult = {
   imported: number;
   skipped: number;
   filesScanned: number;
+  filesUnchanged: number;
   errors: string[];
 };
 
@@ -104,6 +108,9 @@ export type CodexUsageStatsFilter = {
 
 export type CodexUsageStatsSummary = {
   totalRequests: number;
+  pricedRequests: number;
+  unpricedRequests: number;
+  longContextRequests: number;
   totalCostUsd: string;
   totalInputTokens: number;
   totalOutputTokens: number;
@@ -117,6 +124,8 @@ export type CodexUsageStatsSummary = {
 export type CodexUsageStatsTrend = {
   date: string;
   requestCount: number;
+  unpricedRequests: number;
+  longContextRequests: number;
   totalCostUsd: string;
   totalInputTokens: number;
   totalOutputTokens: number;
@@ -129,6 +138,8 @@ export type CodexUsageStatsTrend = {
 export type CodexUsageStatsBreakdown = {
   name: string;
   requestCount: number;
+  unpricedRequests: number;
+  longContextRequests: number;
   totalCostUsd: string;
   totalInputTokens: number;
   totalOutputTokens: number;
@@ -150,7 +161,20 @@ export type CodexUsageStatsLog = {
   cacheReadTokens: number;
   cacheCreationTokens: number;
   reasoningOutputTokens: number;
+  inputCostUsd: string;
+  outputCostUsd: string;
+  cacheReadCostUsd: string;
+  cacheCreationCostUsd: string;
+  baseTotalCostUsd: string;
   totalCostUsd: string;
+  pricingStatus: "priced" | "unpriced";
+  pricingModel: string | null;
+  pricingVersion: number;
+  promptInputTokens: number;
+  longContextApplied: boolean;
+  longContextThresholdTokens: number | null;
+  inputMultiplier: string;
+  outputMultiplier: string;
   sourcePath: string;
 };
 

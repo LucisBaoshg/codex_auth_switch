@@ -1,12 +1,13 @@
 use chrono::{TimeZone, Utc};
 use codex_auth_switch_lib::core::{
-    AppSnapshot, CodexUsageCredits, CodexUsageSnapshot, CodexUsageWindow, PacProxyOption,
-    PacProxyStatus, ProfileSummary, ThirdPartyUsageQuotaSnapshot, ThirdPartyUsageSnapshot,
-    DEFAULT_PAC_PROXY_KEY, PAC_PROXY_CA_URL, PAC_PROXY_URL, PAC_PROXY_US_URL,
+    AppSnapshot, CodexUsageCredits, CodexUsageSnapshot, CodexUsageWindow, MenuBarUsageWindow,
+    PacProxyOption, PacProxyStatus, ProfileSummary, ThirdPartyUsageQuotaSnapshot,
+    ThirdPartyUsageSnapshot, DEFAULT_PAC_PROXY_KEY, PAC_PROXY_CA_URL, PAC_PROXY_URL,
+    PAC_PROXY_US_URL,
 };
 use codex_auth_switch_lib::menu_bar::{
     menu_bar_action_labels, menu_bar_pac_option_label, menu_bar_pac_proxy_label,
-    menu_bar_refresh_target, menu_bar_usage_status, MenuBarRefreshKind,
+    menu_bar_quota_bar, menu_bar_refresh_target, menu_bar_usage_status, MenuBarRefreshKind,
 };
 
 fn usage_window(used_percent: f64, minutes: i64) -> CodexUsageWindow {
@@ -127,6 +128,7 @@ fn snapshot(active_profile_id: Option<&str>, profiles: Vec<ProfileSummary>) -> A
         last_switch_profile_id: active_profile_id.map(str::to_string),
         last_switched_at: None,
         codex_usage_api_enabled: true,
+        menu_bar_usage_window: MenuBarUsageWindow::Weekly,
         profiles,
         config_recovery_notices: Vec::new(),
     }
@@ -144,13 +146,62 @@ fn menu_bar_usage_status_prefers_active_profile_remaining_percent() {
 
     let status = menu_bar_usage_status(&snapshot);
 
-    assert_eq!(status.title, "63%");
-    assert_eq!(status.progress_percent, Some(37));
-    assert_eq!(status.summary, "Work Team：5H 剩余 63%，本周剩余 49%");
+    assert_eq!(status.title, "49%");
+    assert_eq!(status.progress_percent, Some(49));
+    assert_eq!(status.summary, "Work Team：本周剩余 49%");
     assert_eq!(status.detail_lines[0], "当前：Work Team");
-    assert_eq!(status.detail_lines[1], "5H 剩余：63%");
-    assert_eq!(status.detail_lines[2], "本周剩余：49%");
+    assert_eq!(status.detail_lines[1], "本周剩余：49%  ■■□□□");
+    assert_eq!(status.detail_lines[2], "5H 剩余：63%  ■■■□□");
     assert_eq!(status.detail_lines[3], "余额：12.50");
+    assert_eq!(status.ring_segments, 5);
+    assert!(status.danger_when_low);
+}
+
+#[test]
+fn menu_bar_usage_status_can_switch_back_to_five_hour_quota() {
+    let mut snapshot = snapshot(
+        Some("active"),
+        vec![profile(
+            "active",
+            "Work Team",
+            Some(codex_usage(37.2, 51.0)),
+        )],
+    );
+    snapshot.menu_bar_usage_window = MenuBarUsageWindow::FiveHour;
+
+    let status = menu_bar_usage_status(&snapshot);
+
+    assert_eq!(status.title, "63%");
+    assert_eq!(status.progress_percent, Some(63));
+    assert_eq!(status.summary, "Work Team：5H 剩余 63%");
+    assert_eq!(status.detail_lines[1], "5H 剩余：63%  ■■■□□");
+    assert_eq!(status.detail_lines[2], "本周剩余：49%  ■■□□□");
+    assert_eq!(status.ring_segments, 1);
+}
+
+#[test]
+fn menu_bar_weekly_quota_works_when_five_hour_window_is_absent() {
+    let mut usage = codex_usage(37.2, 51.0);
+    usage.primary = Some(usage_window(51.0, 10080));
+    usage.secondary = None;
+    let snapshot = snapshot(
+        Some("active"),
+        vec![profile("active", "Work Team", Some(usage))],
+    );
+
+    let status = menu_bar_usage_status(&snapshot);
+
+    assert_eq!(status.title, "49%");
+    assert_eq!(status.detail_lines[1], "本周剩余：49%  ■■□□□");
+    assert_eq!(status.detail_lines[2], "5H 剩余：--  □□□□□");
+}
+
+#[test]
+fn menu_bar_quota_bar_uses_five_equal_segments() {
+    assert_eq!(menu_bar_quota_bar(Some(100)), "■■■■■");
+    assert_eq!(menu_bar_quota_bar(Some(69)), "■■■□□");
+    assert_eq!(menu_bar_quota_bar(Some(49)), "■■□□□");
+    assert_eq!(menu_bar_quota_bar(None), "□□□□□");
 }
 
 #[test]

@@ -16,7 +16,7 @@ Codex 助手是一个跨平台桌面工具，用来管理多套 Codex（Codex）
 - **第三方 API 配置管理**：支持独立第三方 API 与复用官方 OAuth 的共生配置
 - **额度与延迟面板**：可刷新官方 OAuth（OAuth）额度，也可查看第三方 API 用量和首响延迟
 - **共生配置**：通过 `model_providers.*.requires_openai_auth` 保持官方 OAuth 登录上下文，并接入第三方 API
-- **菜单栏状态**：macOS 菜单栏显示当前 profile 的额度摘要，并提供刷新和打开主窗口
+- **工具栏状态**：macOS 菜单栏与 Windows 系统托盘默认显示当前 profile 的周额度，支持 5 等分圆环、水平额度条和额度周期切换
 - **安全备份**：切换 Codex 状态前保留本地备份，降低误切换风险
 - **CLI companion**：Linux 服务器可用 `codex-auth-switch-cli` 同步和切换远程 profiles
 
@@ -27,7 +27,7 @@ Codex 助手是一个跨平台桌面工具，用来管理多套 Codex（Codex）
 | Codex profiles | 管理本地 Codex 配置档案，识别当前生效配置，切换前自动备份 |
 | Network shared library | 从远程 profiles API 同步共享配置 |
 | Third-party API | 管理独立第三方 API 与共生配置，刷新用量，探测响应延迟 |
-| Menu bar | 显示额度摘要，刷新用量，打开主窗口 |
+| Menu bar / system tray | 默认显示周额度，可切换 5 小时额度，支持刷新用量和打开主窗口 |
 
 ## Install
 
@@ -52,10 +52,11 @@ Codex 助手是一个跨平台桌面工具，用来管理多套 Codex（Codex）
 3. 选择一个 profile，点击“应用”
 4. 需要第三方 API 同时保留官方 OAuth 能力时，创建“共生配置”
 
-### Menu Bar
+### Menu Bar / System Tray
 
-macOS 菜单栏会显示当前 profile 的额度摘要。菜单项包括：
+macOS 菜单栏与 Windows 系统托盘会显示当前 profile 的额度摘要。官方 Codex 额度默认展示周额度，并使用 5 等分圆环；可以在“全局设置 → 工具栏额度展示”切回 5 小时额度。菜单项包括：
 
+- 5 等分水平额度条
 - 刷新额度
 - 打开主窗口
 - 退出

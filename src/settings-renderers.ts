@@ -1,6 +1,12 @@
 import { escapeHtml } from "./html-utils";
 import type { NetworkSharingSettings } from "./network-sharing";
-import type { PacProxyStatus } from "./desktop-types";
+import type { MenuBarUsageWindow, PacProxyStatus } from "./desktop-types";
+
+export type MenuBarUsagePreview = {
+  profileName: string;
+  fiveHourRemaining: number | null;
+  weeklyRemaining: number | null;
+};
 
 export type SettingsPageInput = {
   networkSharing: NetworkSharingSettings;
@@ -12,7 +18,155 @@ export type SettingsPageInput = {
   writingThirdPartyWebsocketsDefaults: boolean;
   pacProxy?: PacProxyStatus;
   pacProxyLoading?: boolean;
+  menuBarUsageWindow?: MenuBarUsageWindow;
+  menuBarUsagePreview?: MenuBarUsagePreview;
 };
+
+function normalizePercent(value: number | null): number | null {
+  if (value == null || !Number.isFinite(value)) {
+    return null;
+  }
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function filledSegmentCount(percent: number | null): number {
+  return percent == null ? 0 : Math.max(0, Math.min(5, Math.round(percent / 20)));
+}
+
+function renderFiveSegmentBar(percent: number | null, label: string): string {
+  const normalized = normalizePercent(percent);
+  const filled = filledSegmentCount(normalized);
+  return `
+    <div class="quota-five-segment-bar" role="img" aria-label="${escapeHtml(label)}">
+      ${Array.from({ length: 5 }, (_, index) => `
+        <span class="quota-bar-segment${index < filled ? " is-filled" : ""}"></span>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderQuotaRing(percent: number | null, segmented: boolean): string {
+  const normalized = normalizePercent(percent);
+  const display = normalized == null ? "--" : `${normalized}%`;
+  const filled = filledSegmentCount(normalized);
+  const progress = normalized ?? 0;
+  const progressMarkup = segmented
+    ? Array.from({ length: 5 }, (_, index) => `
+        <circle
+          class="quota-ring-segment${index < filled ? " is-filled" : ""}"
+          cx="40"
+          cy="40"
+          r="29"
+          pathLength="100"
+          stroke-dasharray="17 83"
+          stroke-dashoffset="-${index * 20}"
+        ></circle>
+      `).join("")
+    : `
+        <circle class="quota-ring-track" cx="40" cy="40" r="29" pathLength="100"></circle>
+        <circle
+          class="quota-ring-progress"
+          cx="40"
+          cy="40"
+          r="29"
+          pathLength="100"
+          stroke-dasharray="${progress} ${100 - progress}"
+        ></circle>
+      `;
+
+  return `
+    <div class="quota-ring-preview" role="img" aria-label="剩余额度 ${escapeHtml(display)}">
+      <svg viewBox="0 0 80 80" aria-hidden="true">
+        ${progressMarkup}
+      </svg>
+      <div class="quota-ring-value">
+        <strong>${escapeHtml(display)}</strong>
+        <span>剩余</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderMenuBarUsageSettings(input: SettingsPageInput): string {
+  const selected = input.menuBarUsageWindow ?? "weekly";
+  const preview = input.menuBarUsagePreview ?? {
+    profileName: "ChatGPT Pro",
+    fiveHourRemaining: null,
+    weeklyRemaining: 69,
+  };
+  const fiveHourRemaining = normalizePercent(preview.fiveHourRemaining);
+  const weeklyRemaining = normalizePercent(preview.weeklyRemaining);
+  const selectedPercent = selected === "weekly" ? weeklyRemaining : fiveHourRemaining;
+  const selectedLabel = selected === "weekly" ? "本周剩余" : "5H 剩余";
+
+  return `
+        <div class="card quota-display-settings" data-role="menu-bar-usage-settings">
+          <div class="card-head quota-settings-head">
+            <div class="quota-settings-copy">
+              <div class="quota-settings-title-row">
+                <h3>工具栏额度展示</h3>
+                <span class="platform-badge">macOS · Windows</span>
+              </div>
+              <p class="card-note">选择菜单栏与系统托盘优先展示的官方 Codex 额度。默认使用周额度。</p>
+            </div>
+          </div>
+
+          <div class="quota-window-picker" role="group" aria-label="工具栏额度周期">
+            <button
+              class="quota-window-option${selected === "weekly" ? " is-active" : ""}"
+              data-action="set-menu-bar-usage-window"
+              data-window="weekly"
+              aria-pressed="${selected === "weekly" ? "true" : "false"}"
+              ${input.busy ? "disabled" : ""}
+            >
+              <span class="quota-option-check" aria-hidden="true"></span>
+              <span>
+                <strong>周额度</strong>
+                <small>5 等分圆环，适合现在的额度周期</small>
+              </span>
+              <em>默认</em>
+            </button>
+            <button
+              class="quota-window-option${selected === "fiveHour" ? " is-active" : ""}"
+              data-action="set-menu-bar-usage-window"
+              data-window="fiveHour"
+              aria-pressed="${selected === "fiveHour" ? "true" : "false"}"
+              ${input.busy ? "disabled" : ""}
+            >
+              <span class="quota-option-check" aria-hidden="true"></span>
+              <span>
+                <strong>5 小时额度</strong>
+                <small>保留旧版展示，需要时可随时切回</small>
+              </span>
+            </button>
+          </div>
+
+          <div class="toolbar-quota-preview" data-role="menu-bar-usage-preview">
+            <div class="toolbar-preview-heading">
+              <span>工具栏预览</span>
+              <small>${escapeHtml(preview.profileName)}</small>
+            </div>
+            <div class="toolbar-preview-content">
+              ${renderQuotaRing(selectedPercent, selected === "weekly")}
+              <div class="quota-preview-details">
+                <div class="quota-preview-summary">
+                  <span>${escapeHtml(selectedLabel)}</span>
+                  <strong>${selectedPercent == null ? "--" : `${selectedPercent}%`}</strong>
+                </div>
+                <div class="quota-preview-row${selected === "weekly" ? " is-primary" : ""}">
+                  <div><span>本周剩余</span><strong>${weeklyRemaining == null ? "--" : `${weeklyRemaining}%`}</strong></div>
+                  ${renderFiveSegmentBar(weeklyRemaining, `本周剩余 ${weeklyRemaining ?? "--"}%`)}
+                </div>
+                <div class="quota-preview-row${selected === "fiveHour" ? " is-primary" : ""}">
+                  <div><span>5H 剩余</span><strong>${fiveHourRemaining == null ? "--" : `${fiveHourRemaining}%`}</strong></div>
+                  ${renderFiveSegmentBar(fiveHourRemaining, `5 小时剩余 ${fiveHourRemaining ?? "--"}%`)}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+  `;
+}
 
 function fallbackPacProxyStatus(): PacProxyStatus {
   return {
@@ -152,6 +306,7 @@ export function renderSettingsPage(input: SettingsPageInput): string {
       </header>
 
       <div class="grid-container" style="max-width: 760px;">
+        ${renderMenuBarUsageSettings(input)}
         ${renderPacProxySettings(input)}
         <div class="card">
           <div class="card-head">

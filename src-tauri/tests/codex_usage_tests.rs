@@ -1,4 +1,4 @@
-use codex_auth_switch_lib::core::{ProfileInput, ProfileManager};
+use codex_auth_switch_lib::core::{MenuBarUsageWindow, ProfileInput, ProfileManager};
 use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
@@ -307,6 +307,33 @@ fn snapshot_reports_codex_usage_api_setting() {
     let snapshot = manager.snapshot().expect("snapshot");
 
     assert!(!snapshot.codex_usage_api_enabled);
+}
+
+#[test]
+fn menu_bar_usage_window_defaults_to_weekly_and_persists_changes() {
+    let (app_dir, _target_dir, mut manager) = temp_manager();
+
+    assert_eq!(
+        manager
+            .snapshot()
+            .expect("default snapshot")
+            .menu_bar_usage_window,
+        MenuBarUsageWindow::Weekly
+    );
+
+    manager
+        .set_menu_bar_usage_window(MenuBarUsageWindow::FiveHour)
+        .expect("persist menu bar usage window");
+    let reloaded =
+        ProfileManager::load_or_default(app_dir.path().to_path_buf()).expect("reload manager");
+
+    assert_eq!(
+        reloaded
+            .snapshot()
+            .expect("reloaded snapshot")
+            .menu_bar_usage_window,
+        MenuBarUsageWindow::FiveHour
+    );
 }
 
 #[test]

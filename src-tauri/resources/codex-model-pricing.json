@@ -1,0 +1,95 @@
+{
+  "version": 2,
+  "source": "OpenAI API model documentation",
+  "updatedAt": "2026-08-17",
+  "models": [
+    {
+      "modelId": "gpt-5.6-sol",
+      "sourceUrl": "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+      "aliases": ["gpt-5.6"],
+      "inputPerMillion": "5",
+      "cachedInputPerMillion": "0.5",
+      "cacheCreationPerMillion": "6.25",
+      "outputPerMillion": "30",
+      "longContext": {
+        "thresholdInputTokens": 272000,
+        "inputMultiplier": "2",
+        "outputMultiplier": "1.5"
+      }
+    },
+    {
+      "modelId": "gpt-5.6-terra",
+      "sourceUrl": "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
+      "aliases": [],
+      "inputPerMillion": "2",
+      "cachedInputPerMillion": "0.2",
+      "cacheCreationPerMillion": "2.5",
+      "outputPerMillion": "12",
+      "longContext": {
+        "thresholdInputTokens": 272000,
+        "inputMultiplier": "2",
+        "outputMultiplier": "1.5"
+      }
+    },
+    {
+      "modelId": "gpt-5.6-luna",
+      "sourceUrl": "https://developers.openai.com/api/docs/models/gpt-5.6-luna",
+      "aliases": [],
+      "inputPerMillion": "0.2",
+      "cachedInputPerMillion": "0.02",
+      "cacheCreationPerMillion": "0.25",
+      "outputPerMillion": "1.2",
+      "longContext": {
+        "thresholdInputTokens": 272000,
+        "inputMultiplier": "2",
+        "outputMultiplier": "1.5"
+      }
+    },
+    {
+      "modelId": "gpt-5.5",
+      "sourceUrl": "https://developers.openai.com/api/docs/models/gpt-5.5",
+      "aliases": [],
+      "inputPerMillion": "5",
+      "cachedInputPerMillion": "0.5",
+      "cacheCreationPerMillion": "5",
+      "outputPerMillion": "30",
+      "longContext": {
+        "thresholdInputTokens": 272000,
+        "inputMultiplier": "2",
+        "outputMultiplier": "1.5"
+      }
+    },
+    {
+      "modelId": "gpt-5.4",
+      "sourceUrl": "https://developers.openai.com/api/docs/models/gpt-5.4",
+      "aliases": [],
+      "inputPerMillion": "2.5",
+      "cachedInputPerMillion": "0.25",
+      "cacheCreationPerMillion": "2.5",
+      "outputPerMillion": "15",
+      "longContext": {
+        "thresholdInputTokens": 272000,
+        "inputMultiplier": "2",
+        "outputMultiplier": "1.5"
+      }
+    },
+    {
+      "modelId": "gpt-5.4-mini",
+      "sourceUrl": "https://developers.openai.com/api/docs/models/gpt-5.4-mini",
+      "aliases": [],
+      "inputPerMillion": "0.75",
+      "cachedInputPerMillion": "0.075",
+      "cacheCreationPerMillion": "0.75",
+      "outputPerMillion": "4.5"
+    },
+    {
+      "modelId": "gpt-5.4-nano",
+      "sourceUrl": "https://developers.openai.com/api/docs/models/gpt-5.4-nano",
+      "aliases": [],
+      "inputPerMillion": "0.2",
+      "cachedInputPerMillion": "0.02",
+      "cacheCreationPerMillion": "0.2",
+      "outputPerMillion": "1.25"
+    }
+  ]
+}

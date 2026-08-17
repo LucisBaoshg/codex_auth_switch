@@ -9,8 +9,8 @@ use crate::core::{
     set_pac_proxy_selected_services as write_pac_proxy_selected_services, AppSnapshot,
     CodexMessage, CodexSessionInfo, CodexUsageStatsFilter, CodexUsageStatsSnapshot,
     ConfigRecoveryNotice, ConfigUsageValidation, InstallLocationStatus,
-    LegacyThirdPartyMigrationResult, ModelProviderSummary, PacProxyStatus, ProfileDocument,
-    ProfileInput, ProfileManager, SessionRecoveryReport, SessionRepairResult,
+    LegacyThirdPartyMigrationResult, MenuBarUsageWindow, ModelProviderSummary, PacProxyStatus,
+    ProfileDocument, ProfileInput, ProfileManager, SessionRecoveryReport, SessionRepairResult,
     ThirdPartyWebsocketsDefaultResult, UpdateCheckResult, UpdateInstallRequest,
 };
 use crate::menu_bar::{
@@ -298,6 +298,18 @@ fn set_codex_usage_api_enabled(app: AppHandle, enabled: bool) -> Result<AppSnaps
     let mut manager = manager_from_app(&app)?;
     manager
         .set_codex_usage_api_enabled(enabled)
+        .map_err(|error| error.to_string())?;
+    snapshot_and_sync(&app, &manager)
+}
+
+#[tauri::command]
+fn set_menu_bar_usage_window(
+    app: AppHandle,
+    window: MenuBarUsageWindow,
+) -> Result<AppSnapshot, String> {
+    let mut manager = manager_from_app(&app)?;
+    manager
+        .set_menu_bar_usage_window(window)
         .map_err(|error| error.to_string())?;
     snapshot_and_sync(&app, &manager)
 }
@@ -776,6 +788,7 @@ pub fn run() {
             delete_profile,
             set_target_dir,
             set_codex_usage_api_enabled,
+            set_menu_bar_usage_window,
             migrate_legacy_third_party_profiles,
             write_third_party_websockets_defaults,
             refresh_profile_codex_usage,

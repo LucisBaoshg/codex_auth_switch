@@ -32,6 +32,11 @@ function formatCost(value: string): string {
   return `$${numeric.toFixed(4)}`;
 }
 
+function formatEstimatedCost(value: string, unpricedRequests = 0): string {
+  const cost = formatCost(value);
+  return unpricedRequests > 0 ? `${cost}（${formatInteger(unpricedRequests)} 条未定价）` : cost;
+}
+
 function formatDateTime(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
@@ -343,7 +348,7 @@ function renderBreakdownRows(rows: CodexUsageStatsBreakdown[], listClass = ""): 
           <article class="usage-breakdown-row">
             <div class="usage-breakdown-head">
               <strong>${escapeHtml(row.name)}</strong>
-              <span>${escapeHtml(formatCost(row.totalCostUsd))}</span>
+              <span>${escapeHtml(formatEstimatedCost(row.totalCostUsd, row.unpricedRequests))}</span>
             </div>
             <div class="usage-breakdown-track" aria-hidden="true">
               <span style="width: ${width}%"></span>
@@ -354,6 +359,8 @@ function renderBreakdownRows(rows: CodexUsageStatsBreakdown[], listClass = ""): 
               <span>${formatInteger(row.realTotalTokens)} tokens</span>
               <span>&middot;</span>
               <span>推理输出 ${formatInteger(row.totalReasoningOutputTokens)}</span>
+              ${row.unpricedRequests > 0 ? `<span>&middot;</span><span>${formatInteger(row.unpricedRequests)} 条未定价</span>` : ""}
+              ${row.longContextRequests > 0 ? `<span>&middot;</span><span>${formatInteger(row.longContextRequests)} 条长上下文</span>` : ""}
             </div>
           </article>
         `;
@@ -392,7 +399,12 @@ function renderTrendTable(stats: CodexUsageStatsSnapshot): string {
               <td>${formatInteger(trend.totalCacheReadTokens)}</td>
               <td>${formatInteger(trend.totalOutputTokens)}</td>
               <td>${formatInteger(trend.totalReasoningOutputTokens)}</td>
-              <td>${formatCost(trend.totalCostUsd)}</td>
+              <td>
+                <div class="stacked-cell">
+                  <span>${escapeHtml(formatEstimatedCost(trend.totalCostUsd, trend.unpricedRequests))}</span>
+                  ${trend.longContextRequests > 0 ? `<span class="cell-subtext">${formatInteger(trend.longContextRequests)} 条长上下文</span>` : ""}
+                </div>
+              </td>
             </tr>
           `).join("")}
         </tbody>
@@ -423,12 +435,34 @@ function renderLogTable(stats: CodexUsageStatsSnapshot): string {
         </thead>
         <tbody>
           ${stats.logs.map((log) => {
-            const statusClass = "status-green"; // Codex sessions are successful runs
+            const priced = log.pricingStatus === "priced";
+            const statusClass = !priced
+              ? "status-warning"
+              : log.longContextApplied
+                ? "status-long-context"
+                : "status-green";
+            const statusLabel = !priced
+              ? "未定价"
+              : log.longContextApplied
+                ? "长上下文"
+                : "已定价";
+            const longContextDetail = log.longContextApplied
+              ? `；基础成本 ${formatCost(log.baseTotalCostUsd)}；输入倍率 ×${log.inputMultiplier}；输出倍率 ×${log.outputMultiplier}`
+              : "";
+            const costTitle = priced
+              ? `输入 ${formatCost(log.inputCostUsd)}；缓存读取 ${formatCost(log.cacheReadCostUsd)}；缓存写入 ${formatCost(log.cacheCreationCostUsd)}；输出 ${formatCost(log.outputCostUsd)}${longContextDetail}`
+              : `内置价格表暂未包含 ${log.model}`;
             return `
               <tr data-request-id="${escapeHtml(log.requestId)}">
                 <td class="cell-time">${escapeHtml(formatDateTime(log.createdAt))}</td>
                 <td class="cell-provider">${escapeHtml(formatProviderName(log.provider))}</td>
-                <td><span class="usage-model-pill">${escapeHtml(log.model)}</span></td>
+                <td>
+                  <div class="stacked-cell">
+                    <span class="usage-model-pill">${escapeHtml(log.model)}</span>
+                    ${log.pricingModel && log.pricingModel !== log.model ? `<span class="cell-subtext">按 ${escapeHtml(log.pricingModel)} 计价</span>` : ""}
+                    ${log.longContextApplied ? `<span class="cell-subtext">输入 ${formatInteger(log.promptInputTokens)} tokens，超过 ${formatInteger(log.longContextThresholdTokens ?? 0)}</span>` : ""}
+                  </div>
+                </td>
                 <td>
                   <div class="stacked-cell">
                     <span class="main-val">${formatInteger(log.inputTokens)}</span>
@@ -441,8 +475,8 @@ function renderLogTable(stats: CodexUsageStatsSnapshot): string {
                     ${log.reasoningOutputTokens > 0 ? `<span class="cell-subtext">${formatInteger(log.reasoningOutputTokens)}</span>` : ""}
                   </div>
                 </td>
-                <td class="cell-cost"><strong>${formatCost(log.totalCostUsd)}</strong></td>
-                <td><span class="status-badge ${statusClass}">200</span></td>
+                <td class="cell-cost" title="${escapeHtml(costTitle)}"><strong>${priced ? formatCost(log.totalCostUsd) : "未定价"}</strong></td>
+                <td><span class="status-badge ${statusClass}">${statusLabel}</span></td>
                 <td class="cell-source">codex_session</td>
               </tr>
             `;
@@ -458,7 +492,7 @@ export function renderCodexUsageStatsPage(input: CodexUsageStatsPageInput): stri
   const summary = stats?.summary;
   const updatedAt = stats ? formatDateTime(stats.updatedAt) : "尚未刷新";
   const syncText = stats
-    ? `扫描 ${formatInteger(stats.sync.filesScanned)} 个文件，新增 ${formatInteger(stats.sync.imported)} 条，跳过 ${formatInteger(stats.sync.skipped)} 条`
+    ? `扫描 ${formatInteger(stats.sync.filesScanned)} 个文件，${formatInteger(stats.sync.filesUnchanged)} 个未变化，新增 ${formatInteger(stats.sync.imported)} 条`
     : "读取 ~/.codex/sessions 与 archived_sessions 中的 token_count 事件";
 
   return `
@@ -487,8 +521,10 @@ export function renderCodexUsageStatsPage(input: CodexUsageStatsPageInput): stri
       <div class="usage-stats-grid">
         ${renderMetric(
           "估算金额",
-          summary ? formatCost(summary.totalCostUsd) : "--",
-          "按内置 OpenAI API 价格表估算",
+          summary ? formatEstimatedCost(summary.totalCostUsd, summary.unpricedRequests) : "--",
+          summary
+            ? `按内置 OpenAI API 价格表估算；已定价 ${formatInteger(summary.pricedRequests)} / ${formatInteger(summary.totalRequests)} 条；长上下文 ${formatInteger(summary.longContextRequests)} 条`
+            : "按内置 OpenAI API 价格表估算",
           `<svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"></line><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>`,
           "card-cost"
         )}

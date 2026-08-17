@@ -93,6 +93,14 @@ pub struct CodexUsageSnapshot {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MenuBarUsageWindow {
+    FiveHour,
+    #[default]
+    Weekly,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ConfigUsageValidationStatus {
@@ -142,6 +150,9 @@ pub struct CodexUsageStatsFilter {
 #[serde(rename_all = "camelCase")]
 pub struct CodexUsageStatsSummary {
     pub total_requests: i64,
+    pub priced_requests: i64,
+    pub unpriced_requests: i64,
+    pub long_context_requests: i64,
     pub total_cost_usd: String,
     pub total_input_tokens: i64,
     pub total_output_tokens: i64,
@@ -157,6 +168,8 @@ pub struct CodexUsageStatsSummary {
 pub struct CodexUsageStatsTrend {
     pub date: String,
     pub request_count: i64,
+    pub unpriced_requests: i64,
+    pub long_context_requests: i64,
     pub total_cost_usd: String,
     pub total_input_tokens: i64,
     pub total_output_tokens: i64,
@@ -171,6 +184,8 @@ pub struct CodexUsageStatsTrend {
 pub struct CodexUsageStatsBreakdown {
     pub name: String,
     pub request_count: i64,
+    pub unpriced_requests: i64,
+    pub long_context_requests: i64,
     pub total_cost_usd: String,
     pub total_input_tokens: i64,
     pub total_output_tokens: i64,
@@ -194,7 +209,20 @@ pub struct CodexUsageStatsLog {
     pub cache_read_tokens: i64,
     pub cache_creation_tokens: i64,
     pub reasoning_output_tokens: i64,
+    pub input_cost_usd: String,
+    pub output_cost_usd: String,
+    pub cache_read_cost_usd: String,
+    pub cache_creation_cost_usd: String,
+    pub base_total_cost_usd: String,
     pub total_cost_usd: String,
+    pub pricing_status: String,
+    pub pricing_model: Option<String>,
+    pub pricing_version: i64,
+    pub prompt_input_tokens: i64,
+    pub long_context_applied: bool,
+    pub long_context_threshold_tokens: Option<i64>,
+    pub input_multiplier: String,
+    pub output_multiplier: String,
     pub source_path: String,
 }
 
@@ -204,6 +232,7 @@ pub struct CodexUsageStatsSyncResult {
     pub imported: i64,
     pub skipped: i64,
     pub files_scanned: i64,
+    pub files_unchanged: i64,
     pub errors: Vec<String>,
 }
 
@@ -359,6 +388,7 @@ pub struct AppSnapshot {
     pub last_switch_profile_id: Option<String>,
     pub last_switched_at: Option<DateTime<Utc>>,
     pub codex_usage_api_enabled: bool,
+    pub menu_bar_usage_window: MenuBarUsageWindow,
     pub profiles: Vec<ProfileSummary>,
     #[serde(default)]
     pub config_recovery_notices: Vec<ConfigRecoveryNotice>,
@@ -567,6 +597,8 @@ struct StateFile {
     pub last_switched_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub codex_usage_api_enabled: bool,
+    #[serde(default)]
+    pub menu_bar_usage_window: MenuBarUsageWindow,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1869,6 +1901,7 @@ impl ProfileManager {
             last_switch_profile_id: self.state.last_switch_profile_id.clone(),
             last_switched_at: self.state.last_switched_at,
             codex_usage_api_enabled: self.state.codex_usage_api_enabled,
+            menu_bar_usage_window: self.state.menu_bar_usage_window,
             profiles,
             config_recovery_notices,
         })
@@ -2471,15 +2504,11 @@ pub(crate) struct PendingCodexUsageLog {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct CodexUsagePrice {
-    input_per_million: f64,
-    cached_input_per_million: f64,
-    output_per_million: f64,
-}
-
-#[derive(Debug, Clone, Copy)]
 pub(crate) struct CodexUsageAggregate {
     request_count: i64,
+    priced_requests: i64,
+    unpriced_requests: i64,
+    long_context_requests: i64,
     total_cost_usd: f64,
     total_input_tokens: i64,
     total_output_tokens: i64,

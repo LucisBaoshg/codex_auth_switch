@@ -26,6 +26,8 @@ test("formats codex usage windows and latency values", async () => {
   const weekly = { usedPercent: 101, windowMinutes: 10080, resetsAt: null };
 
   expect(selectUsageWindow({ primary, secondary: weekly }, 10080, false)).toBe(weekly);
+  expect(selectUsageWindow({ primary: weekly, secondary: null }, 10080, false)).toBe(weekly);
+  expect(selectUsageWindow({ primary: weekly, secondary: null }, 300, true)).toBeNull();
   expect(remainingPercent(primary.usedPercent)).toBe(87);
   expect(remainingPercent(140)).toBe(0);
   expect(formatPlanTitle("pro")).toBe("Codex Pro Plan");

@@ -117,11 +117,12 @@ export function selectUsageWindow(
   if (usage.secondary?.windowMinutes === minutes) {
     return usage.secondary;
   }
-  return fallbackPrimary ? usage.primary : usage.secondary;
+  const fallback = fallbackPrimary ? usage.primary : usage.secondary;
+  return fallback?.windowMinutes == null ? fallback : null;
 }
 
 export function remainingPercent(usedPercent: number): number {
-  return Math.max(0, Math.min(100, Math.floor(100 - usedPercent)));
+  return Math.max(0, Math.min(100, Math.round(100 - usedPercent)));
 }
 
 export function formatPlanTitle(planType: string | null): string {

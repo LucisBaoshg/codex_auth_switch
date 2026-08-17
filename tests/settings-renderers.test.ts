@@ -44,6 +44,62 @@ test("renders settings page with enterprise sharing fields", async () => {
   expect(html).toContain('data-action="save-network-sharing-settings"');
 });
 
+test("renders weekly toolbar quota as the default with five-segment visuals", async () => {
+  expect(existsSync(join(root, "src/settings-renderers.ts"))).toBe(true);
+  const { renderSettingsPage } = await import(renderersImportPath);
+
+  const html = renderSettingsPage({
+    networkSharing: createNetworkSharing(),
+    defaultNetworkProfilesApi: "https://default.example.com/api/profiles",
+    networkPortalUrl: "https://example.com/codex",
+    accountSettingsHtml: "",
+    busy: false,
+    migratingLegacyThirdParty: false,
+    writingThirdPartyWebsocketsDefaults: false,
+    menuBarUsageWindow: "weekly",
+    menuBarUsagePreview: {
+      profileName: "Work <Team>",
+      fiveHourRemaining: 63,
+      weeklyRemaining: 69,
+    },
+  });
+
+  expect(html).toContain('data-role="menu-bar-usage-settings"');
+  expect(html).toContain("工具栏额度展示");
+  expect(html).toContain("macOS · Windows");
+  expect(html).toContain('data-action="set-menu-bar-usage-window"');
+  expect(html).toContain('data-window="weekly"');
+  expect(html).toContain('data-window="fiveHour"');
+  expect(html).toContain('data-role="menu-bar-usage-preview"');
+  expect(html).toContain("Work &lt;Team&gt;");
+  expect(html.match(/quota-ring-segment/g)).toHaveLength(5);
+  expect(html.match(/quota-bar-segment/g)).toHaveLength(10);
+  expect(html).toContain("69%");
+});
+
+test("renders a continuous ring when five-hour quota is selected", async () => {
+  const { renderSettingsPage } = await import(renderersImportPath);
+  const html = renderSettingsPage({
+    networkSharing: createNetworkSharing(),
+    defaultNetworkProfilesApi: "https://default.example.com/api/profiles",
+    networkPortalUrl: "https://example.com/codex",
+    accountSettingsHtml: "",
+    busy: false,
+    migratingLegacyThirdParty: false,
+    writingThirdPartyWebsocketsDefaults: false,
+    menuBarUsageWindow: "fiveHour",
+    menuBarUsagePreview: {
+      profileName: "Work Team",
+      fiveHourRemaining: 63,
+      weeklyRemaining: 49,
+    },
+  });
+
+  expect(html).toContain('class="quota-window-option is-active"\n              data-action="set-menu-bar-usage-window"\n              data-window="fiveHour"');
+  expect(html).toContain('class="quota-ring-progress"');
+  expect(html).not.toContain('class="quota-ring-segment');
+});
+
 test("renders settings migration pending states", async () => {
   expect(existsSync(join(root, "src/settings-renderers.ts"))).toBe(true);
   const { renderSettingsPage } = await import(renderersImportPath);
