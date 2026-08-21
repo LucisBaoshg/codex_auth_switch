@@ -7,6 +7,62 @@ fn session_file_size_cache() -> &'static Mutex<HashMap<PathBuf, (i64, u64)>> {
     SESSION_FILE_SIZE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn validate_session_rollout_path(target_dir: &Path, rollout_path: &Path) -> Result<(), AppError> {
+    if !rollout_path.exists() {
+        return Ok(());
+    }
+
+    let canonical_path = fs::canonicalize(rollout_path)?;
+    let canonical_target_dir = fs::canonicalize(target_dir)?;
+    let is_allowed = [
+        target_dir.join("sessions"),
+        target_dir.join("archived_sessions"),
+    ]
+    .into_iter()
+    .filter(|root| root.exists())
+    .filter_map(|root| fs::canonicalize(root).ok())
+    .any(|root| root.starts_with(&canonical_target_dir) && canonical_path.starts_with(root));
+    if !is_allowed {
+        return Err(AppError::Message(format!(
+            "Refusing to modify a session file outside the Codex session directories: {}",
+            rollout_path.display()
+        )));
+    }
+    if !canonical_path.is_file() {
+        return Err(AppError::Message(format!(
+            "Session rollout path is not a regular file: {}",
+            rollout_path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn validate_directory_within_target(target_dir: &Path, directory: &Path) -> Result<(), AppError> {
+    let canonical_target_dir = fs::canonicalize(target_dir)?;
+    let canonical_directory = fs::canonicalize(directory)?;
+    if !canonical_directory.starts_with(canonical_target_dir) {
+        return Err(AppError::Message(format!(
+            "Refusing to use a session directory outside the Codex data directory: {}",
+            directory.display()
+        )));
+    }
+    Ok(())
+}
+
+fn restore_moved_session_files(moved_files: &[(PathBuf, PathBuf)]) -> Result<(), AppError> {
+    for (temporary_path, original_path) in moved_files.iter().rev() {
+        if temporary_path.exists() {
+            fs::rename(temporary_path, original_path).map_err(|error| {
+                AppError::Message(format!(
+                    "Failed to restore session file {} after database rollback: {error}",
+                    original_path.display()
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
 impl ProfileManager {
     pub fn fix_session_database_and_configs(&self) -> Result<(), AppError> {
         let target_dir = self.target_dir.clone();
@@ -321,17 +377,25 @@ impl ProfileManager {
         let Some(db_path) = primary_state_database_path(&self.target_dir) else {
             return Err(AppError::Message("No session database found.".into()));
         };
-        let conn = open_valid_state_database(&db_path)
+        let mut conn = open_valid_state_database(&db_path)
             .ok_or_else(|| AppError::Message("Invalid state database.".into()))?;
+        let transaction = conn.transaction().map_err(|error| {
+            AppError::Message(format!(
+                "Failed to start session archive transaction: {error}"
+            ))
+        })?;
 
         // Query current state
-        let mut stmt = conn.prepare("SELECT rollout_path, archived FROM threads WHERE id = ?1")?;
-        let result: Option<(Option<String>, i64)> = match stmt.query_row([thread_id], |row| {
-            Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?))
-        }) {
-            Ok(val) => Some(val),
-            Err(rusqlite::Error::QueryReturnedNoRows) => None,
-            Err(e) => return Err(AppError::Message(format!("Failed to query thread: {e}"))),
+        let result: Option<(Option<String>, i64)> = {
+            let mut stmt =
+                transaction.prepare("SELECT rollout_path, archived FROM threads WHERE id = ?1")?;
+            match stmt.query_row([thread_id], |row| {
+                Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?))
+            }) {
+                Ok(val) => Some(val),
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(e) => return Err(AppError::Message(format!("Failed to query thread: {e}"))),
+            }
         };
 
         let Some((rollout_path_str, current_archived_int)) = result else {
@@ -344,16 +408,27 @@ impl ProfileManager {
         }
 
         let mut next_rollout_path_str = rollout_path_str.clone();
+        let mut moved_file: Option<(PathBuf, PathBuf)> = None;
 
         // Handle file move if rollout_path is present and exists
         if let Some(src_path_str) = rollout_path_str {
             let src_path = PathBuf::from(&src_path_str);
             if src_path.exists() {
-                let filename = src_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                validate_session_rollout_path(&self.target_dir, &src_path)?;
+                let filename = src_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .ok_or_else(|| {
+                        AppError::Message(format!(
+                            "Session rollout path has no valid filename: {}",
+                            src_path.display()
+                        ))
+                    })?;
                 let target_path = if archive {
                     // Archive: move to archived_sessions/
                     let dest_dir = self.target_dir.join("archived_sessions");
                     fs::create_dir_all(&dest_dir)?;
+                    validate_directory_within_target(&self.target_dir, &dest_dir)?;
                     dest_dir.join(filename)
                 } else {
                     // Unarchive: move to sessions/YYYY/MM/DD/
@@ -366,22 +441,54 @@ impl ProfileManager {
                         .join(month)
                         .join(day);
                     fs::create_dir_all(&dest_dir)?;
+                    validate_directory_within_target(&self.target_dir, &dest_dir)?;
                     dest_dir.join(filename)
                 };
+
+                if target_path.exists() {
+                    return Err(AppError::Message(format!(
+                        "Refusing to overwrite an existing session file: {}",
+                        target_path.display()
+                    )));
+                }
 
                 // Move file
                 fs::rename(&src_path, &target_path)?;
                 next_rollout_path_str = Some(target_path.to_string_lossy().to_string());
+                moved_file = Some((target_path, src_path));
             }
         }
 
         // Update database
         let archive_val = if archive { 1 } else { 0 };
-        conn.execute(
+        if let Err(error) = transaction.execute(
             "UPDATE threads SET archived = ?1, rollout_path = ?2 WHERE id = ?3",
             rusqlite::params![archive_val, next_rollout_path_str, thread_id],
-        )
-        .map_err(|e| AppError::Message(format!("Failed to update thread archive state: {e}")))?;
+        ) {
+            if let Some((target_path, source_path)) = &moved_file {
+                fs::rename(target_path, source_path).map_err(|restore_error| {
+                    AppError::Message(format!(
+                        "Failed to update thread archive state ({error}) and restore session file: {restore_error}"
+                    ))
+                })?;
+            }
+            return Err(AppError::Message(format!(
+                "Failed to update thread archive state: {error}"
+            )));
+        }
+
+        if let Err(error) = transaction.commit() {
+            if let Some((target_path, source_path)) = &moved_file {
+                fs::rename(target_path, source_path).map_err(|restore_error| {
+                    AppError::Message(format!(
+                        "Failed to commit thread archive state ({error}) and restore session file: {restore_error}"
+                    ))
+                })?;
+            }
+            return Err(AppError::Message(format!(
+                "Failed to commit thread archive state: {error}"
+            )));
+        }
 
         Ok(())
     }
@@ -408,6 +515,7 @@ impl ProfileManager {
         })?;
         let mut unique_ids = HashSet::new();
         let mut rollout_paths = Vec::new();
+        let mut unique_rollout_paths = HashSet::new();
         let mut deleted_count = 0;
 
         {
@@ -434,18 +542,78 @@ impl ProfileManager {
                     AppError::Message(format!("Failed to delete thread from database: {error}"))
                 })?;
                 if let Some(path) = rollout_path {
-                    rollout_paths.push(PathBuf::from(path));
+                    let path = PathBuf::from(path);
+                    validate_session_rollout_path(&self.target_dir, &path)?;
+                    if unique_rollout_paths.insert(path.clone()) {
+                        rollout_paths.push(path);
+                    }
                 }
             }
         }
 
-        transaction.commit().map_err(|error| {
-            AppError::Message(format!("Failed to commit session deletions: {error}"))
-        })?;
+        let rollout_files = rollout_paths
+            .into_iter()
+            .filter(|path| path.exists())
+            .map(|path| {
+                let filename = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| {
+                        AppError::Message(format!(
+                            "Session rollout path has no valid filename: {}",
+                            path.display()
+                        ))
+                    })?
+                    .to_string();
+                Ok((path, filename))
+            })
+            .collect::<Result<Vec<_>, AppError>>()?;
+        let trash_root = self.target_dir.join(".codex-auth-switch-session-trash");
+        let trash_dir = trash_root.join(Uuid::new_v4().to_string());
+        if !rollout_files.is_empty() {
+            if trash_root
+                .symlink_metadata()
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            {
+                return Err(AppError::Message(format!(
+                    "Refusing to use a symbolic link as the session trash directory: {}",
+                    trash_root.display()
+                )));
+            }
+            fs::create_dir_all(&trash_root)?;
+            validate_directory_within_target(&self.target_dir, &trash_root)?;
+            fs::create_dir(&trash_dir)?;
+        }
+        let mut moved_files = Vec::new();
+        for (index, (path, filename)) in rollout_files.into_iter().enumerate() {
+            let temporary_path = trash_dir.join(format!("{index}-{filename}"));
+            if let Err(error) = fs::rename(&path, &temporary_path) {
+                restore_moved_session_files(&moved_files)?;
+                let _ = fs::remove_dir_all(&trash_dir);
+                return Err(AppError::Message(format!(
+                    "Failed to stage session file {} for deletion: {error}",
+                    path.display()
+                )));
+            }
+            moved_files.push((temporary_path, path));
+        }
 
-        for path in rollout_paths {
-            if path.exists() {
-                let _ = fs::remove_file(&path);
+        if let Err(error) = transaction.commit() {
+            restore_moved_session_files(&moved_files)?;
+            let _ = fs::remove_dir_all(&trash_dir);
+            return Err(AppError::Message(format!(
+                "Failed to commit session deletions: {error}"
+            )));
+        }
+
+        if trash_dir.exists() {
+            fs::remove_dir_all(&trash_dir).map_err(|error| {
+                AppError::Message(format!(
+                    "Sessions were removed from the database, but temporary files could not be deleted: {error}"
+                ))
+            })?;
+            if let Some(parent) = trash_dir.parent() {
+                let _ = fs::remove_dir(parent);
             }
         }
 
@@ -497,7 +665,7 @@ impl ProfileManager {
                     repair_illegal_config_toml(&content)
                 };
                 if repaired != content {
-                    let _ = fs::write(&target_config, &repaired);
+                    let _ = atomic_write_sensitive(&target_config, repaired.as_bytes());
                 }
 
                 session_provider = session_model_provider_key_from_config_toml(&repaired)?;
@@ -525,7 +693,7 @@ impl ProfileManager {
                                 repair_illegal_config_toml(&content)
                             };
                             if repaired != content {
-                                let _ = fs::write(&config_path, &repaired);
+                                let _ = atomic_write_sensitive(&config_path, repaired.as_bytes());
                             }
                         }
                     }
@@ -1135,9 +1303,11 @@ mod tests {
         )
         .unwrap();
         let db_path = target_dir.path().join("state_5.sqlite");
-        let first_rollout = target_dir.path().join("first.jsonl");
-        let second_rollout = target_dir.path().join("second.jsonl");
-        let kept_rollout = target_dir.path().join("kept.jsonl");
+        let sessions_dir = target_dir.path().join("sessions/2026/01/01");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        let first_rollout = sessions_dir.join("first.jsonl");
+        let second_rollout = sessions_dir.join("second.jsonl");
+        let kept_rollout = sessions_dir.join("kept.jsonl");
         fs::write(&first_rollout, "{}\n").unwrap();
         fs::write(&second_rollout, "{}\n").unwrap();
         fs::write(&kept_rollout, "{}\n").unwrap();
@@ -1186,6 +1356,109 @@ mod tests {
         assert!(!first_rollout.exists());
         assert!(!second_rollout.exists());
         assert!(kept_rollout.exists());
+    }
+
+    #[test]
+    fn refuses_to_delete_rollout_files_outside_session_directories() {
+        let app_dir = TempDir::new().unwrap();
+        let target_dir = TempDir::new().unwrap();
+        let outside_dir = TempDir::new().unwrap();
+        let manager = ProfileManager::new(
+            app_dir.path().to_path_buf(),
+            target_dir.path().to_path_buf(),
+        )
+        .unwrap();
+        let db_path = target_dir.path().join("state_5.sqlite");
+        let outside_rollout = outside_dir.path().join("outside.jsonl");
+        fs::write(&outside_rollout, "{}\n").unwrap();
+
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                rollout_path TEXT,
+                updated_at_ms INTEGER NOT NULL
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO threads (id, rollout_path, updated_at_ms) VALUES (?1, ?2, 1)",
+            rusqlite::params!["outside", outside_rollout.to_string_lossy()],
+        )
+        .unwrap();
+        drop(conn);
+
+        let error = manager
+            .delete_codex_sessions(&["outside".into()])
+            .expect_err("outside rollout path must be rejected");
+        assert!(error
+            .to_string()
+            .contains("outside the Codex session directories"));
+        assert!(outside_rollout.exists());
+        let conn = Connection::open(db_path).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM threads WHERE id = 'outside'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn archive_restores_rollout_file_when_database_update_fails() {
+        let app_dir = TempDir::new().unwrap();
+        let target_dir = TempDir::new().unwrap();
+        let manager = ProfileManager::new(
+            app_dir.path().to_path_buf(),
+            target_dir.path().to_path_buf(),
+        )
+        .unwrap();
+        let db_path = target_dir.path().join("state_5.sqlite");
+        let sessions_dir = target_dir.path().join("sessions/2026/01/01");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        let rollout = sessions_dir.join("rollout-2026-01-01T00-00-00-session.jsonl");
+        fs::write(&rollout, "{}\n").unwrap();
+
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                rollout_path TEXT,
+                archived INTEGER NOT NULL
+            );
+            CREATE TRIGGER reject_archive BEFORE UPDATE ON threads
+            BEGIN
+                SELECT RAISE(ABORT, 'archive rejected');
+            END;",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO threads (id, rollout_path, archived) VALUES (?1, ?2, 0)",
+            rusqlite::params!["session", rollout.to_string_lossy()],
+        )
+        .unwrap();
+        drop(conn);
+
+        manager
+            .archive_codex_session("session", true)
+            .expect_err("database trigger should reject archive");
+        assert!(rollout.exists());
+        assert!(!target_dir
+            .path()
+            .join("archived_sessions")
+            .join(rollout.file_name().unwrap())
+            .exists());
+        let conn = Connection::open(db_path).unwrap();
+        let archived: i64 = conn
+            .query_row(
+                "SELECT archived FROM threads WHERE id = 'session'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(archived, 0);
     }
 
     #[test]

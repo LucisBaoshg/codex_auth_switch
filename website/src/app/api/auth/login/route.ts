@@ -4,12 +4,10 @@ import { requireSsoEnv, secureCookiesForRedirectUri } from "@/lib/auth";
 export async function GET(request: NextRequest) {
   const { clientId, baseUrl, redirectUri } = requireSsoEnv();
   const returnTo = request.nextUrl.searchParams.get("returnTo") || "/profiles";
-  const desktopLoginId = request.nextUrl.searchParams.get("desktopLoginId") || undefined;
   const state = Buffer.from(
     JSON.stringify({
       nonce: crypto.randomUUID(),
       returnTo,
-      desktopLoginId,
     }),
   ).toString("base64url");
 

@@ -1,14 +1,20 @@
 use super::AppError;
 use std::process::Command;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+#[cfg(target_os = "macos")]
+use std::time::Instant;
+
+#[cfg(target_os = "macos")]
+const CODEX_DESKTOP_PROCESS_NAMES: [&str; 2] = ["ChatGPT", "Codex"];
 
 pub fn restart_codex_script() -> Option<&'static str> {
     #[cfg(target_os = "macos")]
     {
         Some(
-            r#"if application "Codex" is running then
-  tell application "Codex" to quit
+            r#"if application id "com.openai.codex" is running then
+  tell application id "com.openai.codex" to quit
 end if"#,
         )
     }
@@ -46,15 +52,15 @@ pub fn codex_restart_plan_for_platform(platform: CodexRestartPlatform) -> CodexR
                 args: vec![
                     "-e",
                     restart_codex_script().unwrap_or(
-                        r#"if application "Codex" is running then
-  tell application "Codex" to quit
+                        r#"if application id "com.openai.codex" is running then
+  tell application id "com.openai.codex" to quit
 end if"#,
                     ),
                 ],
             },
             open_command: CodexRestartCommand {
                 program: "open",
-                args: vec!["-a", "Codex"],
+                args: vec!["-b", "com.openai.codex"],
             },
         },
         CodexRestartPlatform::Windows => CodexRestartPlan {
@@ -65,7 +71,8 @@ end if"#,
                     "-ExecutionPolicy",
                     "Bypass",
                     "-Command",
-                    r#"$processes = @(Get-Process -Name Codex -ErrorAction SilentlyContinue)
+                    r#"$processNames = @('ChatGPT', 'Codex')
+$processes = @(Get-Process -Name $processNames -ErrorAction SilentlyContinue)
 if ($processes.Count -eq 0) { exit 0 }
 foreach ($process in $processes) {
   if ($process.MainWindowHandle -ne 0) {
@@ -75,7 +82,7 @@ foreach ($process in $processes) {
 $deadline = (Get-Date).AddSeconds(4)
 do {
   Start-Sleep -Milliseconds 200
-  $remaining = @(Get-Process -Name Codex -ErrorAction SilentlyContinue)
+  $remaining = @(Get-Process -Name $processNames -ErrorAction SilentlyContinue)
 } while ($remaining.Count -gt 0 -and (Get-Date) -lt $deadline)
 foreach ($process in $remaining) {
   Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
@@ -91,32 +98,50 @@ exit 0"#,
                     "Bypass",
                     "-Command",
                     r#"$ErrorActionPreference = 'Stop'
-$candidates = @(
+foreach ($candidate in @(
+  "$env:LOCALAPPDATA\Programs\ChatGPT\ChatGPT.exe",
+  "$env:LOCALAPPDATA\Programs\OpenAI\ChatGPT.exe",
+  "$env:LOCALAPPDATA\ChatGPT\ChatGPT.exe",
+  "$env:PROGRAMFILES\ChatGPT\ChatGPT.exe",
+  "$env:PROGRAMFILES\OpenAI\ChatGPT.exe",
+  "${env:ProgramFiles(x86)}\ChatGPT\ChatGPT.exe",
+  "${env:ProgramFiles(x86)}\OpenAI\ChatGPT.exe",
   "$env:LOCALAPPDATA\Programs\Codex\Codex.exe",
   "$env:LOCALAPPDATA\Codex\Codex.exe",
   "$env:PROGRAMFILES\Codex\Codex.exe",
   "${env:ProgramFiles(x86)}\Codex\Codex.exe"
-) | Where-Object { $_ -and (Test-Path $_) }
-if ($candidates.Count -gt 0) {
-  Start-Process -FilePath $candidates[0]
-  exit 0
+)) {
+  if ($candidate -and (Test-Path -LiteralPath $candidate)) {
+    Start-Process -FilePath $candidate
+    exit 0
+  }
 }
 $startMenus = @(
   "$env:APPDATA\Microsoft\Windows\Start Menu\Programs",
   "$env:ProgramData\Microsoft\Windows\Start Menu\Programs"
 )
-$shortcut = Get-ChildItem -Path $startMenus -Filter '*Codex*.lnk' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+$shortcut = Get-ChildItem -Path $startMenus -Include '*ChatGPT*.lnk', '*Codex*.lnk' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($shortcut) {
-  $shell = New-Object -ComObject WScript.Shell
-  $target = $shell.CreateShortcut($shortcut.FullName).TargetPath
-  if ($target -and (Test-Path $target)) {
-    Start-Process -FilePath $target
-  } else {
-    Invoke-Item $shortcut.FullName
-  }
+  Start-Process -FilePath $shortcut.FullName
   exit 0
 }
-Start-Process -FilePath 'Codex'"#,
+$getStartApps = Get-Command Get-StartApps -ErrorAction SilentlyContinue
+if ($getStartApps) {
+  $startApp = Get-StartApps | Where-Object { $_.Name -like '*ChatGPT*' -or $_.Name -like '*Codex*' } | Select-Object -First 1
+  if ($startApp) {
+    Start-Process -FilePath 'explorer.exe' -ArgumentList "shell:AppsFolder\$($startApp.AppID)"
+    exit 0
+  }
+}
+foreach ($command in @('ChatGPT.exe', 'Codex.exe')) {
+  $resolved = Get-Command $command -CommandType Application -ErrorAction SilentlyContinue
+  $resolvedPath = if ($resolved) { $resolved.Path } else { $null }
+  if ($resolvedPath) {
+    Start-Process -FilePath $resolvedPath
+    exit 0
+  }
+}
+throw 'Could not locate ChatGPT or Codex.'"#,
                 ],
             },
         },
@@ -125,14 +150,14 @@ Start-Process -FilePath 'Codex'"#,
                 program: "sh",
                 args: vec![
                     "-c",
-                    "pkill -TERM -x Codex 2>/dev/null || pkill -TERM -x codex 2>/dev/null || true; sleep 1; pkill -KILL -x Codex 2>/dev/null || pkill -KILL -x codex 2>/dev/null || true",
+                    "pkill -TERM -x ChatGPT 2>/dev/null || pkill -TERM -x chatgpt 2>/dev/null || pkill -TERM -x Codex 2>/dev/null || pkill -TERM -x codex 2>/dev/null || true; sleep 1; pkill -KILL -x ChatGPT 2>/dev/null || pkill -KILL -x chatgpt 2>/dev/null || pkill -KILL -x Codex 2>/dev/null || pkill -KILL -x codex 2>/dev/null || true",
                 ],
             },
             open_command: CodexRestartCommand {
                 program: "sh",
                 args: vec![
                     "-c",
-                    "if command -v codex >/dev/null 2>&1; then nohup codex >/dev/null 2>&1 & elif command -v Codex >/dev/null 2>&1; then nohup Codex >/dev/null 2>&1 & else exit 1; fi",
+                    "if command -v chatgpt >/dev/null 2>&1; then nohup chatgpt >/dev/null 2>&1 & elif command -v ChatGPT >/dev/null 2>&1; then nohup ChatGPT >/dev/null 2>&1 & elif command -v codex >/dev/null 2>&1; then nohup codex >/dev/null 2>&1 & elif command -v Codex >/dev/null 2>&1; then nohup Codex >/dev/null 2>&1 & else exit 1; fi",
                 ],
             },
         },
@@ -161,18 +186,31 @@ fn force_terminate_codex_on_macos_after_grace() -> Result<(), AppError> {
     {
         let deadline = Instant::now() + Duration::from_secs(4);
         while Instant::now() < deadline {
-            let status = Command::new("pgrep").arg("-x").arg("Codex").status()?;
-            if !status.success() {
+            let mut running = false;
+            for process_name in CODEX_DESKTOP_PROCESS_NAMES {
+                if Command::new("pgrep")
+                    .arg("-x")
+                    .arg(process_name)
+                    .status()?
+                    .success()
+                {
+                    running = true;
+                    break;
+                }
+            }
+            if !running {
                 return Ok(());
             }
             thread::sleep(Duration::from_millis(200));
         }
 
-        let _ = Command::new("pkill")
-            .arg("-KILL")
-            .arg("-x")
-            .arg("Codex")
-            .status();
+        for process_name in CODEX_DESKTOP_PROCESS_NAMES {
+            let _ = Command::new("pkill")
+                .arg("-KILL")
+                .arg("-x")
+                .arg(process_name)
+                .status();
+        }
     }
 
     Ok(())
@@ -187,7 +225,7 @@ pub fn restart_codex_app() -> Result<(), AppError> {
         .status()?;
     if !quit_status.success() {
         return Err(AppError::Message(
-            "Failed to ask Codex to quit before restart.".into(),
+            "Failed to ask ChatGPT/Codex to quit before restart.".into(),
         ));
     }
 
@@ -201,7 +239,7 @@ pub fn restart_codex_app() -> Result<(), AppError> {
         .args(&plan.open_command.args)
         .status()?;
     if !open_status.success() {
-        return Err(AppError::Message("Failed to reopen Codex.".into()));
+        return Err(AppError::Message("Failed to reopen ChatGPT/Codex.".into()));
     }
 
     Ok(())

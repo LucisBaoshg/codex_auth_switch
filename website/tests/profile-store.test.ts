@@ -5,9 +5,13 @@ import path from "node:path";
 import {
   canEditProfile,
   canAccessProfile,
+  createProfile,
   filterProfilesForPrincipal,
   normalizeSharedWith,
   publicProfileWithAuthType,
+  readProfiles,
+  sharedProfileContentHash,
+  updateProfileMetadata,
   type ProfilePrincipal,
   type StoredProfile,
 } from "../src/lib/profile-store";
@@ -124,6 +128,59 @@ describe("profile auth type labels", () => {
       } else {
         process.env.CODEX_PROFILE_DATA_DIR = previousDataDir;
       }
+    }
+  });
+});
+
+describe("profile file store concurrency", () => {
+  test("serializes concurrent creates and generates collision-resistant ids", async () => {
+    const previousDataDir = process.env.CODEX_PROFILE_DATA_DIR;
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "codex-profile-store-concurrent-create-"));
+    try {
+      process.env.CODEX_PROFILE_DATA_DIR = dataDir;
+      const created = await Promise.all(Array.from({ length: 16 }, (_, index) => createProfile({
+        name: `Profile ${index}`,
+        authContent: JSON.stringify({ OPENAI_API_KEY: `sk-${index}` }),
+        configContent: `model = "model-${index}"`,
+      }, userA)));
+
+      expect(new Set(created.map((profile) => profile.id)).size).toBe(16);
+      expect(await readProfiles()).toHaveLength(16);
+    } finally {
+      if (previousDataDir === undefined) delete process.env.CODEX_PROFILE_DATA_DIR;
+      else process.env.CODEX_PROFILE_DATA_DIR = previousDataDir;
+    }
+  });
+
+  test("allows only one concurrent update from the same base version", async () => {
+    const previousDataDir = process.env.CODEX_PROFILE_DATA_DIR;
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "codex-profile-store-concurrent-update-"));
+    try {
+      process.env.CODEX_PROFILE_DATA_DIR = dataDir;
+      const authContent = JSON.stringify({ OPENAI_API_KEY: "sk-old" });
+      const configContent = 'model = "old"';
+      const created = await createProfile({ name: "Concurrent", authContent, configContent }, userA);
+      const baseHash = sharedProfileContentHash(authContent, configContent);
+
+      const results = await Promise.allSettled([
+        updateProfileMetadata(created.id, userA, {
+          authContent: JSON.stringify({ OPENAI_API_KEY: "sk-a" }),
+          baseContentVersion: 1,
+          baseContentHash: baseHash,
+        }),
+        updateProfileMetadata(created.id, userA, {
+          authContent: JSON.stringify({ OPENAI_API_KEY: "sk-b" }),
+          baseContentVersion: 1,
+          baseContentHash: baseHash,
+        }),
+      ]);
+
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+      expect((await readProfiles())[0].contentVersion).toBe(2);
+    } finally {
+      if (previousDataDir === undefined) delete process.env.CODEX_PROFILE_DATA_DIR;
+      else process.env.CODEX_PROFILE_DATA_DIR = previousDataDir;
     }
   });
 });

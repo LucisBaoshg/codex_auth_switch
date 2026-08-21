@@ -1,7 +1,8 @@
 import { promises as fs } from "fs";
-import { createHash } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import path from "path";
 import { getDataDir } from "./data-paths";
+import { atomicWriteFile, ensureFile, withFileStoreLock } from "./file-store";
 
 export type ProfilePrincipal = {
   dingUserId: string;
@@ -255,11 +256,7 @@ export function profileFilesDir() {
 
 export async function ensureProfileStore() {
   await fs.mkdir(profileFilesDir(), { recursive: true });
-  try {
-    await fs.access(profilesFilePath());
-  } catch {
-    await fs.writeFile(profilesFilePath(), JSON.stringify([]));
-  }
+  await ensureFile(profilesFilePath(), JSON.stringify([]));
 }
 
 export async function readProfiles(): Promise<StoredProfile[]> {
@@ -270,7 +267,7 @@ export async function readProfiles(): Promise<StoredProfile[]> {
 
 export async function writeProfiles(profiles: StoredProfile[]) {
   await ensureProfileStore();
-  await fs.writeFile(profilesFilePath(), JSON.stringify(profiles, null, 2));
+  await atomicWriteFile(profilesFilePath(), JSON.stringify(profiles, null, 2));
 }
 
 export async function getVisibleProfile(id: string, principal: ProfilePrincipal | null) {
@@ -281,44 +278,69 @@ export async function getVisibleProfile(id: string, principal: ProfilePrincipal 
 }
 
 export async function createProfile(input: ProfileInput, principal: ProfilePrincipal) {
-  await ensureProfileStore();
+  return withFileStoreLock(profilesFilePath(), async () => {
+    await ensureProfileStore();
 
-  const id = Date.now().toString();
-  const now = new Date().toISOString();
-  const visibility = normalizeProfileVisibility(input.visibility, input.sharedWith);
-  assertShareSafeAuthVisibility(input.authContent, visibility);
-  const contentHash = sharedProfileContentHash(input.authContent, input.configContent);
-  const profileFolder = path.join(profileFilesDir(), id);
-  await fs.mkdir(profileFolder, { recursive: true });
-  await fs.writeFile(path.join(profileFolder, "auth.json"), input.authContent);
-  await fs.writeFile(path.join(profileFolder, "config.toml"), input.configContent);
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    const visibility = normalizeProfileVisibility(input.visibility, input.sharedWith);
+    assertShareSafeAuthVisibility(input.authContent, visibility);
+    const contentHash = sharedProfileContentHash(input.authContent, input.configContent);
+    const profileFolder = path.join(profileFilesDir(), id);
+    await fs.mkdir(profileFolder, { recursive: true });
 
-  const profile: StoredProfile = {
-    id,
-    name: input.name,
-    description: input.description || "",
-    authTypeLabel: detectSharedProfileAuthType(input.authContent, input.configContent),
-    createdAt: now,
-    updatedAt: now,
-    files: ["auth.json", "config.toml"],
-    sourceProfileId: input.sourceProfileId?.trim() || undefined,
-    contentVersion: 1,
-    contentHash,
-    contentUpdatedAt: now,
-    ownerDingUserId: principal.dingUserId,
-    ownerName: principal.name,
-    ownerMobile: principal.mobile,
-    visibility,
-    sharedWith: normalizeSharedWith(input.sharedWith),
-  };
+    const profile: StoredProfile = {
+      id,
+      name: input.name,
+      description: input.description || "",
+      authTypeLabel: detectSharedProfileAuthType(input.authContent, input.configContent),
+      createdAt: now,
+      updatedAt: now,
+      files: ["auth.json", "config.toml"],
+      sourceProfileId: input.sourceProfileId?.trim() || undefined,
+      contentVersion: 1,
+      contentHash,
+      contentUpdatedAt: now,
+      ownerDingUserId: principal.dingUserId,
+      ownerName: principal.name,
+      ownerMobile: principal.mobile,
+      visibility,
+      sharedWith: normalizeSharedWith(input.sharedWith),
+    };
 
-  const profiles = await readProfiles();
-  profiles.unshift(profile);
-  await writeProfiles(profiles);
-  return profile;
+    try {
+      await atomicWriteFile(path.join(profileFolder, "auth.json"), input.authContent);
+      await atomicWriteFile(path.join(profileFolder, "config.toml"), input.configContent);
+      const profiles = await readProfiles();
+      profiles.unshift(profile);
+      await writeProfiles(profiles);
+      return profile;
+    } catch (error) {
+      await fs.rm(profileFolder, { recursive: true, force: true }).catch(() => undefined);
+      throw error;
+    }
+  });
 }
 
 export async function updateProfileMetadata(
+  id: string,
+  principal: ProfilePrincipal,
+  updates: {
+    name?: string;
+    description?: string;
+    visibility?: ProfileVisibility;
+    sharedWith?: string | string[];
+    sourceProfileId?: string;
+    authContent?: string;
+    configContent?: string;
+    baseContentVersion?: number | null;
+    baseContentHash?: string | null;
+  },
+) {
+  return withFileStoreLock(profilesFilePath(), () => updateProfileMetadataUnlocked(id, principal, updates));
+}
+
+async function updateProfileMetadataUnlocked(
   id: string,
   principal: ProfilePrincipal,
   updates: {
@@ -362,10 +384,14 @@ export async function updateProfileMetadata(
   const now = new Date().toISOString();
   const profileFolder = path.join(profileFilesDir(), profiles[index].id);
   const hasContentUpdate = updates.authContent !== undefined || updates.configContent !== undefined;
+  let previousAuthForRollback: string | null = null;
+  let previousConfigForRollback: string | null = null;
 
   if (hasContentUpdate) {
     const previousAuth = await readProfileFile(profiles[index].id, "auth.json");
     const previousConfig = await readProfileFile(profiles[index].id, "config.toml");
+    previousAuthForRollback = previousAuth;
+    previousConfigForRollback = previousConfig;
     const nextAuth = updates.authContent ?? previousAuth;
     const nextConfig = updates.configContent ?? previousConfig;
     const previousHash = profiles[index].contentHash ?? sharedProfileContentHash(previousAuth, previousConfig);
@@ -403,18 +429,28 @@ export async function updateProfileMetadata(
       );
   }
 
-  if (updates.authContent !== undefined) {
-    await fs.mkdir(profileFolder, { recursive: true });
-    await fs.writeFile(path.join(profileFolder, "auth.json"), updates.authContent);
-  }
-  if (updates.configContent !== undefined) {
-    await fs.mkdir(profileFolder, { recursive: true });
-    await fs.writeFile(path.join(profileFolder, "config.toml"), updates.configContent);
-  }
-  profiles[index].updatedAt = now;
+  try {
+    if (updates.authContent !== undefined) {
+      await fs.mkdir(profileFolder, { recursive: true });
+      await atomicWriteFile(path.join(profileFolder, "auth.json"), updates.authContent);
+    }
+    if (updates.configContent !== undefined) {
+      await fs.mkdir(profileFolder, { recursive: true });
+      await atomicWriteFile(path.join(profileFolder, "config.toml"), updates.configContent);
+    }
+    profiles[index].updatedAt = now;
 
-  await writeProfiles(profiles);
-  return profiles[index];
+    await writeProfiles(profiles);
+    return profiles[index];
+  } catch (error) {
+    if (updates.authContent !== undefined && previousAuthForRollback !== null) {
+      await atomicWriteFile(path.join(profileFolder, "auth.json"), previousAuthForRollback).catch(() => undefined);
+    }
+    if (updates.configContent !== undefined && previousConfigForRollback !== null) {
+      await atomicWriteFile(path.join(profileFolder, "config.toml"), previousConfigForRollback).catch(() => undefined);
+    }
+    throw error;
+  }
 }
 
 export async function syncProfileAuthContent(
@@ -426,9 +462,21 @@ export async function syncProfileAuthContent(
     baseContentHash?: string | null;
   },
 ) {
+  return withFileStoreLock(profilesFilePath(), () => syncProfileAuthContentUnlocked(id, principal, updates));
+}
+
+async function syncProfileAuthContentUnlocked(
+  id: string,
+  principal: ProfilePrincipal,
+  updates: {
+    authContent: string;
+    baseContentVersion?: number | null;
+    baseContentHash?: string | null;
+  },
+) {
   const profiles = await readProfiles();
   const index = profiles.findIndex((profile) => profile.id === id);
-  if (index === -1 || !canAccessProfile(profiles[index], principal)) return null;
+  if (index === -1 || !canEditProfile(profiles[index], principal)) return null;
 
   const profile = profiles[index];
   const previousAuth = await readProfileFile(profile.id, "auth.json");
@@ -450,7 +498,6 @@ export async function syncProfileAuthContent(
   assertShareSafeAuthVisibility(nextAuth, profile.visibility ?? "private");
   const profileFolder = path.join(profileFilesDir(), profile.id);
   await fs.mkdir(profileFolder, { recursive: true });
-  await fs.writeFile(path.join(profileFolder, "auth.json"), nextAuth);
 
   if (nextHash !== currentHash) {
     profile.contentVersion = currentVersion + 1;
@@ -462,17 +509,43 @@ export async function syncProfileAuthContent(
   profile.authTypeLabel = detectSharedProfileAuthType(nextAuth, previousConfig);
   profile.updatedAt = now;
 
-  await writeProfiles(profiles);
-  return profile;
+  try {
+    await atomicWriteFile(path.join(profileFolder, "auth.json"), nextAuth);
+    await writeProfiles(profiles);
+    return profile;
+  } catch (error) {
+    await atomicWriteFile(path.join(profileFolder, "auth.json"), previousAuth).catch(() => undefined);
+    throw error;
+  }
 }
 
 export async function deleteProfile(id: string, principal: ProfilePrincipal) {
-  const profiles = await readProfiles();
-  const index = profiles.findIndex((profile) => profile.id === id);
-  if (index === -1 || !canEditProfile(profiles[index], principal)) return false;
+  return withFileStoreLock(profilesFilePath(), async () => {
+    const profiles = await readProfiles();
+    const index = profiles.findIndex((profile) => profile.id === id);
+    if (index === -1 || !canEditProfile(profiles[index], principal)) return false;
 
-  const [profile] = profiles.splice(index, 1);
-  await writeProfiles(profiles);
-  await fs.rm(path.join(profileFilesDir(), profile.id), { recursive: true, force: true });
-  return true;
+    const [profile] = profiles.splice(index, 1);
+    const profileFolder = path.join(profileFilesDir(), profile.id);
+    const trashFolder = path.join(profileFilesDir(), `.deleting-${profile.id}-${randomUUID()}`);
+    let movedToTrash = false;
+    try {
+      await fs.rename(profileFolder, trashFolder);
+      movedToTrash = true;
+    } catch (error) {
+      const code = typeof error === "object" && error !== null && "code" in error
+        ? String((error as { code?: unknown }).code)
+        : "";
+      if (code !== "ENOENT") throw error;
+    }
+
+    try {
+      await writeProfiles(profiles);
+    } catch (error) {
+      if (movedToTrash) await fs.rename(trashFolder, profileFolder).catch(() => undefined);
+      throw error;
+    }
+    if (movedToTrash) await fs.rm(trashFolder, { recursive: true, force: true });
+    return true;
+  });
 }

@@ -1135,7 +1135,10 @@ async function syncActiveSharedAuthWriteBack(): Promise<void> {
   }
 
   const remoteProfile = state.networkProfiles.find((profile) => profile.id === remoteProfileId);
-  if (!shouldWriteBackSharedAuth(activeProfile, remoteProfile)) {
+  if (!remoteProfile || !isOwnNetworkProfile(remoteProfile, state.networkUser)) {
+    return;
+  }
+  if (!shouldWriteBackSharedAuth(activeProfile, remoteProfile, state.networkUser)) {
     return;
   }
 
@@ -1328,7 +1331,7 @@ async function updateLocalSharedProfileFromCloud(
       message: "正在更新本地档案。",
     };
     render();
-    const updateSnapshot = await desktopInvoke<AppSnapshot>("update_profile", {
+    const updateSnapshot = await desktopInvoke<AppSnapshot>("update_profile_from_cloud", {
       profileId: localProfile.id,
       payload: profileInputFromDocument(document),
     });
@@ -1453,19 +1456,20 @@ async function openNetworkSsoLogin(): Promise<void> {
     const session = parseNetworkJson<{
       id: string;
       pollToken: string;
+      userCode: string;
     }>(sessionResponse.body, "创建桌面登录会话返回内容无法解析。");
-    if (!session.id || !session.pollToken) {
+    if (!session.id || !session.pollToken || !session.userCode) {
       throw new Error("创建桌面登录会话返回内容缺少必要字段。");
     }
     const loginUrl = new URL(networkSsoLoginUrl(state.networkSharing));
-    loginUrl.searchParams.set("desktopLoginId", session.id);
+    loginUrl.searchParams.set("returnTo", `/desktop-login/${session.id}`);
 
     if (isTauriRuntime) {
       await invoke("open_external_url", { url: loginUrl.toString() });
     } else {
       window.open(loginUrl.toString(), "_blank", "noopener,noreferrer");
     }
-    setFlash("info", "已打开钉钉 SSO 登录页。完成登录后客户端会自动连接企业共享库。");
+    setFlash("info", `已打开钉钉 SSO 登录页。请确认网页与客户端验证码均为 ${session.userCode}，再允许登录。`);
     render();
     await pollNetworkDesktopLogin(session.id, session.pollToken);
   } catch (error) {
@@ -1596,7 +1600,8 @@ async function downloadAndApplyNetworkProfile(networkProfileId: string, profileN
         state.selectedProfileId = targetProfileId;
         setSnapshot(afterSwitchSnap);
         state.activeTab = "local";
-        setFlash("success", `已成功下载并应用网络共享配置「${profileName}」。`);
+        await desktopInvoke("restart_codex");
+        setFlash("success", `已成功下载并应用网络共享配置「${profileName}」，ChatGPT/Codex 已重启。`);
       } else {
          setFlash("error", "应用配置时发生错误。");
       }

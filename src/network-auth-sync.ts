@@ -6,8 +6,13 @@ type SharedAuthLocalState = {
 
 type SharedAuthRemoteState = {
   id: string;
+  ownerDingUserId?: string | null;
   contentVersion?: number | null;
   contentHash?: string | null;
+};
+
+type SharedAuthCurrentUser = {
+  dingUserId?: string | null;
 };
 
 export type SharedAuthWriteBackBase = {
@@ -23,9 +28,17 @@ function normalizedHash(value: string | null | undefined): string | null {
 export function shouldWriteBackSharedAuth(
   local: SharedAuthLocalState,
   remote: SharedAuthRemoteState | null | undefined,
+  currentUser: SharedAuthCurrentUser | null | undefined,
 ): boolean {
   const remoteProfileId = local.remoteProfileId?.trim();
   if (!remoteProfileId || !remote || remote.id !== remoteProfileId) {
+    return false;
+  }
+  if (
+    !remote.ownerDingUserId?.trim() ||
+    !currentUser?.dingUserId?.trim() ||
+    remote.ownerDingUserId.trim().toLowerCase() !== currentUser.dingUserId.trim().toLowerCase()
+  ) {
     return false;
   }
 

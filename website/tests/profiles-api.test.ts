@@ -439,7 +439,7 @@ test("preserves existing share metadata when file updates omit share fields", as
   expect(storedProfiles[0].sharedWith).toEqual(["Ding-B"]);
 });
 
-test("rejects stale shared auth write backs", async () => {
+test("rejects stale owner auth write backs", async () => {
   const dataDir = await useTempDataDir("codex-profiles-auth-sync-stale-test-");
   const fs = await import("node:fs/promises");
   const path = await import("node:path");
@@ -476,8 +476,8 @@ test("rejects stale shared auth write backs", async () => {
     },
   ]));
   const { token } = await createDesktopToken({
-    dingUserId: "Ding-B",
-    name: "Bob",
+    dingUserId: "Ding-A",
+    name: "Alice",
     active: true,
   });
 
@@ -506,7 +506,7 @@ test("rejects stale shared auth write backs", async () => {
   expect(storedProfiles[0].contentHash).toBe(currentHash);
 });
 
-test("allows shared recipients to write back refreshed auth without editing share metadata", async () => {
+test("rejects auth write backs from shared recipients", async () => {
   const dataDir = await useTempDataDir("codex-profiles-auth-sync-shared-user-test-");
   const fs = await import("node:fs/promises");
   const path = await import("node:path");
@@ -563,18 +563,17 @@ test("allows shared recipients to write back refreshed auth without editing shar
     }),
     { params: Promise.resolve({ id: "profile-1" }) },
   );
-  const body = await response.json();
+  await response.json();
   const storedAuth = await fs.readFile(path.join(dataDir, "files", "profile-1", "auth.json"), "utf-8");
   const storedConfig = await fs.readFile(path.join(dataDir, "files", "profile-1", "config.toml"), "utf-8");
   const storedProfiles = JSON.parse(await fs.readFile(path.join(dataDir, "profiles.json"), "utf-8"));
 
-  expect(response.status).toBe(200);
-  expect(body.contentVersion).toBe(2);
-  expect(body.contentHash).toBe(sharedProfileContentHash(nextAuth, configToml));
-  expect(storedAuth).toBe(nextAuth);
+  expect(response.status).toBe(404);
+  expect(storedAuth).toBe(previousAuth);
   expect(storedConfig).toBe(configToml);
   expect(storedProfiles[0].ownerDingUserId).toBe("Ding-A");
   expect(storedProfiles[0].sharedWith).toEqual(["Ding-B"]);
+  expect(storedProfiles[0].contentVersion).toBe(1);
 });
 
 test("rejects stale owner file updates when a base content version is supplied", async () => {

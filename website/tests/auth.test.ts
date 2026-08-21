@@ -1,11 +1,15 @@
 import { describe, expect, test } from "vitest";
 import {
-  completeDesktopLoginSession,
   consumeDesktopLoginToken,
+  createSessionCookieValue,
   createDesktopLoginSession,
+  getDesktopLoginConfirmation,
   normalizeSsoRedirectUri,
   secureCookiesForRedirectUri,
 } from "../src/lib/auth";
+import { POST as confirmDesktopLogin } from "../src/app/api/auth/desktop-login/[id]/confirm/route";
+import { decodeReturnTo } from "../src/app/api/auth/callback/route";
+import { NextRequest } from "next/server";
 
 describe("auth cookie security", () => {
   test("does not require Secure cookies for HTTP SSO callback deployments", () => {
@@ -30,7 +34,7 @@ describe("SSO redirect URI normalization", () => {
 });
 
 describe("desktop login sessions", () => {
-  test("exchanges a completed desktop login session for one desktop token", async () => {
+  test("requires an authenticated browser confirmation before issuing one desktop token", async () => {
     const dataDir = await import("node:fs/promises").then(async (fs) => {
       const os = await import("node:os");
       const path = await import("node:path");
@@ -39,18 +43,48 @@ describe("desktop login sessions", () => {
     process.env.CODEX_PROFILE_DATA_DIR = dataDir;
 
     const session = await createDesktopLoginSession();
-    await completeDesktopLoginSession(session.id, {
+    expect(session.userCode).toMatch(/^[A-Z2-9]{4}-[A-Z2-9]{4}$/);
+    await expect(consumeDesktopLoginToken(session.id, session.pollToken)).resolves.toBeNull();
+    await expect(getDesktopLoginConfirmation(session.id)).resolves.toEqual(expect.objectContaining({
+      userCode: session.userCode,
+      completed: false,
+    }));
+
+    const principal = {
       dingUserId: "Ding-A",
       unionId: "Union-A",
       openId: "Open-A",
       name: "Alice",
       mobile: "13900000001",
       jobNumber: "A001",
-    });
+    };
+    const unauthenticated = await confirmDesktopLogin(
+      new NextRequest(`http://localhost/api/auth/desktop-login/${session.id}/confirm`, { method: "POST" }),
+      { params: Promise.resolve({ id: session.id }) },
+    );
+    expect(unauthenticated.status).toBe(401);
+
+    const authenticated = await confirmDesktopLogin(
+      new NextRequest(`http://localhost/api/auth/desktop-login/${session.id}/confirm`, {
+        method: "POST",
+        headers: { cookie: `codex_share_session=${createSessionCookieValue(principal)}` },
+      }),
+      { params: Promise.resolve({ id: session.id }) },
+    );
+    expect(authenticated.status).toBe(200);
 
     const completed = await consumeDesktopLoginToken(session.id, session.pollToken);
     expect(completed?.token).toMatch(/^cas_/);
     expect(completed?.principal.name).toBe("Alice");
     await expect(consumeDesktopLoginToken(session.id, session.pollToken)).resolves.toBeNull();
+  });
+});
+
+describe("SSO return target validation", () => {
+  test("rejects protocol-relative and backslash redirect targets", () => {
+    const encodeState = (returnTo: string) => Buffer.from(JSON.stringify({ returnTo })).toString("base64url");
+    expect(decodeReturnTo(encodeState("/profiles"))).toBe("/profiles");
+    expect(decodeReturnTo(encodeState("//evil.example"))).toBe("/profiles");
+    expect(decodeReturnTo(encodeState("/\\evil.example"))).toBe("/profiles");
   });
 });

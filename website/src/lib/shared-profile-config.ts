@@ -38,90 +38,123 @@ function quoteTomlString(value: string): string {
   return JSON.stringify(value);
 }
 
-function tomlBracketDelta(line: string): number {
-  let delta = 0;
-  let quote: string | null = null;
-  let escaped = false;
-
-  for (const char of line) {
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (char === "\\") {
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      if (char === quote) quote = null;
-      continue;
-    }
-    if (char === "\"" || char === "'") {
-      quote = char;
-      continue;
-    }
-    if (char === "[") delta += 1;
-    if (char === "]") delta -= 1;
-  }
-
-  return delta;
-}
-
 function isSharedModelProviderTable(tableHeader: string): boolean {
   return /^\s*\[\s*model_providers(?:\.[^\]]+)?\s*\]\s*(?:#.*)?$/.test(tableHeader);
+}
+
+type TomlStringMode = "basic" | "literal" | "multiline-basic" | "multiline-literal" | null;
+
+function splitTomlStatements(configToml: string): string[] {
+  const statements: string[] = [];
+  let start = 0;
+  let squareDepth = 0;
+  let curlyDepth = 0;
+  let stringMode: TomlStringMode = null;
+  let escaped = false;
+  let inComment = false;
+
+  for (let index = 0; index < configToml.length; index += 1) {
+    const char = configToml[index];
+    const nextThree = configToml.slice(index, index + 3);
+
+    if (inComment) {
+      if (char !== "\n") continue;
+      inComment = false;
+    } else if (stringMode === "multiline-basic") {
+      if (nextThree === '\"\"\"' && !escaped) {
+        stringMode = null;
+        index += 2;
+        continue;
+      }
+      if (char === "\\" && !escaped) {
+        escaped = true;
+      } else {
+        escaped = false;
+      }
+      continue;
+    } else if (stringMode === "multiline-literal") {
+      if (nextThree === "'''") {
+        stringMode = null;
+        index += 2;
+      }
+      continue;
+    } else if (stringMode === "basic") {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '\"') {
+        stringMode = null;
+      }
+      continue;
+    } else if (stringMode === "literal") {
+      if (char === "'") stringMode = null;
+      continue;
+    } else if (nextThree === '\"\"\"') {
+      stringMode = "multiline-basic";
+      index += 2;
+      continue;
+    } else if (nextThree === "'''") {
+      stringMode = "multiline-literal";
+      index += 2;
+      continue;
+    } else if (char === '\"') {
+      stringMode = "basic";
+      continue;
+    } else if (char === "'") {
+      stringMode = "literal";
+      continue;
+    } else if (char === "#") {
+      inComment = true;
+      continue;
+    } else if (char === "[") {
+      squareDepth += 1;
+    } else if (char === "]") {
+      squareDepth = Math.max(0, squareDepth - 1);
+    } else if (char === "{") {
+      curlyDepth += 1;
+    } else if (char === "}") {
+      curlyDepth = Math.max(0, curlyDepth - 1);
+    }
+
+    if (char === "\n" && squareDepth === 0 && curlyDepth === 0) {
+      statements.push(configToml.slice(start, index).trim());
+      start = index + 1;
+    }
+  }
+
+  const tail = configToml.slice(start).trim();
+  if (tail) statements.push(tail);
+  return statements.filter(Boolean);
 }
 
 export function sanitizeSharedConfigToml(configToml: string): string {
   const kept: string[] = [];
   let includeCurrentTable = false;
-  let skippingDisallowedValue = false;
-  let disallowedBracketDepth = 0;
 
-  for (const line of configToml.split(/\r?\n/)) {
-    const trimmed = line.trim();
+  for (const statement of splitTomlStatements(configToml)) {
+    const trimmed = statement.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
 
-    if (skippingDisallowedValue) {
-      disallowedBracketDepth += tomlBracketDelta(line);
-      if (disallowedBracketDepth <= 0) {
-        skippingDisallowedValue = false;
-        disallowedBracketDepth = 0;
-      }
-      continue;
-    }
-
-    if (!trimmed || trimmed.startsWith("#")) {
-      if (includeCurrentTable && kept.length > 0 && kept[kept.length - 1] !== "") {
-        kept.push("");
-      }
-      continue;
-    }
-
-    if (/^\s*\[/.test(line)) {
-      includeCurrentTable = isSharedModelProviderTable(line);
+    if (/^\s*\[/.test(statement)) {
+      includeCurrentTable = isSharedModelProviderTable(statement);
       if (includeCurrentTable) {
         if (kept.length > 0 && kept[kept.length - 1] !== "") kept.push("");
-        kept.push(line);
+        kept.push(statement);
       }
       continue;
     }
 
     if (includeCurrentTable) {
-      kept.push(line);
+      kept.push(statement);
       continue;
     }
 
-    const assignment = line.match(/^\s*([A-Za-z0-9_-]+)\s*=/);
+    const assignment = statement.match(/^\s*([A-Za-z0-9_-]+)\s*=/);
     if (!assignment) continue;
 
     if (sharedConfigRootKeys.has(assignment[1])) {
-      kept.push(line);
-      continue;
-    }
-
-    const delta = tomlBracketDelta(line);
-    if (delta > 0) {
-      skippingDisallowedValue = true;
-      disallowedBracketDepth = delta;
+      kept.push(statement);
     }
   }
 

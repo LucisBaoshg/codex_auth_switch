@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
-  completeDesktopLoginSession,
   createSessionCookieValue,
   requireSsoEnv,
   secureCookiesForRedirectUri,
@@ -10,25 +9,14 @@ import { withBasePath } from "@/lib/base-path";
 import type { ProfilePrincipal } from "@/lib/profile-store";
 import { recordKnownUser } from "@/lib/user-store";
 
-function decodeReturnTo(state: string) {
+export function decodeReturnTo(state: string) {
   try {
     const parsed = JSON.parse(Buffer.from(state, "base64url").toString("utf-8")) as {
       returnTo?: string;
     };
-    return parsed.returnTo && parsed.returnTo.startsWith("/") ? parsed.returnTo : "/profiles";
+    return parsed.returnTo && /^\/(?![\\/])/.test(parsed.returnTo) ? parsed.returnTo : "/profiles";
   } catch {
     return "/profiles";
-  }
-}
-
-function decodeDesktopLoginId(state: string) {
-  try {
-    const parsed = JSON.parse(Buffer.from(state, "base64url").toString("utf-8")) as {
-      desktopLoginId?: string;
-    };
-    return parsed.desktopLoginId || null;
-  } catch {
-    return null;
   }
 }
 
@@ -66,7 +54,6 @@ export async function GET(request: NextRequest) {
   }
 
   await recordKnownUser(principal);
-  await completeDesktopLoginSession(decodeDesktopLoginId(state), principal);
 
   const response = NextResponse.redirect(new URL(withBasePath(decodeReturnTo(state)), redirectUri));
   response.cookies.set(sessionCookieName, createSessionCookieValue(principal), {

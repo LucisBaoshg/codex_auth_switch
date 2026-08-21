@@ -413,6 +413,25 @@ test("renders editor page shell around prebuilt editor content", async () => {
   expect(html).toContain('data-role="editor-body"');
 });
 
+test("escapes editor shell titles supplied by remote profiles", async () => {
+  const { renderEditorPageShell } = await import("../src/profile-editor-renderers");
+  const html = renderEditorPageShell({
+    title: '</h1><style>body{display:none}</style><h1>',
+    subtitle: '<img src=x onerror="alert(1)">',
+    busy: false,
+    readOnly: true,
+    hasTargetChanges: false,
+    showTabs: false,
+    currentTab: "manual-delta",
+    bodyContentHtml: "",
+  });
+
+  expect(html).not.toContain("<style>body{display:none}</style>");
+  expect(html).not.toContain("<img src=x");
+  expect(html).toContain("&lt;/h1&gt;&lt;style&gt;");
+  expect(html).toContain("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;");
+});
+
 test("renders complete editor page from snapshot and editor state", async () => {
   expect(existsSync(join(root, "src/profile-editor-renderers.ts"))).toBe(true);
   const rendererModule = await import(renderersImportPath);

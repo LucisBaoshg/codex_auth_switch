@@ -11,6 +11,55 @@ use std::thread;
 use std::time::Duration;
 use tempfile::TempDir;
 
+fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+    stream
+        .set_nonblocking(false)
+        .expect("set request stream blocking");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .expect("set request read timeout");
+    let mut request = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    let mut expected_len = None;
+
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(bytes_read) => request.extend_from_slice(&buffer[..bytes_read]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                break;
+            }
+            Err(_) => break,
+        }
+
+        if expected_len.is_none() {
+            if let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                let header_len = header_end + 4;
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_len = headers
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                    .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                expected_len = Some(header_len + content_len);
+            }
+        }
+
+        if expected_len.is_some_and(|length| request.len() >= length) || request.len() >= 64 * 1024
+        {
+            break;
+        }
+    }
+
+    String::from_utf8_lossy(&request).to_string()
+}
+
 fn api_key_auth_json(token: &str) -> String {
     format!(r#"{{"OPENAI_API_KEY":"{token}"}}"#)
 }
@@ -106,13 +155,10 @@ impl TestServer {
             while !thread_shutdown.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        let mut buffer = [0_u8; 8192];
-                        let bytes_read = stream.read(&mut buffer).unwrap_or(0);
-                        if bytes_read == 0 {
+                        let request = read_http_request(&mut stream);
+                        if request.is_empty() {
                             continue;
                         }
-
-                        let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
                         thread_requests
                             .lock()
                             .expect("lock requests")

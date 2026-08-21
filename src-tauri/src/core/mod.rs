@@ -28,7 +28,7 @@ mod usage_stats;
 
 pub(crate) use auth_config::*;
 use config_recovery::{
-    acknowledge_pending_notices, atomic_write_json, merge_recovery_notices,
+    acknowledge_pending_notices, atomic_write_json, atomic_write_sensitive, merge_recovery_notices,
     quarantine_corrupt_file, read_pending_notices, record_pending_notices, recovery_dir,
     stable_invalid_file_notice,
 };
@@ -1088,7 +1088,7 @@ impl ProfileManager {
             };
 
             let normalized_config = normalize_config_toml_for_auth(&auth_json, &migrated_config)?;
-            fs::write(&config_path, &normalized_config)?;
+            atomic_write_sensitive(&config_path, normalized_config.as_bytes())?;
             self.register_model_provider_from_profile(
                 &auth_json,
                 &normalized_config,
@@ -1168,7 +1168,7 @@ impl ProfileManager {
                 continue;
             }
 
-            fs::write(&config_path, &normalized_config)?;
+            atomic_write_sensitive(&config_path, normalized_config.as_bytes())?;
             self.register_model_provider_from_profile(
                 &auth_json,
                 &normalized_config,
@@ -1221,8 +1221,11 @@ impl ProfileManager {
         let profile_dir = self.profiles_dir().join(&profile_id);
         fs::create_dir_all(&profile_dir)?;
 
-        fs::write(profile_dir.join("auth.json"), input.auth_json)?;
-        fs::write(profile_dir.join("config.toml"), &normalized_config)?;
+        atomic_write_sensitive(&profile_dir.join("auth.json"), input.auth_json.as_bytes())?;
+        atomic_write_sensitive(
+            &profile_dir.join("config.toml"),
+            normalized_config.as_bytes(),
+        )?;
         self.register_model_provider_from_profile(
             &fs::read_to_string(profile_dir.join("auth.json"))?,
             &fs::read_to_string(profile_dir.join("config.toml"))?,
@@ -1346,6 +1349,23 @@ impl ProfileManager {
         profile_id: &str,
         input: ProfileInput,
     ) -> Result<ProfileSummary, AppError> {
+        self.update_profile_internal(profile_id, input, false)
+    }
+
+    pub fn update_profile_preserving_runtime_config(
+        &self,
+        profile_id: &str,
+        input: ProfileInput,
+    ) -> Result<ProfileSummary, AppError> {
+        self.update_profile_internal(profile_id, input, true)
+    }
+
+    fn update_profile_internal(
+        &self,
+        profile_id: &str,
+        input: ProfileInput,
+        preserve_runtime_config: bool,
+    ) -> Result<ProfileSummary, AppError> {
         let name = input.name.trim();
         if name.is_empty() {
             return Err(AppError::Message("Profile name cannot be empty.".into()));
@@ -1363,8 +1383,18 @@ impl ProfileManager {
         let is_active_profile = self
             .detect_active_profile()?
             .is_some_and(|profile| profile.id == profile_id);
+        let effective_config =
+            if preserve_runtime_config && is_active_profile && self.target_config_path().exists() {
+                merge_profile_managed_config(
+                    &fs::read_to_string(self.target_config_path())?,
+                    &input.auth_json,
+                    &normalized_config,
+                )?
+            } else {
+                normalized_config
+            };
         let next_auth_hash = auth_match_hash(&input.auth_json)?;
-        let next_config_hash = managed_config_hash(&input.auth_json, &normalized_config)?;
+        let next_config_hash = managed_config_hash(&input.auth_json, &effective_config)?;
         let preserved_codex_usage = if existing_metadata.auth_hash == next_auth_hash {
             existing_metadata.codex_usage.clone()
         } else {
@@ -1385,9 +1415,12 @@ impl ProfileManager {
             None
         };
 
-        fs::write(profile_dir.join("auth.json"), &input.auth_json)?;
-        fs::write(profile_dir.join("config.toml"), &normalized_config)?;
-        self.register_model_provider_from_profile(&input.auth_json, &normalized_config, name)?;
+        atomic_write_sensitive(&profile_dir.join("auth.json"), input.auth_json.as_bytes())?;
+        atomic_write_sensitive(
+            &profile_dir.join("config.toml"),
+            effective_config.as_bytes(),
+        )?;
+        self.register_model_provider_from_profile(&input.auth_json, &effective_config, name)?;
 
         let metadata = self.compose_profile_metadata(
             existing_metadata.id,
@@ -1409,8 +1442,8 @@ impl ProfileManager {
         self.write_profile_metadata(&profile_dir, &metadata)?;
         if is_active_profile {
             fs::create_dir_all(&self.target_dir)?;
-            fs::write(self.target_auth_path(), &input.auth_json)?;
-            fs::write(self.target_config_path(), &normalized_config)?;
+            atomic_write_sensitive(&self.target_auth_path(), input.auth_json.as_bytes())?;
+            atomic_write_sensitive(&self.target_config_path(), effective_config.as_bytes())?;
             self.persist_target_marker(TargetMarkerFile {
                 profile_id: metadata.id.clone(),
                 auth_hash: metadata.auth_hash.clone(),
@@ -1505,7 +1538,7 @@ impl ProfileManager {
             let profile =
                 if let Some(existing) = self.find_profile_metadata_by_remote_id(&detail.id)? {
                     updated += 1;
-                    self.update_profile(&existing.id, payload)?
+                    self.update_profile_preserving_runtime_config(&existing.id, payload)?
                 } else {
                     imported += 1;
                     self.import_remote_profile(&detail.id, payload)?
@@ -1622,8 +1655,8 @@ impl ProfileManager {
         let next_session_model_provider =
             session_model_provider_key_from_config_toml(&next_config_toml)?;
 
-        fs::write(self.target_auth_path(), &next_auth_json)?;
-        fs::write(self.target_config_path(), &next_config_toml)?;
+        atomic_write_sensitive(&self.target_auth_path(), next_auth_json.as_bytes())?;
+        atomic_write_sensitive(&self.target_config_path(), next_config_toml.as_bytes())?;
         let _ = self.repair_codex_sessions_internal(false, false)?;
         let _ = self.repair_session_model_provider_for_switch(&next_session_model_provider)?;
         self.sync_runtime_state_to_profile(profile_id, &next_auth_json, &next_config_toml)?;
@@ -2155,8 +2188,11 @@ impl ProfileManager {
             None
         };
 
-        fs::write(profile_dir.join("auth.json"), auth_json)?;
-        fs::write(profile_dir.join("config.toml"), &normalized_config)?;
+        atomic_write_sensitive(&profile_dir.join("auth.json"), auth_json.as_bytes())?;
+        atomic_write_sensitive(
+            &profile_dir.join("config.toml"),
+            normalized_config.as_bytes(),
+        )?;
         self.register_model_provider_from_profile(
             auth_json,
             &normalized_config,

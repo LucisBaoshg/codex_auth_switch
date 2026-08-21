@@ -357,8 +357,8 @@ export function renderEditorPageShell(input: EditorPageShellInput): string {
           </button>
           <div>
             <p class="eyebrow" style="display: none;">Profile Detail</p>
-            <h1 style="margin-top: 4px;">${input.title}</h1>
-            <p class="page-copy" style="display: none;">${input.subtitle}</p>
+            <h1 style="margin-top: 4px;">${escapeHtml(input.title)}</h1>
+            <p class="page-copy" style="display: none;">${escapeHtml(input.subtitle)}</p>
           </div>
         </div>
       </header>

@@ -13,11 +13,12 @@ test("allows shared auth write back when the local remote version matches the cl
   };
   const remote = {
     id: "remote-1",
+    ownerDingUserId: "Ding-A",
     contentVersion: 3,
     contentHash: "hash-v3",
   };
 
-  expect(shouldWriteBackSharedAuth(local, remote)).toBe(true);
+  expect(shouldWriteBackSharedAuth(local, remote, { dingUserId: "Ding-A" })).toBe(true);
   expect(sharedAuthWriteBackBase(local, remote)).toEqual({
     baseContentVersion: 3,
     baseContentHash: "hash-v3",
@@ -33,9 +34,11 @@ test("skips shared auth write back when the cloud version is newer than the loca
     },
     {
       id: "remote-1",
+      ownerDingUserId: "Ding-A",
       contentVersion: 3,
       contentHash: "hash-v3",
     },
+    { dingUserId: "Ding-A" },
   )).toBe(false);
 });
 
@@ -48,9 +51,28 @@ test("skips shared auth write back when same-version hashes disagree", () => {
     },
     {
       id: "remote-1",
+      ownerDingUserId: "Ding-A",
       contentVersion: 3,
       contentHash: "cloud-hash-v3",
     },
+    { dingUserId: "Ding-A" },
+  )).toBe(false);
+});
+
+test("skips shared auth write back for recipients who do not own the cloud profile", () => {
+  expect(shouldWriteBackSharedAuth(
+    {
+      remoteProfileId: "remote-1",
+      remoteContentVersion: 3,
+      remoteContentHash: "hash-v3",
+    },
+    {
+      id: "remote-1",
+      ownerDingUserId: "Ding-A",
+      contentVersion: 3,
+      contentHash: "hash-v3",
+    },
+    { dingUserId: "Ding-B" },
   )).toBe(false);
 });
 

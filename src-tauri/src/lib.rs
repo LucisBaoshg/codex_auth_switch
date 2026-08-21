@@ -160,6 +160,19 @@ fn update_profile(
 }
 
 #[tauri::command]
+fn update_profile_from_cloud(
+    app: AppHandle,
+    profile_id: String,
+    payload: ProfileInput,
+) -> Result<AppSnapshot, String> {
+    let manager = manager_from_app(&app)?;
+    manager
+        .update_profile_preserving_runtime_config(&profile_id, payload)
+        .map_err(|error| error.to_string())?;
+    snapshot_and_sync(&app, &manager)
+}
+
+#[tauri::command]
 fn set_profile_remote_metadata(
     app: AppHandle,
     profile_id: String,
@@ -781,6 +794,7 @@ pub fn run() {
             get_target_profile_input,
             get_profile_document,
             update_profile,
+            update_profile_from_cloud,
             set_profile_remote_metadata,
             delete_network_profile,
             network_request,

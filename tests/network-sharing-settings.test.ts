@@ -242,7 +242,7 @@ test("starts DingTalk SSO login from the cloud sharing settings", async () => {
       if (args?.method === "POST" && args.url === "https://share.example.com/codex/api/auth/desktop-login") {
         return {
           status: 201,
-          body: JSON.stringify({ id: "desktop-login-1", pollToken: "poll-token-1" }),
+          body: JSON.stringify({ id: "desktop-login-1", pollToken: "poll-token-1", userCode: "ABCD-EFGH" }),
         };
       }
       if (
@@ -280,7 +280,7 @@ test("starts DingTalk SSO login from the cloud sharing settings", async () => {
   await waitForStoredNetworkToken("cas_auto_token");
 
   expect(invokeMock).toHaveBeenCalledWith("open_external_url", {
-    url: "https://share.example.com/codex/api/auth/login?returnTo=%2Fprofiles&desktopLoginId=desktop-login-1",
+    url: "https://share.example.com/codex/api/auth/login?returnTo=%2Fdesktop-login%2Fdesktop-login-1",
   });
   expect(invokeMock).toHaveBeenCalledWith("network_request", {
     method: "POST",
@@ -312,7 +312,7 @@ test("migrates the saved Tapcash cloud sharing URL before starting SSO login", a
       ) {
         return {
           status: 201,
-          body: JSON.stringify({ id: "desktop-login-2", pollToken: "poll-token-2" }),
+          body: JSON.stringify({ id: "desktop-login-2", pollToken: "poll-token-2", userCode: "JKLM-NPQR" }),
         };
       }
       if (
@@ -359,7 +359,7 @@ test("migrates the saved Tapcash cloud sharing URL before starting SSO login", a
   await waitForStoredNetworkToken("cas_auto_token");
 
   expect(invokeMock).toHaveBeenCalledWith("open_external_url", {
-    url: "https://codex-helper.ite.tool4seller.com/codex/api/auth/login?returnTo=%2Fprofiles&desktopLoginId=desktop-login-2",
+    url: "https://codex-helper.ite.tool4seller.com/codex/api/auth/login?returnTo=%2Fdesktop-login%2Fdesktop-login-2",
   });
   expect(invokeMock).toHaveBeenCalledWith("network_request", {
     method: "POST",
@@ -381,7 +381,7 @@ test("shows DingTalk SSO login inside the sharing center", async () => {
       if (args?.method === "POST" && args.url === "https://share.example.com/codex/api/auth/desktop-login") {
         return {
           status: 201,
-          body: JSON.stringify({ id: "desktop-login-3", pollToken: "poll-token-3" }),
+          body: JSON.stringify({ id: "desktop-login-3", pollToken: "poll-token-3", userCode: "STUV-WXYZ" }),
         };
       }
       if (

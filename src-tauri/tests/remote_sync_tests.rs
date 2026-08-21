@@ -1,6 +1,7 @@
 use codex_auth_switch_lib::core::{ProfileInput, ProfileManager};
 use serde_json::json;
 use std::collections::HashMap;
+use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::{
@@ -134,7 +135,7 @@ impl Drop for TestServer {
 
 #[test]
 fn sync_remote_profiles_imports_and_updates_existing_remote_profiles() {
-    let (_app_dir, _target_dir, manager) = temp_manager();
+    let (_app_dir, target_dir, mut manager) = temp_manager();
     let server = TestServer::start();
 
     server.set_json(
@@ -206,6 +207,18 @@ fn sync_remote_profiles_imports_and_updates_existing_remote_profiles() {
     assert!(imported_document.remote_updated_at.is_some());
     assert!(imported_document.auth_json.contains("sk-remote-1"));
 
+    manager
+        .switch_profile(&imported[0].id)
+        .expect("activate imported remote profile");
+    fs::write(
+        target_dir.path().join("config.toml"),
+        format!(
+            "{}\n[mcp_servers.local-only]\ncommand = \"local-mcp\"\n",
+            official_config_toml("gpt-5.4")
+        ),
+    )
+    .expect("add local runtime MCP config");
+
     server.set_json(
         "/profiles/remote-1",
         json!({
@@ -263,6 +276,17 @@ fn sync_remote_profiles_imports_and_updates_existing_remote_profiles() {
     );
     assert!(updated_document.auth_json.contains("sk-remote-2"));
     assert!(updated_document.config_toml.contains("gpt-5.5"));
+    assert!(updated_document
+        .config_toml
+        .contains("[mcp_servers.local-only]"));
+    assert!(updated_document
+        .config_toml
+        .contains("command = \"local-mcp\""));
+
+    let active_config = fs::read_to_string(target_dir.path().join("config.toml"))
+        .expect("read active config after remote sync");
+    assert!(active_config.contains("gpt-5.5"));
+    assert!(active_config.contains("[mcp_servers.local-only]"));
 }
 
 #[test]

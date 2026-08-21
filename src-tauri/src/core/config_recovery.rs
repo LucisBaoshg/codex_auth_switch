@@ -42,9 +42,22 @@ fn pending_notices_path(app_data_dir: &Path) -> PathBuf {
 }
 
 pub(super) fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), AppError> {
+    let contents = serde_json::to_vec_pretty(value)?;
+    atomic_write_bytes(path, &contents, None)
+}
+
+pub(super) fn atomic_write_sensitive(path: &Path, contents: &[u8]) -> Result<(), AppError> {
+    atomic_write_bytes(path, contents, Some(0o600))
+}
+
+fn atomic_write_bytes(
+    path: &Path,
+    contents: &[u8],
+    unix_mode: Option<u32>,
+) -> Result<(), AppError> {
     let parent = path.parent().ok_or_else(|| {
         AppError::Message(format!(
-            "Cannot write JSON without a parent directory: {}",
+            "Cannot write a file without a parent directory: {}",
             path.to_string_lossy()
         ))
     })?;
@@ -53,19 +66,25 @@ pub(super) fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<
     let file_name = path
         .file_name()
         .and_then(|value| value.to_str())
-        .unwrap_or("data.json");
+        .unwrap_or("data");
     let temp_path = parent.join(format!(".{file_name}.{}.tmp", Uuid::new_v4().simple()));
-    let contents = serde_json::to_vec_pretty(value)?;
-    let mut temp_file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&temp_path)?;
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    if let Some(mode) = unix_mode {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(mode);
+    }
+    #[cfg(not(unix))]
+    let _ = unix_mode;
+    let mut temp_file = options.open(&temp_path)?;
 
     if let Err(error) = (|| -> Result<(), AppError> {
-        temp_file.write_all(&contents)?;
+        temp_file.write_all(contents)?;
         temp_file.sync_all()?;
         drop(temp_file);
         replace_file(&temp_path, path)?;
+        sync_parent_directory(parent)?;
         Ok(())
     })() {
         let _ = fs::remove_file(&temp_path);
@@ -75,35 +94,23 @@ pub(super) fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
 fn replace_file(temp_path: &Path, target_path: &Path) -> Result<(), AppError> {
+    // Both paths live in the same directory. Rust uses rename(2) on Unix and
+    // MoveFileExW(..., MOVEFILE_REPLACE_EXISTING) on Windows, so readers see
+    // either the old complete file or the new complete file.
     fs::rename(temp_path, target_path)?;
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
-fn replace_file(temp_path: &Path, target_path: &Path) -> Result<(), AppError> {
-    if !target_path.exists() {
-        fs::rename(temp_path, target_path)?;
-        return Ok(());
-    }
+#[cfg(unix)]
+fn sync_parent_directory(parent: &Path) -> Result<(), AppError> {
+    fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
 
-    let backup_path =
-        target_path.with_extension(format!("replace-{}.bak", Uuid::new_v4().simple()));
-    fs::rename(target_path, &backup_path)?;
-    match fs::rename(temp_path, target_path) {
-        Ok(()) => {
-            // The replacement already succeeded. Antivirus or indexing software may
-            // temporarily hold the old file on Windows, so cleanup must not turn a
-            // successful state write into an application startup failure.
-            let _ = fs::remove_file(backup_path);
-            Ok(())
-        }
-        Err(error) => {
-            let _ = fs::rename(&backup_path, target_path);
-            Err(error.into())
-        }
-    }
+#[cfg(not(unix))]
+fn sync_parent_directory(_parent: &Path) -> Result<(), AppError> {
+    Ok(())
 }
 
 pub(super) fn merge_recovery_notices(
@@ -257,5 +264,72 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
         assert_eq!(value["targetDir"], "two");
         assert_eq!(std::fs::read_dir(app_dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn atomic_sensitive_write_uses_private_permissions_on_unix() {
+        let app_dir = TempDir::new().unwrap();
+        let target = app_dir.path().join("auth.json");
+
+        atomic_write_sensitive(&target, br#"{"auth_mode":"chatgpt"}"#).unwrap();
+
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            br#"{"auth_mode":"chatgpt"}"#
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn atomic_sensitive_replacement_never_exposes_partial_contents() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+
+        let app_dir = TempDir::new().unwrap();
+        let target = Arc::new(app_dir.path().join("auth.json"));
+        let first = vec![b'A'; 4_460];
+        let second = vec![b'B'; 4_460];
+        atomic_write_sensitive(&target, &first).unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let invalid_reads = Arc::new(AtomicUsize::new(0));
+        let mut readers = Vec::new();
+        for _ in 0..2 {
+            let target = Arc::clone(&target);
+            let stop = Arc::clone(&stop);
+            let invalid_reads = Arc::clone(&invalid_reads);
+            readers.push(thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    if let Ok(contents) = std::fs::read(target.as_path()) {
+                        let is_complete_first =
+                            contents.len() == 4_460 && contents.iter().all(|byte| *byte == b'A');
+                        let is_complete_second =
+                            contents.len() == 4_460 && contents.iter().all(|byte| *byte == b'B');
+                        if !is_complete_first && !is_complete_second {
+                            invalid_reads.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+            }));
+        }
+
+        for index in 0..250 {
+            let contents = if index % 2 == 0 { &second } else { &first };
+            atomic_write_sensitive(&target, contents).unwrap();
+        }
+        stop.store(true, Ordering::Relaxed);
+        for reader in readers {
+            reader.join().unwrap();
+        }
+
+        assert_eq!(invalid_reads.load(Ordering::Relaxed), 0);
     }
 }

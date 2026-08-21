@@ -84,4 +84,18 @@ describe("shared profile config display", () => {
     expect(sanitized).not.toContain("secret-project");
     expect(sanitized).not.toContain("service_tier");
   });
+
+  test("does not reinterpret assignments embedded in multiline strings", () => {
+    const sanitized = sanitizeSharedConfigToml([
+      'instructions = """',
+      'openai_base_url = "https://secret.example"',
+      'model = "secret-model"',
+      '"""',
+      'model = "gpt-5.5"',
+    ].join("\n"));
+
+    expect(sanitized).toBe('model = "gpt-5.5"');
+    expect(sanitized).not.toContain("secret.example");
+    expect(sanitized).not.toContain("secret-model");
+  });
 });

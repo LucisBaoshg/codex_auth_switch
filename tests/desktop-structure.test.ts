@@ -631,3 +631,17 @@ test("keeps bindEvents-only input binding helper in the desktop entrypoint", () 
   expect(mainTs).not.toContain('from "./form-bindings"');
   expect(mainTs).toContain("function bindInputValue");
 });
+
+test("restarts the desktop app after downloading and applying a shared profile", () => {
+  const mainTs = readProjectFile("src/main.ts");
+  const applyFlow = mainTs.match(
+    /async function downloadAndApplyNetworkProfile[\s\S]*?\n}\n\nasync function openEditorForNetworkProfile/,
+  )?.[0];
+
+  expect(applyFlow).toBeDefined();
+  expect(applyFlow).toContain('desktopInvoke<AppSnapshot>("switch_profile"');
+  expect(applyFlow).toContain('desktopInvoke("restart_codex")');
+  expect(applyFlow!.indexOf('desktopInvoke("restart_codex")')).toBeGreaterThan(
+    applyFlow!.indexOf('desktopInvoke<AppSnapshot>("switch_profile"'),
+  );
+});

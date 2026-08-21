@@ -3419,7 +3419,7 @@ test("prompts to update and restarts Codex when the active shared profile has a 
   invokeMock.mockImplementation(async (command: string, args?: unknown) => {
     if (command === "validate_profile_config_usage") return { status: "valid", kind: "officialOauth", message: null };
     if (command === "load_snapshot") return initialSnapshot;
-    if (command === "update_profile") {
+    if (command === "update_profile_from_cloud") {
       expect(args).toEqual({
         profileId: "local-shared-1",
         payload: {
@@ -3546,7 +3546,7 @@ test("prompts to update and restarts Codex when the active shared profile has a 
   await flushUi();
   await flushUi();
 
-  expect(invokeMock).toHaveBeenCalledWith("update_profile", expect.objectContaining({ profileId: "local-shared-1" }));
+  expect(invokeMock).toHaveBeenCalledWith("update_profile_from_cloud", expect.objectContaining({ profileId: "local-shared-1" }));
   expect(invokeMock).toHaveBeenCalledWith("set_profile_remote_metadata", expect.objectContaining({ profileId: "local-shared-1" }));
   expect(invokeMock).toHaveBeenCalledWith("switch_profile", { profileId: "local-shared-1" });
   expect(invokeMock).toHaveBeenCalledWith("restart_codex", undefined);
@@ -3662,7 +3662,7 @@ test("shows a stale shared profile version notice in local profile details and u
         readOnly: false,
       };
     }
-    if (command === "update_profile") {
+    if (command === "update_profile_from_cloud") {
       expect(args).toEqual({
         profileId: "local-shared-oauth",
         payload: {
@@ -3799,7 +3799,7 @@ test("shows a stale shared profile version notice in local profile details and u
   await flushUi();
   await flushUi();
 
-  expect(invokeMock).toHaveBeenCalledWith("update_profile", expect.objectContaining({
+  expect(invokeMock).toHaveBeenCalledWith("update_profile_from_cloud", expect.objectContaining({
     profileId: "local-shared-oauth",
   }));
   expect(invokeMock).toHaveBeenCalledWith("set_profile_remote_metadata", expect.objectContaining({
@@ -4021,7 +4021,7 @@ test("relinks a missing shared profile to the unique same-name cloud profile whe
         readOnly: false,
       };
     }
-    if (command === "update_profile") {
+    if (command === "update_profile_from_cloud") {
       expect(args).toEqual({
         profileId: "local-shared-oauth",
         payload: {
@@ -4406,7 +4406,7 @@ test("writes back refreshed shared auth on startup when the active target change
       return {
         ok: true,
         status: 200,
-        json: async () => ({ user: { dingUserId: "Ding-B", name: "Bob" } }),
+        json: async () => ({ user: { dingUserId: "Ding-A", name: "Alice" } }),
       };
     }
     if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles") {

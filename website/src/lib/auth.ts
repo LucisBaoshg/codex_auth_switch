@@ -3,6 +3,7 @@ import crypto from "crypto";
 import path from "path";
 import type { NextRequest } from "next/server";
 import { getDataDir } from "./data-paths";
+import { atomicWriteFile, ensureFile, withFileStoreLock } from "./file-store";
 import type { ProfilePrincipal } from "./profile-store";
 
 export const sessionCookieName = "codex_share_session";
@@ -23,6 +24,7 @@ type DesktopTokenRecord = {
 type DesktopLoginSessionRecord = {
   id: string;
   pollTokenHash: string;
+  userCode: string;
   createdAt: string;
   expiresAt: string;
   principal?: ProfilePrincipal;
@@ -80,11 +82,7 @@ export function hashDesktopToken(token: string) {
 
 async function ensureDesktopTokenStore() {
   await fs.mkdir(getDataDir(), { recursive: true });
-  try {
-    await fs.access(desktopTokensPath());
-  } catch {
-    await fs.writeFile(desktopTokensPath(), JSON.stringify([]));
-  }
+  await ensureFile(desktopTokensPath(), JSON.stringify([]));
 }
 
 async function readDesktopTokenRecords(): Promise<DesktopTokenRecord[]> {
@@ -95,16 +93,12 @@ async function readDesktopTokenRecords(): Promise<DesktopTokenRecord[]> {
 
 async function writeDesktopTokenRecords(records: DesktopTokenRecord[]) {
   await ensureDesktopTokenStore();
-  await fs.writeFile(desktopTokensPath(), JSON.stringify(records, null, 2));
+  await atomicWriteFile(desktopTokensPath(), JSON.stringify(records, null, 2));
 }
 
 async function ensureDesktopLoginSessionStore() {
   await fs.mkdir(getDataDir(), { recursive: true });
-  try {
-    await fs.access(desktopLoginSessionsPath());
-  } catch {
-    await fs.writeFile(desktopLoginSessionsPath(), JSON.stringify([]));
-  }
+  await ensureFile(desktopLoginSessionsPath(), JSON.stringify([]));
 }
 
 async function readDesktopLoginSessions(): Promise<DesktopLoginSessionRecord[]> {
@@ -115,89 +109,121 @@ async function readDesktopLoginSessions(): Promise<DesktopLoginSessionRecord[]> 
 
 async function writeDesktopLoginSessions(records: DesktopLoginSessionRecord[]) {
   await ensureDesktopLoginSessionStore();
-  await fs.writeFile(desktopLoginSessionsPath(), JSON.stringify(records, null, 2));
+  await atomicWriteFile(desktopLoginSessionsPath(), JSON.stringify(records, null, 2));
 }
 
 export async function createDesktopToken(principal: ProfilePrincipal, name = "Desktop client") {
-  const token = `cas_${crypto.randomBytes(32).toString("base64url")}`;
-  const now = new Date().toISOString();
-  const record: DesktopTokenRecord = {
-    id: crypto.randomUUID(),
-    name,
-    tokenHash: hashDesktopToken(token),
-    principal,
-    createdAt: now,
-  };
+  return withFileStoreLock(desktopTokensPath(), async () => {
+    const token = `cas_${crypto.randomBytes(32).toString("base64url")}`;
+    const now = new Date().toISOString();
+    const record: DesktopTokenRecord = {
+      id: crypto.randomUUID(),
+      name,
+      tokenHash: hashDesktopToken(token),
+      principal,
+      createdAt: now,
+    };
 
-  const records = await readDesktopTokenRecords();
-  records.unshift(record);
-  await writeDesktopTokenRecords(records);
+    const records = await readDesktopTokenRecords();
+    records.unshift(record);
+    await writeDesktopTokenRecords(records);
 
-  return { token, record: { ...record, tokenHash: undefined } };
+    return { token, record: { ...record, tokenHash: undefined } };
+  });
+}
+
+function createDesktopLoginUserCode() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = crypto.randomBytes(8);
+  const characters = Array.from(bytes, (byte) => alphabet[byte % alphabet.length]);
+  return `${characters.slice(0, 4).join("")}-${characters.slice(4).join("")}`;
 }
 
 export async function createDesktopLoginSession() {
-  const pollToken = crypto.randomBytes(32).toString("base64url");
-  const now = Date.now();
-  const record: DesktopLoginSessionRecord = {
-    id: crypto.randomUUID(),
-    pollTokenHash: hashDesktopToken(pollToken),
-    createdAt: new Date(now).toISOString(),
-    expiresAt: new Date(now + 10 * 60 * 1000).toISOString(),
-  };
+  return withFileStoreLock(desktopLoginSessionsPath(), async () => {
+    const pollToken = crypto.randomBytes(32).toString("base64url");
+    const now = Date.now();
+    const record: DesktopLoginSessionRecord = {
+      id: crypto.randomUUID(),
+      pollTokenHash: hashDesktopToken(pollToken),
+      userCode: createDesktopLoginUserCode(),
+      createdAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + 10 * 60 * 1000).toISOString(),
+    };
 
-  const records = (await readDesktopLoginSessions()).filter((candidate) => {
-    return !candidate.consumedAt && new Date(candidate.expiresAt).getTime() > now;
+    const records = (await readDesktopLoginSessions()).filter((candidate) => {
+      return !candidate.consumedAt && new Date(candidate.expiresAt).getTime() > now;
+    });
+    records.unshift(record);
+    await writeDesktopLoginSessions(records);
+    return { id: record.id, pollToken, userCode: record.userCode, expiresAt: record.expiresAt };
   });
-  records.unshift(record);
-  await writeDesktopLoginSessions(records);
-  return { id: record.id, pollToken, expiresAt: record.expiresAt };
+}
+
+export async function getDesktopLoginConfirmation(id: string) {
+  const records = await readDesktopLoginSessions();
+  const record = records.find((candidate) => candidate.id === id);
+  if (!record || record.consumedAt || new Date(record.expiresAt).getTime() <= Date.now()) return null;
+  return {
+    userCode: record.userCode,
+    expiresAt: record.expiresAt,
+    completed: Boolean(record.completedAt),
+  };
 }
 
 export async function completeDesktopLoginSession(id: string | undefined | null, principal: ProfilePrincipal) {
   if (!id) return false;
 
-  const records = await readDesktopLoginSessions();
-  const record = records.find((candidate) => candidate.id === id);
-  if (!record || record.consumedAt || new Date(record.expiresAt).getTime() <= Date.now()) return false;
-  if (!record.token) {
-    const { token } = await createDesktopToken(principal, "Desktop SSO login");
-    record.token = token;
-  }
-  record.principal = principal;
-  record.completedAt = new Date().toISOString();
-  await writeDesktopLoginSessions(records);
-  return true;
+  return withFileStoreLock(desktopLoginSessionsPath(), async () => {
+    const records = await readDesktopLoginSessions();
+    const record = records.find((candidate) => candidate.id === id);
+    if (!record || record.consumedAt || new Date(record.expiresAt).getTime() <= Date.now()) return false;
+    if (record.completedAt) {
+      return record.principal?.dingUserId === principal.dingUserId;
+    }
+    if (!record.token) {
+      const { token } = await createDesktopToken(principal, "Desktop SSO login");
+      record.token = token;
+    }
+    record.principal = principal;
+    record.completedAt = new Date().toISOString();
+    await writeDesktopLoginSessions(records);
+    return true;
+  });
 }
 
 export async function consumeDesktopLoginToken(id: string, pollToken: string) {
-  const records = await readDesktopLoginSessions();
-  const record = records.find((candidate) => candidate.id === id);
-  if (
-    !record ||
-    record.consumedAt ||
-    record.pollTokenHash !== hashDesktopToken(pollToken) ||
-    new Date(record.expiresAt).getTime() <= Date.now() ||
-    !record.token ||
-    !record.principal
-  ) {
-    return null;
-  }
+  return withFileStoreLock(desktopLoginSessionsPath(), async () => {
+    const records = await readDesktopLoginSessions();
+    const record = records.find((candidate) => candidate.id === id);
+    if (
+      !record ||
+      record.consumedAt ||
+      record.pollTokenHash !== hashDesktopToken(pollToken) ||
+      new Date(record.expiresAt).getTime() <= Date.now() ||
+      !record.token ||
+      !record.principal
+    ) {
+      return null;
+    }
 
-  record.consumedAt = new Date().toISOString();
-  await writeDesktopLoginSessions(records);
-  return { token: record.token, principal: record.principal };
+    record.consumedAt = new Date().toISOString();
+    await writeDesktopLoginSessions(records);
+    return { token: record.token, principal: record.principal };
+  });
 }
 
 export async function principalFromDesktopToken(token: string): Promise<ProfilePrincipal | null> {
-  const tokenHash = hashDesktopToken(token.trim());
-  const records = await readDesktopTokenRecords();
-  const index = records.findIndex((record) => record.tokenHash === tokenHash);
-  if (index === -1) return null;
+  return withFileStoreLock(desktopTokensPath(), async () => {
+    const tokenHash = hashDesktopToken(token.trim());
+    const records = await readDesktopTokenRecords();
+    const index = records.findIndex((record) => record.tokenHash === tokenHash);
+    if (index === -1) return null;
 
-  records[index].lastUsedAt = new Date().toISOString();
-  await writeDesktopTokenRecords(records);
-  return records[index].principal;
+    records[index].lastUsedAt = new Date().toISOString();
+    await writeDesktopTokenRecords(records);
+    return records[index].principal;
+  });
 }
 
 export async function principalFromRequest(request: NextRequest): Promise<ProfilePrincipal | null> {

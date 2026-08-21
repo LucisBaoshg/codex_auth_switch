@@ -1,6 +1,7 @@
 import { promises as fs } from "fs";
 import path from "path";
 import { getDataDir } from "./data-paths";
+import { atomicWriteFile, ensureFile, withFileStoreLock } from "./file-store";
 import type { ProfilePrincipal, ProfileVisibility } from "./profile-store";
 
 export type KnownShareUser = {
@@ -29,11 +30,7 @@ function knownUsersFilePath() {
 
 async function ensureKnownUserStore() {
   await fs.mkdir(getDataDir(), { recursive: true });
-  try {
-    await fs.access(knownUsersFilePath());
-  } catch {
-    await fs.writeFile(knownUsersFilePath(), JSON.stringify([]));
-  }
+  await ensureFile(knownUsersFilePath(), JSON.stringify([]));
 }
 
 export async function readKnownUsers(): Promise<KnownShareUser[]> {
@@ -44,7 +41,7 @@ export async function readKnownUsers(): Promise<KnownShareUser[]> {
 
 async function writeKnownUsers(users: KnownShareUser[]) {
   await ensureKnownUserStore();
-  await fs.writeFile(knownUsersFilePath(), JSON.stringify(users, null, 2));
+  await atomicWriteFile(knownUsersFilePath(), JSON.stringify(users, null, 2));
 }
 
 function userLabel(user: Pick<KnownShareUser, "name" | "mobile" | "jobNumber" | "dingUserId">) {
@@ -92,8 +89,10 @@ export function upsertKnownUser(
 }
 
 export async function recordKnownUser(principal: ProfilePrincipal) {
-  const users = await readKnownUsers();
-  await writeKnownUsers(upsertKnownUser(users, principal));
+  await withFileStoreLock(knownUsersFilePath(), async () => {
+    const users = await readKnownUsers();
+    await writeKnownUsers(upsertKnownUser(users, principal));
+  });
 }
 
 function canonicalKnownDingUserIds(users: KnownShareUser[]) {

@@ -1225,6 +1225,53 @@ fn update_active_profile_rewrites_live_target_files() {
 }
 
 #[test]
+fn update_active_profile_from_cloud_preserves_local_mcp_config() {
+    let (_app_dir, target_dir, mut manager) = temp_manager();
+
+    let profile = manager
+        .import_profile(ProfileInput {
+            name: "Shared OAuth".into(),
+            notes: "before cloud update".into(),
+            auth_json: oauth_auth_json("before@example.com", "user-before", "acct-before"),
+            config_toml: official_config_toml("gpt-5"),
+        })
+        .expect("import");
+
+    manager
+        .switch_profile(&profile.id)
+        .expect("switch active profile");
+
+    manager
+        .update_profile_preserving_runtime_config(
+            &profile.id,
+            ProfileInput {
+                name: "Shared OAuth".into(),
+                notes: "after cloud update".into(),
+                auth_json: oauth_auth_json("after@example.com", "user-after", "acct-after"),
+                config_toml: r#"model = "gpt-5.5"
+model_reasoning_effort = "high"
+"#
+                .into(),
+            },
+        )
+        .expect("update active profile from cloud");
+
+    let live_config =
+        fs::read_to_string(target_dir.path().join("config.toml")).expect("read live config");
+    assert!(live_config.contains("model = \"gpt-5.5\""));
+    assert!(live_config.contains("model_reasoning_effort = \"high\""));
+    assert!(live_config.contains("[mcp_servers.playwright]"));
+    assert!(live_config.contains("[projects.\"/tmp/demo\"]"));
+    assert!(live_config.contains("multi_agent = true"));
+
+    let document = manager
+        .get_profile_document(&profile.id)
+        .expect("reload active document");
+    assert!(!document.has_target_changes);
+    assert!(document.config_toml.contains("[mcp_servers.playwright]"));
+}
+
+#[test]
 fn switch_profile_creates_backup_and_updates_target_files() {
     let (app_dir, target_dir, mut manager) = temp_manager();
 
@@ -2671,11 +2718,11 @@ fn fix_session_database_preserves_existing_session_title_when_thread_title_is_bl
 }
 
 #[test]
-fn restart_codex_script_targets_codex_app_on_macos() {
+fn restart_codex_script_targets_current_bundle_id_on_macos() {
     #[cfg(target_os = "macos")]
     {
         let script = restart_codex_script().expect("script should exist on macOS");
-        assert!(script.contains("application \"Codex\""));
+        assert!(script.contains("application id \"com.openai.codex\""));
         assert!(script.contains("quit"));
     }
 
@@ -2690,7 +2737,7 @@ fn restart_codex_script_remains_plain_restart_without_pet_overlay_state() {
     #[cfg(target_os = "macos")]
     {
         let script = restart_codex_script().expect("script should exist on macOS");
-        assert!(script.contains("application \"Codex\""));
+        assert!(script.contains("application id \"com.openai.codex\""));
         assert!(script.contains("quit"));
         assert!(!script.contains("electron-avatar-overlay-open"));
     }
@@ -2706,14 +2753,27 @@ fn restart_codex_has_cross_platform_process_plan() {
     let macos = codex_restart_plan_for_platform(CodexRestartPlatform::Macos);
     assert_eq!(macos.quit_command.program, "osascript");
     assert_eq!(macos.open_command.program, "open");
+    assert_eq!(macos.open_command.args, vec!["-b", "com.openai.codex"]);
 
     let windows = codex_restart_plan_for_platform(CodexRestartPlatform::Windows);
     assert_eq!(windows.quit_command.program, "powershell.exe");
     assert_eq!(windows.open_command.program, "powershell.exe");
+    let windows_quit = windows.quit_command.args.join("\n");
+    let windows_open = windows.open_command.args.join("\n");
+    assert!(windows_quit.contains("'ChatGPT', 'Codex'"));
+    assert!(windows_open.contains("ChatGPT\\ChatGPT.exe"));
+    assert!(windows_open.contains("${env:ProgramFiles(x86)}\\ChatGPT\\ChatGPT.exe"));
+    assert!(windows_open.contains("foreach ($candidate in @("));
+    assert!(!windows_open.contains("$candidates[0]"));
+    assert!(windows_open.contains("Get-StartApps"));
+    assert!(windows_open.contains("Get-Command Get-StartApps"));
+    assert!(windows_open.contains("-like '*ChatGPT*'"));
 
     let linux = codex_restart_plan_for_platform(CodexRestartPlatform::Linux);
     assert_eq!(linux.quit_command.program, "sh");
     assert_eq!(linux.open_command.program, "sh");
+    assert!(linux.quit_command.args.join("\n").contains("ChatGPT"));
+    assert!(linux.open_command.args.join("\n").contains("chatgpt"));
 }
 
 #[test]
