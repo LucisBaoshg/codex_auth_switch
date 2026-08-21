@@ -634,9 +634,9 @@ test("keeps bindEvents-only input binding helper in the desktop entrypoint", () 
 
 test("restarts the desktop app after downloading and applying a shared profile", () => {
   const mainTs = readProjectFile("src/main.ts");
-  const applyFlow = mainTs.match(
-    /async function downloadAndApplyNetworkProfile[\s\S]*?\n}\n\nasync function openEditorForNetworkProfile/,
-  )?.[0];
+  const start = mainTs.indexOf("async function downloadAndApplyNetworkProfile");
+  const end = mainTs.indexOf("async function openEditorForNetworkProfile", start);
+  const applyFlow = start >= 0 && end > start ? mainTs.slice(start, end) : undefined;
 
   expect(applyFlow).toBeDefined();
   expect(applyFlow).toContain('desktopInvoke<AppSnapshot>("switch_profile"');
