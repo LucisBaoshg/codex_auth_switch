@@ -9,8 +9,15 @@ type Confirmation = {
   completed: boolean;
 };
 
-export default function DesktopLoginConfirmationPage({ params }: { params: Promise<{ id: string }> }) {
+export default function DesktopLoginConfirmationPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>;
+  searchParams: Promise<{ legacy?: string | string[] }>;
+}) {
   const { id } = use(params);
+  const legacy = use(searchParams).legacy === "1";
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [loading, setLoading] = useState(true);
   const [approving, setApproving] = useState(false);
@@ -55,10 +62,19 @@ export default function DesktopLoginConfirmationPage({ params }: { params: Promi
         {loading ? <p className="mt-6 text-slate-300">正在读取登录请求…</p> : null}
         {confirmation ? (
           <>
-            <p className="mt-5 text-slate-300">请确认桌面应用中显示的是以下验证码。若你没有主动登录，请关闭本页。</p>
+            {legacy ? (
+              <p className="mt-5 rounded-xl bg-amber-950 px-4 py-3 text-amber-200">
+                检测到旧版桌面客户端，无法在应用内显示验证码。仅当你刚刚在自己的桌面应用中主动点击了“钉钉 SSO 登录”时才允许登录；建议尽快升级客户端。
+              </p>
+            ) : (
+              <p className="mt-5 text-slate-300">请确认桌面应用中显示的是以下验证码。若你没有主动登录，请关闭本页。</p>
+            )}
             <div className="mt-6 rounded-2xl bg-slate-950 px-6 py-5 text-center font-mono text-3xl font-bold tracking-[0.2em] text-indigo-300">
               {confirmation.userCode}
             </div>
+            {legacy ? (
+              <p className="mt-3 text-center text-xs text-amber-300">旧版客户端不能比对此验证码，本次授权需由你在网页中明确确认。</p>
+            ) : null}
             <p className="mt-3 text-center text-xs text-slate-500">
               有效期至 {new Date(confirmation.expiresAt).toLocaleString("zh-CN")}
             </p>
@@ -71,7 +87,7 @@ export default function DesktopLoginConfirmationPage({ params }: { params: Promi
                 disabled={approving}
                 className="mt-6 w-full rounded-xl bg-indigo-600 px-5 py-3 font-semibold hover:bg-indigo-500 disabled:opacity-60"
               >
-                {approving ? "正在确认…" : "验证码一致，允许登录"}
+                {approving ? "正在确认…" : legacy ? "这是我刚刚发起的登录，允许登录" : "验证码一致，允许登录"}
               </button>
             )}
           </>

@@ -8,6 +8,7 @@ import {
   secureCookiesForRedirectUri,
 } from "../src/lib/auth";
 import { POST as confirmDesktopLogin } from "../src/app/api/auth/desktop-login/[id]/confirm/route";
+import { GET as startSsoLogin } from "../src/app/api/auth/login/route";
 import { decodeReturnTo } from "../src/app/api/auth/callback/route";
 import { NextRequest } from "next/server";
 
@@ -77,6 +78,50 @@ describe("desktop login sessions", () => {
     expect(completed?.token).toMatch(/^cas_/);
     expect(completed?.principal.name).toBe("Alice");
     await expect(consumeDesktopLoginToken(session.id, session.pollToken)).resolves.toBeNull();
+  });
+
+  test("routes legacy desktop clients through the explicit confirmation page", async () => {
+    const dataDir = await import("node:fs/promises").then(async (fs) => {
+      const os = await import("node:os");
+      const path = await import("node:path");
+      return fs.mkdtemp(path.join(os.tmpdir(), "codex-auth-legacy-test-"));
+    });
+    process.env.CODEX_PROFILE_DATA_DIR = dataDir;
+    process.env.SSO_CLIENT_ID = "client-test";
+    process.env.SSO_CLIENT_SECRET = "secret-test";
+    process.env.SSO_BASE_URL = "https://sso.example.com";
+    process.env.SSO_REDIRECT_URI = "https://share.example.com/codex/api/auth/callback";
+
+    const session = await createDesktopLoginSession();
+    const response = await startSsoLogin(
+      new NextRequest(
+        `https://share.example.com/codex/api/auth/login?returnTo=%2Fprofiles&desktopLoginId=${session.id}`,
+      ),
+    );
+
+    expect(response.status).toBe(307);
+    const location = response.headers.get("location");
+    expect(location).not.toBeNull();
+    const state = new URL(location!).searchParams.get("state");
+    expect(state).not.toBeNull();
+    expect(decodeReturnTo(state!)).toBe(`/desktop-login/${session.id}?legacy=1`);
+    await expect(consumeDesktopLoginToken(session.id, session.pollToken)).resolves.toBeNull();
+  });
+
+  test("rejects an unknown legacy desktop login session", async () => {
+    process.env.SSO_CLIENT_ID = "client-test";
+    process.env.SSO_CLIENT_SECRET = "secret-test";
+    process.env.SSO_BASE_URL = "https://sso.example.com";
+    process.env.SSO_REDIRECT_URI = "https://share.example.com/codex/api/auth/callback";
+
+    const response = await startSsoLogin(
+      new NextRequest(
+        "https://share.example.com/codex/api/auth/login?desktopLoginId=00000000-0000-4000-8000-000000000000",
+      ),
+    );
+
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toEqual({ error: "Desktop login session not found or expired" });
   });
 });
 
