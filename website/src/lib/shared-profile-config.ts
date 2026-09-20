@@ -128,8 +128,31 @@ function splitTomlStatements(configToml: string): string[] {
   return statements.filter(Boolean);
 }
 
+// A validated comment carries portable model choices. Machine-local catalog paths stay private.
+function sanitizeModelCatalogComment(statement: string): string | null {
+  const prefix = "# codex-auth-switch-models: ";
+  if (!statement.startsWith(prefix) || statement.length > 100_000) return null;
+  try {
+    const settings = JSON.parse(statement.slice(prefix.length));
+    if (settings?.version !== 1 || !Array.isArray(settings.models) || settings.models.length < 1 || settings.models.length > 100) return null;
+    const ids = new Set<string>();
+    const models = settings.models.map((model: Record<string, unknown>) => {
+      const { id, display_name, reasoning_effort, context_window } = model;
+      if (typeof id !== "string" || !id || id !== id.trim() || id.length > 256 || /[\x00-\x1f\x7f]/.test(id) || ids.has(id)
+        || typeof display_name !== "string" || !display_name.trim() || display_name.length > 256
+        || typeof reasoning_effort !== "string" || !["none", "minimal", "low", "medium", "high", "xhigh"].includes(reasoning_effort)
+        || typeof context_window !== "number" || !Number.isInteger(context_window) || context_window < 4096 || context_window > 2_000_000) throw new Error("Invalid model settings");
+      ids.add(id);
+      return { id, display_name, reasoning_effort, context_window };
+    });
+    return prefix + JSON.stringify({ version: 1, models });
+  } catch { return null; }
+}
+
 export function sanitizeSharedConfigToml(configToml: string): string {
   const kept: string[] = [];
+  const catalogComment = sanitizeModelCatalogComment(configToml.split("\n", 1)[0].trim());
+  if (catalogComment) kept.push(catalogComment);
   let includeCurrentTable = false;
 
   for (const statement of splitTomlStatements(configToml)) {

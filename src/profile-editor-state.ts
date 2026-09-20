@@ -1,3 +1,4 @@
+import type { DiscoveredModel } from "./third-party-models";
 import type { ShareVisibility } from "./network-profile-utils";
 import type { ProfileDocument } from "./desktop-types";
 import type { ProfileInput, ThirdPartyConfigDraft } from "./profile-input-builders";
@@ -24,6 +25,12 @@ export type EditorState = {
   source: "local" | "network";
   newTab?: "manual-delta" | "manual-full";
   detailTab?: "overview" | "config";
+  managedThirdParty?: boolean;
+  discoveredModels?: DiscoveredModel[];
+  modelsLoading?: boolean;
+  modelSearch?: string;
+  manualModelId?: string;
+  modelDiscoveryMessage?: string;
 };
 
 export type LocalShareDraft = {
@@ -63,7 +70,8 @@ theme = "system"
       provider: "",
       baseUrl: "",
       apiKey: "",
-      model: "gpt-5.5",
+      model: "",
+      models: [],
     },
     createdAt: null,
     updatedAt: null,
@@ -137,7 +145,8 @@ export function createEditorFromDocument(document: ProfileDocument): EditorState
     remoteContentVersion: document.remoteContentVersion ?? null,
     remoteContentHash: document.remoteContentHash ?? null,
     remoteUpdatedAt: document.remoteUpdatedAt ?? null,
-    thirdParty: template.thirdParty,
+    thirdParty: document.thirdPartyDraft ?? template.thirdParty,
+    managedThirdParty: Boolean(document.thirdPartyDraft),
     createdAt: document.createdAt,
     updatedAt: document.updatedAt,
     loadedFromTarget: document.loadedFromTarget,

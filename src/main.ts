@@ -1,3 +1,4 @@
+import { newThirdPartyModel, normalizeThirdPartyBaseUrl, type DiscoveredModel } from "./third-party-models";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
@@ -306,6 +307,15 @@ async function symbioticThirdPartyConfigInputFromDraft(
 }
 
 async function buildEditorProfileInput(): Promise<ProfileInput> {
+  if (state.editor.managedThirdParty) {
+    const input = standaloneThirdPartyConfigInputFromDraft(state.editor);
+    if (isTauriRuntime) {
+      input.configToml = await desktopInvoke<string>("merge_standalone_model_config", {
+        existing: state.editor.configToml, generated: input.configToml,
+      });
+    }
+    return input;
+  }
   if (state.editor.mode === "new") {
     if (state.editor.newTab === "manual-full") {
       return {
@@ -327,6 +337,51 @@ async function buildEditorProfileInput(): Promise<ProfileInput> {
     authJson: state.editor.authJson,
     configToml: state.editor.configToml,
   };
+}
+
+async function discoverThirdPartyModels(): Promise<void> {
+  const editor = state.editor;
+  if (editor.readOnly || editor.modelsLoading) return;
+  let baseUrl: string;
+  try { baseUrl = normalizeThirdPartyBaseUrl(editor.thirdParty.baseUrl); }
+  catch (error) { setFlash("error", formatErrorMessage(error)); render(); return; }
+  const apiKey = editor.thirdParty.apiKey.trim();
+  if (!apiKey) { setFlash("error", "请先填写 API 密钥。"); render(); return; }
+  const requestedUrl = editor.thirdParty.baseUrl;
+  editor.modelsLoading = true;
+  editor.modelDiscoveryMessage = "正在读取接口提供的模型名称…";
+  render();
+  try {
+    if (!isTauriRuntime) throw new Error("请在桌面应用中获取模型列表。");
+    const models = await desktopInvoke<DiscoveredModel[]>("discover_third_party_models", { baseUrl, apiKey });
+    if (state.editor !== editor || editor.thirdParty.baseUrl !== requestedUrl || editor.thirdParty.apiKey.trim() !== apiKey) return;
+    editor.thirdParty.baseUrl = baseUrl;
+    editor.discoveredModels = models;
+    editor.modelDiscoveryMessage = models.length ? `获取到 ${models.length} 个模型，请勾选需要的模型。` : "接口返回空列表，可手动添加模型。";
+  } catch (error) {
+    if (state.editor === editor) editor.modelDiscoveryMessage = formatErrorMessage(error);
+  } finally {
+    editor.modelsLoading = false;
+    if (state.editor === editor) render();
+  }
+}
+
+function removeThirdPartyModel(id: string): void {
+  const draft = state.editor.thirdParty;
+  draft.models = (draft.models ?? []).filter((model) => model.id !== id);
+  if (draft.model === id) draft.model = draft.models[0]?.id ?? "";
+}
+
+function addThirdPartyModel(id: string, name = id): void {
+  id = id.trim();
+  const draft = state.editor.thirdParty;
+  if (!id || id.length > 256 || /[\x00-\x1f\x7f]/.test(id)) {
+    setFlash("error", "请填写有效的完整模型名称。"); return;
+  }
+  if (draft.models?.some((model) => model.id === id)) return;
+  if ((draft.models?.length ?? 0) >= 100) { setFlash("error", "最多选择 100 个模型。"); return; }
+  draft.models = [...(draft.models ?? []), newThirdPartyModel(id, name)];
+  if (!draft.model) draft.model = id;
 }
 
 function applyEditorDocument(document: ProfileDocument): void {
@@ -2769,6 +2824,8 @@ function bindEvents(): void {
 
   bindInputValue("#third-party-base-url", (value) => {
     state.editor.thirdParty.baseUrl = value;
+    state.editor.discoveredModels = [];
+    state.editor.modelDiscoveryMessage = "接口已修改，请重新获取列表并确认已选模型。";
   });
   bindInputValue("#third-party-provider", (value) => {
     state.editor.thirdParty.provider = value;
@@ -2779,6 +2836,29 @@ function bindEvents(): void {
   bindInputValue("#third-party-model", (value) => {
     state.editor.thirdParty.model = value;
   });
+  bindInputValue("#third-party-manual-model", (value) => { state.editor.manualModelId = value; });
+  bindInputValue("#third-party-model-search", (value) => {
+    state.editor.modelSearch = value;
+    document.querySelectorAll<HTMLElement>("[data-model-search]").forEach((row) => {
+      row.hidden = !row.dataset.modelSearch?.includes(value.toLowerCase());
+    });
+  });
+  document.querySelectorAll<HTMLInputElement>("[data-model-choice]").forEach((input) => input.addEventListener("change", () => {
+    const id = input.dataset.modelChoice!;
+    if (input.checked) addThirdPartyModel(id, state.editor.discoveredModels?.find((m) => m.id === id)?.display_name ?? id);
+    else removeThirdPartyModel(id);
+    render();
+  }));
+  for (const [attribute, field] of [["name", "display_name"], ["reasoning", "reasoning_effort"], ["context", "context_window"]] as const) {
+    document.querySelectorAll<HTMLInputElement | HTMLSelectElement>(`[data-model-${attribute}]`).forEach((input) => input.addEventListener("input", () => {
+      const index = Number(input.getAttribute(`data-model-${attribute}`));
+      const model = state.editor.thirdParty.models?.[index];
+      if (model) {
+        if (field === "context_window") model.context_window = Number(input.value);
+        else model[field] = input.value;
+      }
+    }));
+  }
   bindInputValue("#network-profiles-api", (value) => {
     state.networkSharing.profilesApi = value;
   });
@@ -3126,6 +3206,15 @@ function bindEvents(): void {
         await deleteProfile(button.dataset.id, button.dataset.name);
       } else if (action === "back-to-cards") {
         state.view = "cards";
+        render();
+      } else if (action === "discover-third-party-models") {
+        await discoverThirdPartyModels();
+      } else if (action === "add-third-party-model") {
+        addThirdPartyModel(state.editor.manualModelId ?? "");
+        state.editor.manualModelId = "";
+        render();
+      } else if (action === "remove-third-party-model" && button.dataset.modelId) {
+        removeThirdPartyModel(button.dataset.modelId);
         render();
       } else if (action === "editor-tab-delta") {
         state.editor.newTab = "manual-delta";

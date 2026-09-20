@@ -41,7 +41,7 @@ test("builds standalone third-party profile input from a draft", async () => {
   expect(JSON.parse(input.authJson)).toEqual({ OPENAI_API_KEY: "sk-test" });
   expect(input.configToml).toContain('openai_base_url = "https://api.example.com/v1"');
   expect(input.configToml).toContain('model = "gpt-test"');
-  expect(input.configToml).toContain("supports_websockets = false");
+  expect(input.configToml).not.toContain("supports_websockets");
 });
 
 test("keeps standalone validation errors in the builder", async () => {

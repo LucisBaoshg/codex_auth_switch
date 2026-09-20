@@ -168,7 +168,10 @@ test("creates new profiles from third-party api delta fields", async () => {
   setInput("#editor-name", "YLS Code");
   setInput("#third-party-base-url", "https://claudex.me/v1");
   setInput("#third-party-api-key", "sk-third-party");
-  setInput("#third-party-model", "gpt-5.5");
+  setInput("#third-party-manual-model", "gpt-5.5");
+  document.querySelector<HTMLButtonElement>('[data-action="add-third-party-model"]')!.click();
+  await flushUi();
+  expect(document.querySelector<HTMLSelectElement>("#third-party-model")?.value).toBe("gpt-5.5");
 
   document
     .querySelector<HTMLButtonElement>('[data-action="save-editor"]')
@@ -188,13 +191,12 @@ test("creates new profiles from third-party api delta fields", async () => {
   expect(payload.configToml).toContain('model_provider = "openai"');
   expect(payload.configToml).toContain('model = "gpt-5.5"');
   expect(payload.configToml).toContain('review_model = "gpt-5.5"');
-  expect(payload.configToml).toContain('model_reasoning_effort = "high"');
-  expect(payload.configToml).toContain('plan_mode_reasoning_effort = "xhigh"');
-  expect(payload.configToml).toContain('approval_policy = "never"');
-  expect(payload.configToml).toContain('sandbox_mode = "danger-full-access"');
-  expect(payload.configToml).toContain("supports_websockets = false");
-  expect(payload.configToml).toContain("[tui]");
-  expect(payload.configToml).toContain("[sandbox_workspace_write]");
+  expect(payload.configToml).toContain('model_reasoning_effort = "none"');
+  expect(payload.configToml).toContain("# codex-auth-switch-models: ");
+  expect(payload.configToml).not.toContain("approval_policy");
+  expect(payload.configToml).not.toContain("sandbox_mode");
+  expect(payload.configToml).not.toContain("plan_mode_reasoning_effort");
+  expect(payload.configToml).not.toContain("supports_websockets");
   expect(payload.configToml).not.toContain("[model_providers.");
 });
 
@@ -407,4 +409,49 @@ test("prompts official oauth login before creating a symbiotic profile when no o
   expect(document.querySelector<HTMLButtonElement>('[data-action="save-editor"]')?.disabled).toBe(
     true,
   );
+});
+
+test("discovers, filters, selects two models and saves their settings through the real editor", async () => {
+  const snapshot = { targetDir: "/tmp/test-codex", profiles: [], activeProfileId: null, codexUsageApiEnabled: true };
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "load_snapshot" || command === "import_profile") return snapshot;
+    if (command === "discover_third_party_models") return [
+      { id: "grok-4.6", display_name: "Grok 4.6" },
+      { id: "gemini-3.8-flash-high", display_name: "Gemini Flash" },
+    ];
+    throw new Error(`unexpected command: ${command}`);
+  });
+  await import("../src/main");
+  await flushUi();
+  document.querySelector<HTMLButtonElement>('[data-action="new-profile"]')!.click();
+  await flushUi();
+  const setInput = (selector: string, value: string) => {
+    const input = document.querySelector<HTMLInputElement>(selector)!;
+    expect(input).not.toBeNull();
+    input.value = value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  setInput("#editor-name", "服务器 20");
+  setInput("#third-party-base-url", "10.12.0.20:8317");
+  setInput("#third-party-api-key", "test-only");
+  document.querySelector<HTMLButtonElement>('[data-action="discover-third-party-models"]')!.click();
+  await flushUi();
+  await flushUi();
+  expect(invokeMock).toHaveBeenCalledWith("discover_third_party_models", { baseUrl: "http://10.12.0.20:8317/v1", apiKey: "test-only" });
+  for (const id of ["grok-4.6", "gemini-3.8-flash-high"]) {
+    document.querySelector<HTMLInputElement>(`[data-model-choice="${id}"]`)!.click();
+    await flushUi();
+  }
+  setInput("#third-party-model-search", "gemini");
+  expect(document.querySelectorAll('.third-party-model-choice:not([hidden])')).toHaveLength(1);
+  setInput('[data-model-context="1"]', "65536");
+  setInput("#third-party-model", "gemini-3.8-flash-high");
+  document.querySelector<HTMLButtonElement>('[data-action="save-editor"]')!.click();
+  await flushUi();
+  await flushUi();
+  const payload = invokeMock.mock.calls.find(([command]) => command === "import_profile")?.[1]?.payload;
+  expect(payload.configToml).toContain('model = "gemini-3.8-flash-high"');
+  expect(payload.configToml).toContain('"id":"grok-4.6"');
+  expect(payload.configToml).toContain('"context_window":65536');
+  expect(payload.configToml).not.toContain("test-only");
 });

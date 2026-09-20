@@ -1,3 +1,4 @@
+import type { ThirdPartyConfigDraft } from "./profile-input-builders";
 import type {
   CodexUsageSnapshot,
   ThirdPartyLatencySnapshot,
@@ -47,6 +48,7 @@ export type ProfileDocument = {
   updatedAt: string;
   authJson: string;
   configToml: string;
+  thirdPartyDraft?: ThirdPartyConfigDraft | null;
   loadedFromTarget: boolean;
   hasTargetChanges: boolean;
   readOnly?: boolean;

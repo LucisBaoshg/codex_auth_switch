@@ -14,7 +14,8 @@ test("creates the default manual profile editor state", async () => {
   expect(state.mode).toBe("new");
   expect(state.profileId).toBeNull();
   expect(state.thirdParty.template).toBe("standaloneThirdParty");
-  expect(state.thirdParty.model).toBe("gpt-5.5");
+  expect(state.thirdParty.model).toBe("");
+  expect(state.thirdParty.models).toEqual([]);
   expect(state.source).toBe("local");
   expect(state.newTab).toBe("manual-delta");
 });

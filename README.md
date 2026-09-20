@@ -38,10 +38,10 @@ Codex 助手是一个跨平台桌面工具，用来管理多套 Codex（Codex）
 当前发布流程会构建：
 
 - Windows NSIS installer（`.exe`）
-- macOS Apple Silicon app / dmg（`.app` / `.dmg`）
+- macOS Apple Silicon / Intel 应用与安装镜像（`.app` / `.dmg`）
 - Linux x64 CLI archive（`.tar.gz`）
 
-如果需要 macOS Intel 包，可以通过仓库里的 `publish-macos-intel.yml` workflow 单独构建并上传到同一个 Release。
+所有平台产物均由同一正式发布工作流构建并上传。
 
 ## Quick Start
 
@@ -51,6 +51,8 @@ Codex 助手是一个跨平台桌面工具，用来管理多套 Codex（Codex）
 2. 在 Codex 页签中点击“加配置”，或从当前 `~/.codex` 导入现有配置
 3. 选择一个 profile，点击“应用”
 4. 需要第三方 API 同时保留官方 OAuth 能力时，创建“共生配置”
+
+独立第三方配置支持获取模型列表、多选模型和逐模型参数。使用与验证方法见[第三方模型配置说明](docs/third-party-models.md)。
 
 ### Menu Bar / System Tray
 
@@ -159,8 +161,8 @@ npm run build:mac:release-local
 正式发布通过 Git tag 触发：
 
 ```bash
-git tag v1.4.25
-git push origin v1.4.25
+git tag -a v2.0.16 -m "release: v2.0.16"
+git push origin v2.0.16
 ```
 
 `publish-release.yml` 会：
@@ -168,7 +170,7 @@ git push origin v1.4.25
 - 创建或复用 GitHub Release
 - 同步版本号到桌面端和 CLI
 - 运行前端测试
-- 构建 Windows / macOS Apple Silicon 桌面安装包
+- 构建 Windows / macOS Apple Silicon / macOS Intel 桌面安装包
 - 构建 Linux x64 CLI
 - 上传所有 release assets
 

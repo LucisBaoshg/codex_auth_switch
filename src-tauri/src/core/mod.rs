@@ -22,6 +22,7 @@ mod pac_proxy;
 mod profile_io;
 mod restart;
 mod session_recovery;
+mod third_party_models;
 mod updates;
 mod usage_probe;
 mod usage_stats;
@@ -48,6 +49,11 @@ pub use restart::{
     codex_restart_plan_for_platform, restart_codex_app, restart_codex_script, CodexRestartPlatform,
 };
 pub(crate) use session_recovery::*;
+use third_party_models::standalone_model_draft;
+pub use third_party_models::{
+    discover_third_party_models, merge_standalone_model_config, normalize_third_party_base_url,
+    DiscoveredModel, ThirdPartyModel, ThirdPartyModelSettings,
+};
 pub use updates::{
     check_for_update, check_install_location, install_update, InstallLocationStatus,
     UpdateCheckResult, UpdateInstallRequest,
@@ -359,6 +365,7 @@ pub struct ProfileDocument {
     pub remote_updated_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub third_party_draft: Option<serde_json::Value>,
     pub auth_json: String,
     pub config_toml: String,
     pub loaded_from_target: bool,
@@ -1214,6 +1221,8 @@ impl ProfileManager {
             &input.auth_json,
             &repair_illegal_config_toml(&input.config_toml),
         )?;
+        let normalized_config =
+            self.materialize_third_party_catalog(&input.auth_json, &normalized_config)?;
         validate_config_toml(&normalized_config)?;
 
         let now = Utc::now();
@@ -1320,7 +1329,9 @@ impl ProfileManager {
                 (saved_auth_json, saved_config_toml, false, false)
             };
 
+        let third_party_draft = standalone_model_draft(&auth_json, &config_toml)?;
         Ok(ProfileDocument {
+            third_party_draft,
             id: metadata.id,
             name: metadata.name,
             notes: metadata.notes,
@@ -1376,6 +1387,8 @@ impl ProfileManager {
             &input.auth_json,
             &repair_illegal_config_toml(&input.config_toml),
         )?;
+        let normalized_config =
+            self.materialize_third_party_catalog(&input.auth_json, &normalized_config)?;
         validate_config_toml(&normalized_config)?;
 
         let profile_dir = self.profile_dir(profile_id)?;
@@ -1652,6 +1665,8 @@ impl ProfileManager {
                 &repair_illegal_config_toml(&next_profile_config),
             )?,
         };
+        let next_config_toml =
+            self.materialize_third_party_catalog(&next_auth_json, &next_config_toml)?;
         let next_session_model_provider =
             session_model_provider_key_from_config_toml(&next_config_toml)?;
 

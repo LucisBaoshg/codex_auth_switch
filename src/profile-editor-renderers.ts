@@ -1,3 +1,4 @@
+import { renderThirdPartyModels } from "./third-party-model-renderers";
 import type { AppSnapshot, ProfileSummary } from "./desktop-types";
 import { escapeHtml } from "./html-utils";
 import { sharedProfileHasNewerRemote } from "./network-auth-sync";
@@ -209,12 +210,12 @@ export function renderThirdPartyConfigFields(input: ThirdPartyConfigFieldsInput)
         <span>接口地址 <code class="raw-key">openai_base_url</code></span>
         <input
           id="third-party-base-url"
-          type="url"
+          type="text"
           value="${escapeHtml(input.editor.thirdParty.baseUrl)}"
-          placeholder="https://example.com/v1"
+          placeholder="http://10.12.0.20:8317/v1"
           ${disabled}
         />
-        <span class="field-hint">第三方 API 的基础路径，兼容 OpenAI 格式。</span>
+        <span class="field-hint">支持兼容 Responses 的接口；只填写主机和端口时使用 HTTP，并补上 /v1。</span>
       </label>
 
       <label class="field">
@@ -227,20 +228,10 @@ export function renderThirdPartyConfigFields(input: ThirdPartyConfigFieldsInput)
           autocomplete="off"
           ${disabled}
         />
-        <span class="field-hint">您的 API 密钥，仅保存在本地。</span>
+        <span class="field-hint">密钥随此配置保存；共享配置时也会包含密钥。</span>
       </label>
 
-      <label class="field">
-        <span>默认模型 <code class="raw-key">model</code></span>
-        <input
-          id="third-party-model"
-          type="text"
-          value="${escapeHtml(input.editor.thirdParty.model)}"
-          placeholder="gpt-5.5"
-          ${disabled}
-        />
-        <span class="field-hint">默认请求的模型名称，例如 deepseek-chat。</span>
-      </label>
+      ${renderThirdPartyModels(input.editor, disabled)}
     `;
   }
 
@@ -256,7 +247,7 @@ export function renderThirdPartyConfigFields(input: ThirdPartyConfigFieldsInput)
         </p>
       </div>
 
-      <div class="profile-template-options" data-role="profile-template-options">
+      <div class="profile-template-options" data-role="profile-template-options" ${input.editor.managedThirdParty ? "hidden" : ""}>
         <label class="template-card-option">
           <input
             id="profile-template-standalone"
@@ -422,7 +413,7 @@ export function renderEditorPage(input: EditorPageInput): string {
         ? "查看和编辑此 Profile 的配置文本。"
         : "直接手工填写名称、备注以及配置内容。";
 
-  const configFields = (showTabs && currentTab === "manual-delta")
+  const configFields = ((showTabs && currentTab === "manual-delta") || input.editor.managedThirdParty)
     ? renderThirdPartyConfigFields({
       editor: input.editor,
       snapshot,

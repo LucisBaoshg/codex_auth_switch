@@ -402,6 +402,23 @@ async fn refresh_profile_third_party_usage(
 }
 
 #[tauri::command]
+fn merge_standalone_model_config(existing: String, generated: String) -> Result<String, String> {
+    crate::core::merge_standalone_model_config(&existing, &generated).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn discover_third_party_models(
+    base_url: String,
+    api_key: String,
+) -> Result<Vec<crate::core::DiscoveredModel>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::core::discover_third_party_models(&base_url, &api_key).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn validate_profile_config_usage(
     auth_json: String,
     config_toml: String,
@@ -809,6 +826,8 @@ pub fn run() {
             refresh_profile_latency_probe,
             refresh_profile_third_party_usage,
             validate_profile_config_usage,
+            discover_third_party_models,
+            merge_standalone_model_config,
             refresh_all_codex_usage,
             open_target_dir,
             open_config_recovery_dir,

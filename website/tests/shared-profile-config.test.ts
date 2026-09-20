@@ -99,3 +99,20 @@ describe("shared profile config display", () => {
     expect(sanitized).not.toContain("secret-model");
   });
 });
+
+test("preserves portable model settings while removing local paths and extra fields", () => {
+  const model = { id: "grok-4.6", display_name: "Grok", reasoning_effort: "none", context_window: 32768, secret: "not-shared" };
+  const input = `# codex-auth-switch-models: ${JSON.stringify({ version: 1, models: [model], command: "not-shared" })}\nmodel = "grok-4.6"\nmodel_catalog_json = "/Users/local/catalog.json"\n`;
+  const result = sanitizeSharedConfigToml(input);
+  expect(result).toContain('# codex-auth-switch-models: ');
+  expect(result).toContain('"id":"grok-4.6"');
+  expect(result).not.toContain("not-shared");
+  expect(result).not.toContain("/Users/local");
+  expect(sanitizeSharedConfigToml(result)).toBe(result);
+  expect(sanitizeSharedConfigToml('# codex-auth-switch-models: {"version":1,"models":[null]}\nmodel = "x"')).not.toContain("codex-auth-switch-models");
+});
+
+test("does not interpret model metadata embedded inside a multiline value", () => {
+  const input = `instructions = """\n# codex-auth-switch-models: {"version":1,"models":[]}\n"""\nmodel = "safe"`;
+  expect(sanitizeSharedConfigToml(input)).toBe('model = "safe"');
+});

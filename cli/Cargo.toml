@@ -1,6 +1,6 @@
 [package]
 name = "codex-auth-switch-cli"
-version = "2.0.15"
+version = "2.0.16"
 edition = "2021"
 
 [dependencies]
@@ -17,6 +17,7 @@ sha2 = "0.10"
 thiserror = "2"
 toml = "0.8"
 ureq = { version = "2", features = ["json"] }
+url = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
 
 [dev-dependencies]

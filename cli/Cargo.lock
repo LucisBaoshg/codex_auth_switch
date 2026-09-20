@@ -187,7 +187,7 @@ dependencies = [
 
 [[package]]
 name = "codex-auth-switch-cli"
-version = "2.0.15"
+version = "2.0.16"
 dependencies = [
  "base64",
  "chrono",
@@ -203,6 +203,7 @@ dependencies = [
  "thiserror",
  "toml",
  "ureq",
+ "url",
  "uuid",
 ]
 

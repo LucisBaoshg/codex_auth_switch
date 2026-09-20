@@ -467,7 +467,8 @@ pub(crate) fn thread_table_columns(conn: &Connection) -> Result<Vec<String>, rus
     Ok(columns)
 }
 
-pub(crate) const COMMON_PROFILE_SCALAR_KEYS: &[&str] = &["model", "model_reasoning_effort"];
+pub(crate) const COMMON_PROFILE_SCALAR_KEYS: &[&str] =
+    &["model", "model_reasoning_effort", "model_catalog_json"];
 pub(crate) const THIRD_PARTY_PROFILE_SCALAR_KEYS: &[&str] = &[
     "openai_base_url",
     "supports_websockets",
@@ -483,8 +484,12 @@ pub(crate) const THIRD_PARTY_PROFILE_SCALAR_KEYS: &[&str] = &[
     "web_search",
     "network_access",
 ];
-pub(crate) const THIRD_PARTY_PROFILE_TABLE_KEYS: &[&str] =
-    &["model_providers", "tui", "sandbox_workspace_write"];
+pub(crate) const THIRD_PARTY_PROFILE_TABLE_KEYS: &[&str] = &[
+    "model_providers",
+    "tui",
+    "sandbox_workspace_write",
+    "codex_auth_switch",
+];
 pub(crate) const THIRD_PARTY_PROFILE_FEATURE_KEYS: &[&str] = &[
     "guardian_approval",
     "remote_connections",
@@ -492,6 +497,7 @@ pub(crate) const THIRD_PARTY_PROFILE_FEATURE_KEYS: &[&str] = &[
     "memories",
 ];
 pub(crate) const ALL_PROFILE_SCALAR_KEYS: &[&str] = &[
+    "model_catalog_json",
     "openai_base_url",
     "supports_websockets",
     "model_provider",
@@ -509,8 +515,12 @@ pub(crate) const ALL_PROFILE_SCALAR_KEYS: &[&str] = &[
     "web_search",
     "network_access",
 ];
-pub(crate) const ALL_PROFILE_TABLE_KEYS: &[&str] =
-    &["model_providers", "tui", "sandbox_workspace_write"];
+pub(crate) const ALL_PROFILE_TABLE_KEYS: &[&str] = &[
+    "model_providers",
+    "tui",
+    "sandbox_workspace_write",
+    "codex_auth_switch",
+];
 pub(crate) const DEFAULT_CODEX_USAGE_ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/usage";
 pub(crate) const DEFAULT_YLSCODE_USAGE_ENDPOINT: &str = "https://code.ylsagi.com/codex/info";
 pub(crate) const REFRESH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";

@@ -1,3 +1,4 @@
+import { newThirdPartyModel, normalizeThirdPartyBaseUrl, validateThirdPartyModels, type ThirdPartyModel } from "./third-party-models";
 export type NewProfileTemplate = "standaloneThirdParty" | "symbioticThirdParty";
 
 export type ThirdPartyConfigDraft = {
@@ -7,6 +8,7 @@ export type ThirdPartyConfigDraft = {
   apiKey: string;
   model: string;
   oauthProfileId: string;
+  models?: ThirdPartyModel[];
 };
 
 export type ProfileInput = {
@@ -25,7 +27,7 @@ export type ProfileInputDraft = {
 };
 
 export function escapeTomlString(value: string): string {
-  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return JSON.stringify(value).slice(1, -1);
 }
 
 export function tomlTableKey(value: string): string {
@@ -52,36 +54,25 @@ export function standaloneThirdPartyConfigInputFromDraft(
     }
   }
 
+  const normalizedUrl = baseUrl ? normalizeThirdPartyBaseUrl(baseUrl) : "https://api.example.com/v1";
+  const models = editor.thirdParty.models?.length ? editor.thirdParty.models : [newThirdPartyModel(model || "your-model")];
+  if (strict) {
+    if (/[\r\n]/.test(apiKey)) throw new Error("API 密钥不能包含换行。");
+    validateThirdPartyModels(models, model);
+  }
+  const selected = models.find((entry) => entry.id === model) ?? models[0];
+  const catalogSettings = JSON.stringify({ version: 1, models });
   return {
     name: editor.name.trim(),
     notes: editor.notes.trim(),
     authJson: JSON.stringify({ OPENAI_API_KEY: apiKey || "<your_api_key_here>" }, null, 2),
-    configToml: `openai_base_url = "${escapeTomlString(baseUrl || "https://api.openai.com/v1")}"
-supports_websockets = false
+    configToml: `# codex-auth-switch-models: ${catalogSettings}
+openai_base_url = "${escapeTomlString(normalizedUrl)}"
 model_provider = "openai"
-model = "${escapeTomlString(model || "gpt-5.5")}"
-review_model = "${escapeTomlString(model || "gpt-5.5")}"
-model_reasoning_effort = "high"
-plan_mode_reasoning_effort = "xhigh"
-show_raw_agent_reasoning = true
-approval_policy = "never"
-sandbox_mode = "danger-full-access"
-personality = "pragmatic"
-web_search = "live"
-model_context_window = 1000000
-model_auto_compact_token_limit = 400000
+model = "${escapeTomlString(model || selected.id)}"
+review_model = "${escapeTomlString(model || selected.id)}"
+model_reasoning_effort = "${escapeTomlString(selected.reasoning_effort)}"
 
-[tui]
-terminal_title = []
-status_line = ["model-with-reasoning", "context-usage", "current-dir", "git-branch"]
-
-[features]
-guardian_approval = true
-remote_connections = true
-memories = true
-
-[sandbox_workspace_write]
-network_access = true
 `,
   };
 }

@@ -34,11 +34,43 @@ pub(crate) fn parse_toml_table(
         .map_err(|error| AppError::InvalidConfigToml(error.to_string()))?;
 
     match parsed {
-        toml::Value::Table(table) => Ok(table),
+        toml::Value::Table(mut table) => {
+            // Keep portable editor metadata in a comment, not an unknown Codex setting.
+            if let Some(line) = contents
+                .lines()
+                .next()
+                .and_then(|line| line.strip_prefix("# codex-auth-switch-models: "))
+            {
+                let metadata: serde_json::Value = serde_json::from_str(line)
+                    .map_err(|_| AppError::Message("第三方模型目录元数据不正确。".into()))?;
+                let metadata = toml::Value::try_from(metadata)
+                    .map_err(|e| AppError::Message(e.to_string()))?;
+                table
+                    .entry("codex_auth_switch".to_string())
+                    .or_insert(metadata);
+            }
+            Ok(table)
+        }
         _ => Err(AppError::InvalidConfigToml(
             "config.toml must have a table at the top level.".into(),
         )),
     }
+}
+
+pub(crate) fn serialize_config_table(
+    mut table: toml::map::Map<String, toml::Value>,
+) -> Result<String, AppError> {
+    let metadata = table.remove("codex_auth_switch");
+    let mut result = toml::to_string_pretty(&toml::Value::Table(table))
+        .map_err(|e| AppError::Message(e.to_string()))?;
+    if let Some(metadata) = metadata {
+        result = format!(
+            "# codex-auth-switch-models: {}\n{}",
+            serde_json::to_string(&metadata)?,
+            result,
+        );
+    }
+    Ok(result)
 }
 
 pub(crate) fn shared_config_table(
@@ -159,6 +191,11 @@ pub(crate) fn apply_third_party_websockets_default(
     auth_json: &str,
     table: &mut toml::map::Map<String, toml::Value>,
 ) -> Result<(), AppError> {
+    if table.contains_key("codex_auth_switch") && !is_official_oauth_auth(auth_json)? {
+        // Built-in openai provider has no top-level supports_websockets option.
+        table.remove("supports_websockets");
+        return Ok(());
+    }
     if !third_party_websockets_default_target(auth_json, table)? {
         return Ok(());
     }
@@ -211,8 +248,7 @@ pub(crate) fn normalize_config_toml_for_auth(
         normalized.insert(key, value);
     }
 
-    toml::to_string_pretty(&toml::Value::Table(normalized))
-        .map_err(|error| AppError::Message(error.to_string()))
+    serialize_config_table(normalized)
 }
 
 pub(crate) fn migrate_legacy_third_party_config_toml(
@@ -334,8 +370,26 @@ pub(crate) fn merge_profile_managed_config(
     let current_table = parse_toml_table(current_config_toml)?;
     let profile_table = parse_toml_table(profile_config_toml)?;
     let mut merged = shared_config_table(&current_table);
+    // New standalone model forms own connection/model settings, not local permissions.
+    if current_table.contains_key("codex_auth_switch")
+        || profile_table.contains_key("codex_auth_switch")
+    {
+        for key in ["approval_policy", "sandbox_mode", "sandbox_workspace_write"] {
+            if let Some(value) = current_table.get(key) {
+                merged.insert(key.into(), value.clone());
+            }
+        }
+    }
 
     for (key, value) in managed_config_table(next_auth_json, &profile_table)? {
+        if profile_table.contains_key("codex_auth_switch")
+            && matches!(
+                key.as_str(),
+                "approval_policy" | "sandbox_mode" | "sandbox_workspace_write"
+            )
+        {
+            continue;
+        }
         if key == "features" {
             merge_features_table(&mut merged, value);
         } else {
@@ -343,8 +397,7 @@ pub(crate) fn merge_profile_managed_config(
         }
     }
 
-    toml::to_string_pretty(&toml::Value::Table(merged))
-        .map_err(|error| AppError::Message(error.to_string()))
+    serialize_config_table(merged)
 }
 
 pub(crate) fn merge_features_table(
