@@ -7,6 +7,8 @@ pub struct ThirdPartyModel {
     pub id: String,
     pub display_name: String,
     pub reasoning_effort: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supported_reasoning_efforts: Option<Vec<String>>,
     pub context_window: u32,
 }
 
@@ -147,6 +149,25 @@ pub(crate) fn third_party_model_settings(
     }
     let mut ids = HashSet::new();
     for model in &settings.models {
+        let efforts = model
+            .supported_reasoning_efforts
+            .as_deref()
+            .unwrap_or_else(|| std::slice::from_ref(&model.reasoning_effort));
+        if efforts.is_empty()
+            || efforts.len() > 6
+            || efforts.iter().any(|effort| {
+                !matches!(
+                    effort.as_str(),
+                    "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
+                )
+            })
+            || efforts.iter().collect::<HashSet<_>>().len() != efforts.len()
+            || !efforts.contains(&model.reasoning_effort)
+        {
+            return Err(AppError::Message(
+                "请选择有效且不重复的推理档位，默认强度必须在可选档位中。".into(),
+            ));
+        }
         if model.id.trim().is_empty()
             || model.id.len() > 256
             || model.id.chars().any(char::is_control)
@@ -176,11 +197,17 @@ pub(crate) fn third_party_model_settings(
 }
 
 fn catalog_model(model: &ThirdPartyModel, priority: usize) -> serde_json::Value {
+    let efforts = model
+        .supported_reasoning_efforts
+        .as_deref()
+        .unwrap_or_else(|| std::slice::from_ref(&model.reasoning_effort));
     serde_json::json!({
         "slug": model.id, "display_name": model.display_name,
         "description": "通过配置的第三方接口运行", "visibility": "list", "supported_in_api": true,
         "priority": priority, "default_reasoning_level": model.reasoning_effort,
-        "supported_reasoning_levels": [{"effort": model.reasoning_effort, "description": "此配置选定的推理设置"}],
+        "supported_reasoning_levels": efforts.iter().map(|effort| serde_json::json!({"effort": effort, "description": match effort.as_str() {
+            "none" => "关闭额外推理", "minimal" => "最低推理强度", "low" => "低推理强度", "medium" => "中等推理强度", "high" => "高推理强度", _ => "超高推理强度"
+        }})).collect::<Vec<_>>(),
         "shell_type": "shell_command", "additional_speed_tiers": [], "service_tiers": [],
         "model_messages": {"instructions_template": "You are a coding assistant. Work with the user to complete their task. Use the available tools when needed, respect the configured permissions, verify your changes, and report results accurately.", "instructions_variables": {}},
         "include_skills_usage_instructions": true, "include_plugin_usage_instructions": true, "include_apps_usage_instructions": true,

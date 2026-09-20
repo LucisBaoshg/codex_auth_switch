@@ -161,8 +161,8 @@ npm run build:mac:release-local
 正式发布通过 Git tag 触发：
 
 ```bash
-git tag -a v2.0.16 -m "release: v2.0.16"
-git push origin v2.0.16
+git tag -a v2.0.17 -m "release: v2.0.17"
+git push origin v2.0.17
 ```
 
 `publish-release.yml` 会：

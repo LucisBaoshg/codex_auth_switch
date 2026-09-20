@@ -1,5 +1,6 @@
 import { escapeHtml } from "./html-utils";
 import type { EditorState } from "./profile-editor-state";
+import { REASONING_EFFORTS, REASONING_LABELS, reasoningEffortsForModel } from "./third-party-models";
 
 export function renderThirdPartyModels(editor: EditorState, disabled: string): string {
   const models = editor.thirdParty.models ?? [];
@@ -28,9 +29,12 @@ export function renderThirdPartyModels(editor: EditorState, disabled: string): s
     <div class="third-party-selected-models">${models.map((m, i) => `<fieldset class="third-party-model-settings" ${disabled}>
       <legend>${escapeHtml(m.id)}</legend>
       <label class="field"><span>显示名称</span><input data-model-name="${i}" value="${escapeHtml(m.display_name)}" /></label>
-      <label class="field"><span>推理设置</span><select data-model-reasoning="${i}">${["none", "minimal", "low", "medium", "high", "xhigh"].map((effort) => `<option value="${effort}" ${m.reasoning_effort === effort ? "selected" : ""}>${effort === "none" ? "不启用额外推理（none）" : effort}</option>`).join("")}</select></label>
+      <label class="field"><span>默认推理强度</span><select data-model-reasoning="${i}">${reasoningEffortsForModel(m).map((effort) => `<option value="${escapeHtml(effort)}" ${m.reasoning_effort === effort ? "selected" : ""}>${escapeHtml(REASONING_LABELS[effort] ?? effort)}（${escapeHtml(effort)}）</option>`).join("")}</select></label>
       <label class="field"><span>上下文预算（token）</span><input data-model-context="${i}" type="number" min="4096" max="2000000" step="1" value="${m.context_window}" /></label>
       <button type="button" class="button button-ghost" data-action="remove-third-party-model" data-model-id="${escapeHtml(m.id)}">移除</button>
+      <fieldset class="third-party-reasoning-options"><legend>可选推理强度</legend>
+        ${REASONING_EFFORTS.map((effort) => `<label><input type="checkbox" data-model-effort-index="${i}" data-model-effort="${effort}" ${reasoningEffortsForModel(m).includes(effort) ? "checked" : ""} ${reasoningEffortsForModel(m).length === 1 && reasoningEffortsForModel(m).includes(effort) ? "disabled" : ""}/>${REASONING_LABELS[effort]}（${effort}）</label>`).join("")}
+      </fieldset>
     </fieldset>`).join("")}</div>
   </div>`;
 }

@@ -137,12 +137,19 @@ function sanitizeModelCatalogComment(statement: string): string | null {
     if (settings?.version !== 1 || !Array.isArray(settings.models) || settings.models.length < 1 || settings.models.length > 100) return null;
     const ids = new Set<string>();
     const models = settings.models.map((model: Record<string, unknown>) => {
-      const { id, display_name, reasoning_effort, context_window } = model;
+      const { id, display_name, reasoning_effort, context_window, supported_reasoning_efforts } = model;
       if (typeof id !== "string" || !id || id !== id.trim() || id.length > 256 || /[\x00-\x1f\x7f]/.test(id) || ids.has(id)
         || typeof display_name !== "string" || !display_name.trim() || display_name.length > 256
         || typeof reasoning_effort !== "string" || !["none", "minimal", "low", "medium", "high", "xhigh"].includes(reasoning_effort)
         || typeof context_window !== "number" || !Number.isInteger(context_window) || context_window < 4096 || context_window > 2_000_000) throw new Error("Invalid model settings");
       ids.add(id);
+      if (supported_reasoning_efforts !== undefined) {
+        if (!Array.isArray(supported_reasoning_efforts) || supported_reasoning_efforts.length < 1 || supported_reasoning_efforts.length > 6
+          || supported_reasoning_efforts.some((effort) => typeof effort !== "string" || !["none", "minimal", "low", "medium", "high", "xhigh"].includes(effort))
+          || new Set(supported_reasoning_efforts).size !== supported_reasoning_efforts.length
+          || !supported_reasoning_efforts.includes(reasoning_effort)) throw new Error("Invalid reasoning settings");
+        return { id, display_name, reasoning_effort, context_window, supported_reasoning_efforts };
+      }
       return { id, display_name, reasoning_effort, context_window };
     });
     return prefix + JSON.stringify({ version: 1, models });

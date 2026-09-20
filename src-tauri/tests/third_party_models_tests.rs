@@ -39,6 +39,125 @@ fn input(config_toml: String) -> ProfileInput {
     }
 }
 
+fn multi_effort_config() -> String {
+    let mut table: toml::Value = toml::from_str(&config()).unwrap();
+    table["model_reasoning_effort"] = "xhigh".into();
+    let models = table["codex_auth_switch"]["models"].as_array_mut().unwrap();
+    for (index, model) in models.iter_mut().enumerate() {
+        model["reasoning_effort"] = if index == 0 { "xhigh" } else { "high" }.into();
+        let levels = if index == 0 {
+            vec!["low", "medium", "high", "xhigh"]
+        } else {
+            vec!["low", "medium", "high"]
+        };
+        model.as_table_mut().unwrap().insert(
+            "supported_reasoning_efforts".into(),
+            toml::Value::Array(levels.into_iter().map(Into::into).collect()),
+        );
+    }
+    toml::to_string(&table).unwrap()
+}
+
+#[test]
+fn all_reasoning_levels_survive_migration_without_the_original_catalog_file() {
+    let first_app = TempDir::new().unwrap();
+    let first_target = TempDir::new().unwrap();
+    let first = ProfileManager::new(first_app.path().into(), first_target.path().into()).unwrap();
+    let profile = first.import_profile(input(multi_effort_config())).unwrap();
+    let original = first.get_profile_document(&profile.id).unwrap();
+    let old_path = toml::from_str::<toml::Value>(&original.config_toml).unwrap()
+        ["model_catalog_json"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(original
+        .config_toml
+        .starts_with("# codex-auth-switch-models: "));
+    drop(first);
+    first_app.close().unwrap();
+    assert!(!std::path::Path::new(&old_path).exists());
+    let second_app = TempDir::new().unwrap();
+    let second_target = TempDir::new().unwrap();
+    let mut second =
+        ProfileManager::new(second_app.path().into(), second_target.path().into()).unwrap();
+    let imported = second.import_profile(input(original.config_toml)).unwrap();
+    second.switch_profile(&imported.id).unwrap();
+    let reopened = second.get_profile_document(&imported.id).unwrap();
+    let table: toml::Value = toml::from_str(&reopened.config_toml).unwrap();
+    let new_path = table["model_catalog_json"].as_str().unwrap();
+    assert_ne!(new_path, old_path);
+    let catalog: Value = serde_json::from_str(&fs::read_to_string(new_path).unwrap()).unwrap();
+    for (index, expected) in [
+        vec!["low", "medium", "high", "xhigh"],
+        vec!["low", "medium", "high"],
+    ]
+    .iter()
+    .enumerate()
+    {
+        let actual: Vec<&str> = catalog["models"][index]["supported_reasoning_levels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|level| level["effort"].as_str().unwrap())
+            .collect();
+        assert_eq!(&actual, expected);
+        assert_eq!(
+            reopened.third_party_draft.as_ref().unwrap()["models"][index]
+                ["supported_reasoning_efforts"],
+            serde_json::json!(expected)
+        );
+    }
+    assert_eq!(catalog["models"][0]["default_reasoning_level"], "xhigh");
+    assert_eq!(catalog["models"][1]["default_reasoning_level"], "high");
+    if let Ok(export) = std::env::var("CODEX_AUTH_SWITCH_TEST_EXPORT_DIR") {
+        fs::create_dir_all(&export).unwrap();
+        fs::write(
+            std::path::Path::new(&export).join("multi-reasoning-catalog.json"),
+            serde_json::to_vec_pretty(&catalog).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn invalid_reasoning_menus_are_rejected_before_writing_profiles() {
+    let app = TempDir::new().unwrap();
+    let target = TempDir::new().unwrap();
+    let manager = ProfileManager::new(app.path().into(), target.path().into()).unwrap();
+    for levels in [
+        vec![],
+        vec!["high", "high"],
+        vec!["high", "unknown"],
+        vec!["low"],
+    ] {
+        let mut table: toml::Value = toml::from_str(&multi_effort_config()).unwrap();
+        table["codex_auth_switch"]["models"][0]["supported_reasoning_efforts"] =
+            toml::Value::Array(levels.into_iter().map(Into::into).collect());
+        assert!(manager
+            .import_profile(input(toml::to_string(&table).unwrap()))
+            .is_err());
+    }
+    assert!(manager.list_profiles().unwrap().is_empty());
+    let legacy = manager.import_profile(input(config())).unwrap();
+    let document = manager.get_profile_document(&legacy.id).unwrap();
+    let table: toml::Value = toml::from_str(&document.config_toml).unwrap();
+    let catalog: Value = serde_json::from_str(
+        &fs::read_to_string(table["model_catalog_json"].as_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        catalog["models"][0]["supported_reasoning_levels"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        catalog["models"][0]["supported_reasoning_levels"][0]["effort"],
+        "none"
+    );
+}
+
 #[test]
 fn normalizes_lan_addresses_without_changing_custom_paths() {
     assert_eq!(

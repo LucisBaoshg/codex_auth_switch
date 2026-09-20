@@ -1,4 +1,4 @@
-import { newThirdPartyModel, normalizeThirdPartyBaseUrl, type DiscoveredModel } from "./third-party-models";
+import { newThirdPartyModel, normalizeThirdPartyBaseUrl, setReasoningEffortEnabled, type DiscoveredModel } from "./third-party-models";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
@@ -2847,6 +2847,12 @@ function bindEvents(): void {
     const id = input.dataset.modelChoice!;
     if (input.checked) addThirdPartyModel(id, state.editor.discoveredModels?.find((m) => m.id === id)?.display_name ?? id);
     else removeThirdPartyModel(id);
+    render();
+  }));
+  document.querySelectorAll<HTMLInputElement>("[data-model-effort]").forEach((input) => input.addEventListener("change", () => {
+    const model = state.editor.thirdParty.models?.[Number(input.dataset.modelEffortIndex)];
+    if (!model || state.editor.readOnly) return;
+    setReasoningEffortEnabled(model, input.dataset.modelEffort!, input.checked);
     render();
   }));
   for (const [attribute, field] of [["name", "display_name"], ["reasoning", "reasoning_effort"], ["context", "context_window"]] as const) {

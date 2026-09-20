@@ -1,4 +1,24 @@
 import { describe, expect, test } from "vitest";
+import { createEditorState } from "../../src/profile-editor-state";
+import { standaloneThirdPartyConfigInputFromDraft } from "../../src/profile-input-builders";
+
+test("shared configs retain every reasoning level from desktop and strip local paths", () => {
+  const editor = createEditorState();
+  editor.thirdParty = { ...editor.thirdParty, baseUrl: "10.12.0.20:8317", apiKey: "test-only", model: "grok-4.6", models: [
+    { id: "grok-4.6", display_name: "Grok", reasoning_effort: "xhigh", supported_reasoning_efforts: ["low", "medium", "high", "xhigh"], context_window: 128000 },
+    { id: "gemini-3.8-flash-high", display_name: "Gemini", reasoning_effort: "high", supported_reasoning_efforts: ["low", "medium", "high"], context_window: 128000 },
+  ] };
+  const generated = standaloneThirdPartyConfigInputFromDraft(editor).configToml;
+  const shared = sanitizeSharedConfigToml(generated + '\nmodel_catalog_json = "/Users/first/catalog.json"\n');
+  expect(shared).not.toContain("/Users/first");
+  expect(shared).not.toContain("test-only");
+  const settings = JSON.parse(shared.split("\n")[0].slice("# codex-auth-switch-models: ".length));
+  expect(settings.models).toEqual(editor.thirdParty.models);
+  for (const levels of [[], ["high", "high"], ["low"], ["xhigh", "unknown"]]) {
+    settings.models[0].supported_reasoning_efforts = levels;
+    expect(sanitizeSharedConfigToml(`# codex-auth-switch-models: ${JSON.stringify(settings)}\nmodel = "grok-4.6"`)).not.toContain("codex-auth-switch-models");
+  }
+});
 import {
   buildLegacyProfileFiles,
   formatSharedProfileConfig,

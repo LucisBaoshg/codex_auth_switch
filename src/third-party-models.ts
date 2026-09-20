@@ -2,8 +2,27 @@ export type ThirdPartyModel = {
   id: string;
   display_name: string;
   reasoning_effort: string;
+  supported_reasoning_efforts?: string[];
   context_window: number;
 };
+
+export const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh"];
+export const REASONING_LABELS: Record<string, string> = {
+  none: "关闭", minimal: "最低", low: "低", medium: "中", high: "高", xhigh: "超高",
+};
+
+export function reasoningEffortsForModel(model: ThirdPartyModel): string[] {
+  return model.supported_reasoning_efforts ?? [model.reasoning_effort];
+}
+
+export function setReasoningEffortEnabled(model: ThirdPartyModel, effort: string, enabled: boolean): void {
+  if (!REASONING_EFFORTS.includes(effort)) return;
+  const selected = new Set(reasoningEffortsForModel(model));
+  if (enabled) selected.add(effort);
+  else if (selected.size > 1) selected.delete(effort);
+  model.supported_reasoning_efforts = REASONING_EFFORTS.filter((value) => selected.has(value));
+  if (!selected.has(model.reasoning_effort)) model.reasoning_effort = model.supported_reasoning_efforts[0];
+}
 
 export type DiscoveredModel = Pick<ThirdPartyModel, "id" | "display_name">;
 
@@ -34,6 +53,12 @@ export function validateThirdPartyModels(models: ThirdPartyModel[], defaultModel
     ids.add(model.id);
     if (!model.display_name.trim() || model.display_name.length > 256) throw new Error("请填写有效的模型显示名称。");
     if (!["none", "minimal", "low", "medium", "high", "xhigh"].includes(model.reasoning_effort)) throw new Error("推理设置不正确。");
+    const efforts = reasoningEffortsForModel(model);
+    if (!Array.isArray(efforts) || efforts.length < 1 || efforts.length > REASONING_EFFORTS.length
+      || efforts.some((effort) => !REASONING_EFFORTS.includes(effort))
+      || new Set(efforts).size !== efforts.length || !efforts.includes(model.reasoning_effort)) {
+      throw new Error("请选择有效且不重复的推理档位，默认强度必须在可选档位中。");
+    }
     if (!Number.isInteger(model.context_window) || model.context_window < 4096 || model.context_window > 2000000) {
       throw new Error("上下文预算应为 4096 至 2000000 之间的整数。");
     }

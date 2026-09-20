@@ -12,6 +12,7 @@ vi.mock("@tauri-apps/api/app", () => ({
 }));
 
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
   vi.resetModules();
   invokeMock.mockReset();
   getVersionMock.mockReset();
@@ -24,6 +25,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.clearAllTimers();
+  vi.useRealTimers();
   vi.clearAllMocks();
   delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
 });
@@ -445,6 +448,16 @@ test("discovers, filters, selects two models and saves their settings through th
   setInput("#third-party-model-search", "gemini");
   expect(document.querySelectorAll('.third-party-model-choice:not([hidden])')).toHaveLength(1);
   setInput('[data-model-context="1"]', "65536");
+  for (const [index, levels] of [[0, ["low", "medium", "high", "xhigh"]], [1, ["low", "medium", "high"]]] as const) {
+    for (const level of levels) {
+      document.querySelector<HTMLInputElement>(`[data-model-effort-index="${index}"][data-model-effort="${level}"]`)!.click();
+      await flushUi();
+    }
+    document.querySelector<HTMLInputElement>(`[data-model-effort-index="${index}"][data-model-effort="none"]`)!.click();
+    await flushUi();
+  }
+  setInput('[data-model-reasoning="0"]', "xhigh");
+  setInput('[data-model-reasoning="1"]', "high");
   setInput("#third-party-model", "gemini-3.8-flash-high");
   document.querySelector<HTMLButtonElement>('[data-action="save-editor"]')!.click();
   await flushUi();
@@ -454,4 +467,10 @@ test("discovers, filters, selects two models and saves their settings through th
   expect(payload.configToml).toContain('"id":"grok-4.6"');
   expect(payload.configToml).toContain('"context_window":65536');
   expect(payload.configToml).not.toContain("test-only");
+  const settings = JSON.parse(payload.configToml.split("\n")[0].slice("# codex-auth-switch-models: ".length));
+  expect(settings.models.map((model: { supported_reasoning_efforts: string[] }) => model.supported_reasoning_efforts)).toEqual([
+    ["low", "medium", "high", "xhigh"], ["low", "medium", "high"],
+  ]);
+  expect(settings.models.map((model: { reasoning_effort: string }) => model.reasoning_effort)).toEqual(["xhigh", "high"]);
+  expect(payload.configToml).toContain('model_reasoning_effort = "high"');
 });

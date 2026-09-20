@@ -12,6 +12,7 @@ vi.mock("@tauri-apps/api/app", () => ({
 }));
 
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
   vi.resetModules();
   invokeMock.mockReset();
   getVersionMock.mockReset();
@@ -20,6 +21,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.clearAllTimers();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
   delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;

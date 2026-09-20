@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { newThirdPartyModel, normalizeThirdPartyBaseUrl, validateThirdPartyModels } from "../src/third-party-models";
+import { newThirdPartyModel, normalizeThirdPartyBaseUrl, reasoningEffortsForModel, setReasoningEffortEnabled, validateThirdPartyModels } from "../src/third-party-models";
 import { standaloneThirdPartyConfigInputFromDraft } from "../src/profile-input-builders";
 import { createEditorState, createEditorFromDocument } from "../src/profile-editor-state";
 import { renderThirdPartyModels } from "../src/third-party-model-renderers";
@@ -26,6 +26,19 @@ test("rejects missing defaults, duplicate ids and invalid context budgets", () =
   expect(() => validateThirdPartyModels([model], "missing")).toThrow("默认模型");
   expect(() => validateThirdPartyModels([model, model], "test")).toThrow("重复");
   expect(() => validateThirdPartyModels([{ ...model, context_window: NaN }], "test")).toThrow("预算");
+});
+
+test("keeps legacy defaults and prevents invalid reasoning menus", () => {
+  const model = { ...newThirdPartyModel("grok"), reasoning_effort: "high" };
+  expect(reasoningEffortsForModel(model)).toEqual(["high"]);
+  for (const levels of [[], ["high", "high"], ["low"], ["high", "made-up"]]) {
+    expect(() => validateThirdPartyModels([{ ...model, supported_reasoning_efforts: levels }], "grok")).toThrow("推理档位");
+  }
+  setReasoningEffortEnabled(model, "low", true);
+  setReasoningEffortEnabled(model, "high", false);
+  expect(model.reasoning_effort).toBe("low");
+  setReasoningEffortEnabled(model, "low", false);
+  expect(reasoningEffortsForModel(model)).toEqual(["low"]);
 });
 
 test("escapes service-provided names and preserves selected model capabilities when reopening", () => {

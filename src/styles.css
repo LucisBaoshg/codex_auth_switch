@@ -5901,6 +5901,10 @@ p { margin: 0; }
 .third-party-selected-models { display: grid; gap: 12px; }
 .third-party-model-settings { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(130px, 1fr) minmax(130px, 1fr) auto; gap: 12px; align-items: end; min-width: 0; border: 1px solid var(--border-color, #ddd); border-radius: 10px; padding: 12px; }
 .third-party-model-settings legend { overflow-wrap: anywhere; max-width: 100%; padding: 0 6px; }
+.third-party-reasoning-options { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 10px 18px; border: 0; padding: 6px 0 0; margin: 0; min-width: 0; }
+.third-party-reasoning-options legend { padding: 0; font-size: 13px; color: var(--text-muted); }
+.third-party-reasoning-options label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+.third-party-model-settings .third-party-reasoning-options input { width: auto; }
 @media (max-width: 850px) { .third-party-model-settings { grid-template-columns: 1fr 1fr; } }
 
 .third-party-model-toolbar input { padding: 12px 14px; border: 1px solid var(--border-color, #ddd); border-radius: 12px; background: transparent; color: var(--text-main); font: inherit; }

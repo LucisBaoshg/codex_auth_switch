@@ -1,4 +1,4 @@
-import { newThirdPartyModel, normalizeThirdPartyBaseUrl, validateThirdPartyModels, type ThirdPartyModel } from "./third-party-models";
+import { newThirdPartyModel, normalizeThirdPartyBaseUrl, reasoningEffortsForModel, validateThirdPartyModels, type ThirdPartyModel } from "./third-party-models";
 export type NewProfileTemplate = "standaloneThirdParty" | "symbioticThirdParty";
 
 export type ThirdPartyConfigDraft = {
@@ -61,7 +61,9 @@ export function standaloneThirdPartyConfigInputFromDraft(
     validateThirdPartyModels(models, model);
   }
   const selected = models.find((entry) => entry.id === model) ?? models[0];
-  const catalogSettings = JSON.stringify({ version: 1, models });
+  const catalogSettings = JSON.stringify({ version: 1, models: models.map((entry) => ({
+    ...entry, supported_reasoning_efforts: reasoningEffortsForModel(entry),
+  })) });
   return {
     name: editor.name.trim(),
     notes: editor.notes.trim(),
