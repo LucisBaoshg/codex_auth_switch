@@ -265,6 +265,14 @@ fn catalog_survives_portable_import_and_official_switch_restores_local_settings(
     assert_eq!(catalog["models"].as_array().unwrap().len(), 2);
     assert_eq!(catalog["models"][0]["slug"], "grok-4.6");
     assert_eq!(catalog["models"][1]["context_window"], 65536);
+    assert_eq!(
+        catalog["models"][0]["input_modalities"],
+        serde_json::json!(["text", "image"])
+    );
+    assert_eq!(
+        catalog["models"][1]["input_modalities"],
+        serde_json::json!(["text", "image"])
+    );
     assert!(document.third_party_draft.is_some());
     fs::remove_file(path).unwrap();
     manager.switch_profile(&profile.id).unwrap();

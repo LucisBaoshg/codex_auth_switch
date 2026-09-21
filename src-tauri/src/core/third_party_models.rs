@@ -216,7 +216,7 @@ fn catalog_model(model: &ThirdPartyModel, priority: usize) -> serde_json::Value 
         "truncation_policy": {"mode": "tokens", "limit": 10000},
         "supports_image_detail_original": false, "context_window": model.context_window,
         "max_context_window": model.context_window, "effective_context_window_percent": 95,
-        "experimental_supported_tools": [], "input_modalities": ["text"], "supports_search_tool": false,
+        "experimental_supported_tools": [], "input_modalities": ["text", "image"], "supports_search_tool": false,
         "use_responses_lite": false
     })
 }
