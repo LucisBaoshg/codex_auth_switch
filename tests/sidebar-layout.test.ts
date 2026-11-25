@@ -2107,7 +2107,7 @@ test("blocks sharing to the enterprise sharing center when usage validation fail
         authTypeLabel: "官方 OAuth",
         createdAt: "2026-03-24T00:00:00Z",
         updatedAt: "2026-03-24T13:24:00Z",
-        authJson: '{"tokens":{"access_token":"expired"}}',
+        authJson: '{"tokens":{"access_token":"expired","id_token":"id-fixture"}}',
         configToml: "",
         loadedFromTarget: false,
         hasTargetChanges: false,
@@ -2169,7 +2169,7 @@ test("blocks sharing to the enterprise sharing center when usage validation fail
   await flushUi();
 
   expect(invokeMock).toHaveBeenCalledWith("validate_profile_config_usage", {
-    authJson: '{"tokens":{"access_token":"expired"}}',
+    authJson: '{"tokens":{"access_token":"expired","id_token":"id-fixture"}}',
     configToml: "",
   });
   expect(profilePostBodies).toHaveLength(0);
@@ -2251,6 +2251,7 @@ test.each([
   { scenario: "rejects a change after confirmation", localVersion: 26, decision: "confirm", writeStatus: 409 },
   { scenario: "publishes from a matching baseline", localVersion: 100, decision: null, writeStatus: 200 },
 ])("publishing an owned shared profile $scenario", async ({ localVersion, decision, writeStatus }) => {
+  const activeAuthorization = '{"auth_mode":"chatgpt","tokens":{"access_token":"new-token","id_token":"id-fixture","refresh_token":"refresh-fixture"}}';
   Object.defineProperty(window, "__TAURI_INTERNALS__", {
     configurable: true,
     value: {},
@@ -2323,7 +2324,7 @@ test.each([
         remoteProfileId: "remote-owned",
         remoteContentVersion: localVersion,
         remoteContentHash: `hash-v${localVersion}`,
-        authJson: '{"auth_mode":"chatgpt","tokens":{"access_token":"new-token"}}',
+        authJson: activeAuthorization,
         configToml: 'model = "gpt-5.5"\n',
         loadedFromTarget: true,
         hasTargetChanges: true,
@@ -2397,7 +2398,6 @@ test.each([
   if (decision) {
     await vi.waitFor(() => expect(document.querySelector("#btn-ok")?.textContent).toBe("发布本机配置"));
     expect(document.body.textContent).toContain("本机上次确认的共享修订 26，云端当前修订 100");
-    expect(document.body.textContent).toContain("各自设备的 Codex 登录");
     expect(updateBodies).toHaveLength(0);
     document.querySelector<HTMLButtonElement>(decision === "confirm" ? "#btn-ok" : "#btn-cancel")!.click();
   }
@@ -2418,7 +2418,7 @@ test.each([
     description: "自动从当前 Codex 配置生成",
     baseContentVersion: 100,
     baseContentHash: "hash-v100",
-    authContent: '{"auth_mode":"chatgpt"}',
+    authContent: activeAuthorization,
     configContent: 'model = "gpt-5.5"\n',
   }]);
   if (writeStatus === 409) {
@@ -2497,7 +2497,7 @@ test("publishing blocks writes when the enterprise backend lacks content version
         authTypeLabel: "官方 OAuth",
         createdAt: "2026-06-04T10:00:00Z",
         updatedAt: "2026-06-05T08:00:00Z",
-        authJson: '{"auth_mode":"chatgpt","tokens":{"access_token":"new-token"}}',
+        authJson: '{"auth_mode":"chatgpt","tokens":{"access_token":"new-token","id_token":"id-fixture"}}',
         configToml: 'model = "gpt-5.5"\n',
         loadedFromTarget: true,
         hasTargetChanges: true,
@@ -3770,7 +3770,7 @@ test("shows a stale shared profile version notice in local profile details and u
       return {
         ok: true,
         status: 200,
-        text: async () => '{"auth_mode":"chatgpt","tokens":{"refresh_token":"new-refresh"}}',
+        text: async () => '{"auth_mode":"chatgpt"}',
       };
     }
     if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-oauth/config.toml") {
@@ -3949,6 +3949,7 @@ test("shows a not found result after checking a missing shared center profile ve
 });
 
 test("relinks a missing shared profile to the unique same-name cloud profile when updating", async () => {
+  const sharedAuthorization = '{"auth_mode":"chatgpt","tokens":{"access_token":"access-fixture","id_token":"id-fixture","refresh_token":"refresh-fixture"}}';
   Object.defineProperty(window, "__TAURI_INTERNALS__", {
     configurable: true,
     value: {},
@@ -4053,7 +4054,7 @@ test("relinks a missing shared profile to the unique same-name cloud profile whe
         payload: {
           name: "ChatGPT Pro",
           notes: "共享官方 OAuth",
-          authJson: '{"auth_mode":"chatgpt"}',
+          authJson: sharedAuthorization,
           configToml: 'model = "gpt-5.5"\n',
         },
         revision: { id: "remote-new", version: 1, hash: "hash-new", updatedAt: "2026-06-24T11:00:00Z" },
@@ -4113,7 +4114,7 @@ test("relinks a missing shared profile to the unique same-name cloud profile whe
       return {
         ok: true,
         status: 200,
-        text: async () => '{"auth_mode":"chatgpt","tokens":{"refresh_token":"new-refresh"}}',
+        text: async () => sharedAuthorization,
       };
     }
     if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-new/config.toml") {

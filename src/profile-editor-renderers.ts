@@ -1,7 +1,7 @@
 import { renderThirdPartyModels } from "./third-party-model-renderers";
 import type { AppSnapshot, ProfileSummary } from "./desktop-types";
 import { escapeHtml } from "./html-utils";
-import { sharedProfileHasNewerRemote } from "./network-auth-sync";
+import { sharedProfileAuthPreview, sharedProfileHasNewerRemote } from "./network-auth-sync";
 import type { NetworkProfile } from "./network-profile-utils";
 import type { EditorState } from "./profile-editor-state";
 import {
@@ -458,6 +458,9 @@ export function renderEditorPage(input: EditorPageInput): string {
 
 export function renderEditorCodePanels(input: EditorCodePanelsInput): string {
   const disabled = input.busy || input.readOnly ? "disabled" : "";
+  const authJson = input.readOnly && input.editor.source === "network"
+    ? sharedProfileAuthPreview(input.editor.authJson)
+    : input.editor.authJson;
 
   return `
     <div class="editor-panels">
@@ -471,7 +474,7 @@ export function renderEditorCodePanels(input: EditorCodePanelsInput): string {
           class="code-textarea"
           spellcheck="false"
           ${disabled}
-        >${escapeHtml(input.editor.authJson)}</textarea>
+        >${escapeHtml(authJson)}</textarea>
       </div>
 
       <div class="code-editor-card">

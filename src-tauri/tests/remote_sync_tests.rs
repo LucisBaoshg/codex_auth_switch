@@ -315,6 +315,45 @@ fn sync_remote_profiles_imports_and_updates_existing_remote_profiles() {
 }
 
 #[test]
+fn restores_oauth_for_an_existing_shared_revision_and_applies_it_without_a_local_login() {
+    let (_app_dir, target_dir, mut manager) = temp_manager();
+    let server = TestServer::start();
+    let profiles_url = format!("{}/profiles", server.base_url);
+    let profile = json!({
+        "id": "oauth-shared",
+        "name": "Shared OAuth",
+        "contentVersion": 101,
+        "contentHash": "unchanged-raw-file-hash",
+        "files": ["auth.json", "config.toml"],
+    });
+    server.set_json("/profiles", json!([profile]));
+    let mut bundle = profile;
+    bundle["configContent"] = official_config_toml("gpt-5.5").into();
+    bundle["authContent"] = r#"{"auth_mode":"chatgpt"}"#.into();
+    server.set_json("/profiles/oauth-shared?bundle=1", bundle.clone());
+
+    let first = manager.sync_remote_profiles(&profiles_url).unwrap();
+    assert_eq!(first.imported, 1);
+    let profile_id = first.profiles[0].id.clone();
+    let authorization = json!({
+        "auth_mode": "chatgpt",
+        "tokens": { "id_token": "fixture-id", "access_token": "fixture-access" },
+    });
+    bundle["authContent"] = authorization.to_string().into();
+    server.set_json("/profiles/oauth-shared?bundle=1", bundle);
+
+    let updated = manager.sync_remote_profiles(&profiles_url).unwrap();
+    assert_eq!(updated.updated, 1);
+    assert_eq!(updated.profiles[0].id, profile_id);
+    assert!(!target_dir.path().join("auth.json").exists());
+    manager.switch_profile(&profile_id).unwrap();
+    let applied: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(target_dir.path().join("auth.json")).unwrap())
+            .unwrap();
+    assert_eq!(applied, authorization);
+}
+
+#[test]
 fn resolve_profile_selector_supports_profile_id_and_exact_name() {
     let (_app_dir, _target_dir, manager) = temp_manager();
 

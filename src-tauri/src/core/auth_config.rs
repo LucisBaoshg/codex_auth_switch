@@ -45,13 +45,24 @@ pub(crate) fn oauth_last_refresh(auth_json: &str) -> Option<DateTime<Utc>> {
         .map(|time| time.with_timezone(&Utc))
 }
 
-pub(crate) fn remote_profile_auth(auth_json: &str) -> Result<String, AppError> {
-    validate_auth_json(auth_json)?;
-    if is_official_oauth_auth(auth_json)? {
-        Ok(r#"{"auth_mode":"chatgpt"}"#.into())
-    } else {
-        Ok(auth_json.into())
+pub(crate) fn is_local_oauth_template(auth_json: &str) -> bool {
+    let Ok(serde_json::Value::Object(auth)) = serde_json::from_str(auth_json) else {
+        return false;
+    };
+    auth.len() == 1 && auth.get("auth_mode").and_then(serde_json::Value::as_str) == Some("chatgpt")
+}
+
+pub(crate) fn is_newer_oauth_for_same_account(
+    candidate: &str,
+    stored: &str,
+) -> Result<bool, AppError> {
+    if !has_local_oauth_tokens(candidate)
+        || !has_local_oauth_tokens(stored)
+        || oauth_last_refresh(candidate) <= oauth_last_refresh(stored)
+    {
+        return Ok(false);
     }
+    Ok(auth_match_hash(candidate)? == auth_match_hash(stored)?)
 }
 
 pub(crate) fn validate_config_toml(contents: &str) -> Result<(), AppError> {

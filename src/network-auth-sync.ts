@@ -2,14 +2,35 @@ import type { NetworkProfile } from "./network-profile-utils";
 
 export const localOauthProfileAuth = '{"auth_mode":"chatgpt"}';
 
-export function networkProfileAuthContent(authJson: string): string {
+function parseNetworkProfileAuth(authJson: string): Record<string, unknown> {
   const auth: unknown = JSON.parse(authJson);
   if (!auth || typeof auth !== "object" || Array.isArray(auth)) {
     throw new Error("共享授权文件必须是 JSON 对象。");
   }
-  const record = auth as Record<string, unknown>;
-  if (record.auth_mode === "chatgpt" || (record.tokens && typeof record.tokens === "object")) {
-    return localOauthProfileAuth;
+  return auth as Record<string, unknown>;
+}
+
+export function networkProfileAuthContent(authJson: string): string {
+  const auth = parseNetworkProfileAuth(authJson);
+  const tokens = auth.tokens as Record<string, unknown> | null | undefined;
+  if (auth.auth_mode === "chatgpt" || (tokens && typeof tokens === "object")) {
+    const accessToken = tokens?.access_token;
+    const idToken = tokens?.id_token;
+    if (typeof accessToken !== "string" || !accessToken.trim() || typeof idToken !== "string" || !idToken.trim()) {
+      throw new Error("该档案缺少可共享的官方授权，请启用这份档案并在 Codex 登录后重新发布。");
+    }
+  }
+  return authJson;
+}
+
+export function sharedProfileAuthPreview(authJson: string): string {
+  try {
+    const auth = parseNetworkProfileAuth(authJson);
+    if (auth.tokens && typeof auth.tokens === "object") {
+      return JSON.stringify({ auth_mode: auth.auth_mode ?? "chatgpt", tokens: "共享授权已隐藏，应用时使用" }, null, 2);
+    }
+  } catch {
+    // The read-only view can still show entries saved by older clients.
   }
   return authJson;
 }
@@ -183,6 +204,6 @@ export async function fetchSharedProfileBundle(
   if (typeof authJson !== "string" || typeof configToml !== "string") {
     throw new Error("共享服务返回了不完整的配置文件。");
   }
-  authJson = networkProfileAuthContent(authJson);
+  parseNetworkProfileAuth(authJson);
   return { profile: profileData, authJson, configToml };
 }

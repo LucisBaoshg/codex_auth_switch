@@ -71,6 +71,7 @@ export class ProfileShareSafetyError extends Error {
 }
 
 const profilesFileName = "profiles.json";
+const localOauthProfileAuth = '{"auth_mode":"chatgpt"}';
 
 function parseAuthContent(authContent: string): Record<string, unknown> | null {
   try {
@@ -98,6 +99,14 @@ function assertShareSafeAuthVisibility(authContent: string, visibility: ProfileV
   if (visibility === "public" && hasOfficialOauthTokens(authContent)) {
     throw new ProfileShareSafetyError();
   }
+}
+
+function preserveSharedOauthAuth(previousAuth: string, nextAuth: string): string {
+  const auth = parseAuthContent(nextAuth);
+  if (auth?.auth_mode === "chatgpt" && Object.keys(auth).length === 1 && hasOfficialOauthTokens(previousAuth)) {
+    return previousAuth;
+  }
+  return nextAuth;
 }
 
 export function detectSharedProfileAuthType(authContent: string, configContent: string): string {
@@ -203,11 +212,12 @@ function principalIdentifiers(principal: ProfilePrincipal): Set<string> {
 
 export function canAccessProfile(profile: StoredProfile, principal: ProfilePrincipal | null): boolean {
   if (!principal) return false;
-  if (!profile.ownerDingUserId) return true;
-  if (profileVisibility(profile) === "public") return true;
+  const visibility = profileVisibility(profile);
+  if (!profile.ownerDingUserId || visibility === "public") return true;
 
   const identifiers = principalIdentifiers(principal);
   if (identifiers.has(profile.ownerDingUserId.trim().toLowerCase())) return true;
+  if (visibility !== "selected") return false;
 
   return normalizeSharedWith(profile.sharedWith).some((recipient) =>
     identifiers.has(recipient.toLowerCase()),
@@ -265,7 +275,9 @@ export async function getVisibleProfileBundle(id: string, principal: ProfilePrin
     ]);
     return {
       ...presentProfile(profile, authContent, configContent),
-      authContent: hasOfficialOauthTokens(authContent) ? '{"auth_mode":"chatgpt"}' : authContent,
+      authContent: profileVisibility(profile) === "public" && hasOfficialOauthTokens(authContent)
+        ? localOauthProfileAuth
+        : authContent,
       configContent: sanitizeSharedConfigToml(configContent),
     };
   });
@@ -425,6 +437,7 @@ async function updateProfileMetadataUnlocked(
   const now = new Date().toISOString();
   const profileFolder = path.join(profileFilesDir(), profiles[index].id);
   const hasContentUpdate = updates.authContent !== undefined || updates.configContent !== undefined;
+  let authToWrite = updates.authContent;
   let previousAuthForRollback: string | null = null;
   let previousConfigForRollback: string | null = null;
 
@@ -433,7 +446,10 @@ async function updateProfileMetadataUnlocked(
     const previousConfig = await readProfileFile(profiles[index].id, "config.toml");
     previousAuthForRollback = previousAuth;
     previousConfigForRollback = previousConfig;
-    const nextAuth = updates.authContent ?? previousAuth;
+    if (authToWrite !== undefined) {
+      authToWrite = preserveSharedOauthAuth(previousAuth, authToWrite);
+    }
+    const nextAuth = authToWrite ?? previousAuth;
     const nextConfig = updates.configContent ?? previousConfig;
     const previousHash = sharedProfileContentHash(previousAuth, previousConfig);
     const previousVersion = profiles[index].contentVersion ?? 1;
@@ -464,9 +480,9 @@ async function updateProfileMetadataUnlocked(
   }
 
   try {
-    if (updates.authContent !== undefined) {
+    if (authToWrite !== undefined) {
       await fs.mkdir(profileFolder, { recursive: true });
-      await atomicWriteFile(path.join(profileFolder, "auth.json"), updates.authContent);
+      await atomicWriteFile(path.join(profileFolder, "auth.json"), authToWrite);
     }
     if (updates.configContent !== undefined) {
       await fs.mkdir(profileFolder, { recursive: true });
@@ -477,7 +493,7 @@ async function updateProfileMetadataUnlocked(
     await writeProfiles(profiles);
     return profiles[index];
   } catch (error) {
-    if (updates.authContent !== undefined && previousAuthForRollback !== null) {
+    if (authToWrite !== undefined && previousAuthForRollback !== null) {
       await atomicWriteFile(path.join(profileFolder, "auth.json"), previousAuthForRollback).catch(() => undefined);
     }
     if (updates.configContent !== undefined && previousConfigForRollback !== null) {
@@ -520,7 +536,7 @@ async function syncProfileAuthContentUnlocked(
   assertContentRevision(updates, currentVersion, currentHash);
 
   const now = new Date().toISOString();
-  const nextAuth = updates.authContent;
+  const nextAuth = preserveSharedOauthAuth(previousAuth, updates.authContent);
   const nextHash = sharedProfileContentHash(nextAuth, previousConfig);
   assertShareSafeAuthVisibility(nextAuth, profile.visibility ?? "private");
   const profileFolder = path.join(profileFilesDir(), profile.id);

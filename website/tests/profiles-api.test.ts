@@ -5,6 +5,7 @@ import { POST as createSharedProfile } from "../src/app/api/profiles/route";
 import { DELETE as deleteSharedProfile, GET as getSharedProfile, POST as updateSharedProfile } from "../src/app/api/profiles/[id]/route";
 import { GET as getSharedProfileFile, POST as putSharedProfileFile } from "../src/app/api/profiles/[id]/[filename]/route";
 import { sharedProfileContentHash } from "../src/lib/profile-store";
+import { recordKnownUser } from "../src/lib/user-store";
 
 async function useTempDataDir(prefix: string) {
   const fs = await import("node:fs/promises");
@@ -742,35 +743,73 @@ test("downloads legacy stored config.toml through the share-safe sanitizer", asy
   expect(config).not.toContain("private");
 });
 
-test("serves one version of a shared bundle with a device-local OAuth descriptor", async () => {
+test("restores shared OAuth to selected recipients and preserves it through an older publisher", async () => {
   await useTempDataDir("codex-profile-bundle-");
   const owner = { dingUserId: "Ding-A", active: true };
   const { token } = await createDesktopToken(owner);
-  const auth = '{"auth_mode":"chatgpt","tokens":{"access_token":"test-only","refresh_token":"test-refresh"}}';
+  const recipient = { dingUserId: "Ding-B", active: true };
+  await recordKnownUser(recipient);
+  const { token: recipientToken } = await createDesktopToken(recipient);
+  const { token: outsiderToken } = await createDesktopToken({ dingUserId: "Ding-C", active: true });
+  const template = '{"auth_mode":"chatgpt"}';
+  const auth = '{"auth_mode":"chatgpt","tokens":{"access_token":"test-only","id_token":"test-id","refresh_token":"test-refresh"}}';
   const form = new FormData();
   form.append("name", "OAuth fixture");
-  form.append("file1", new File([auth], "auth.json"));
+  form.append("visibility", "selected");
+  form.append("sharedWith", JSON.stringify([recipient.dingUserId]));
+  form.append("file1", new File([template], "auth.json"));
   form.append("file2", new File(['model = "gpt-5.5"'], "config.toml"));
   const created = await createSharedProfile(new NextRequest("http://localhost/api/profiles", {
     method: "POST", headers: { authorization: "Bearer " + token }, body: form,
   }));
   expect(created.status).toBe(201);
   const profile = await created.json();
-  const url = "http://localhost/api/profiles/" + profile.id + "?bundle=1";
+  const url = "http://localhost/api/profiles/" + profile.id;
   const params = { params: Promise.resolve({ id: profile.id }) };
-  expect((await getSharedProfile(new NextRequest(url), params)).status).toBe(401);
-  const response = await getSharedProfile(new NextRequest(url, {
+  const readBundle = (token: string) => getSharedProfile(new NextRequest(url + "?bundle=1", {
     headers: { authorization: "Bearer " + token },
   }), params);
+  const publish = (content: string, model: string, base: { contentVersion: number; contentHash: string }) =>
+    updateSharedProfile(new NextRequest(url, {
+      method: "POST",
+      headers: { authorization: "Bearer " + token },
+      body: JSON.stringify({
+        authContent: content,
+        configContent: `model = "${model}"`,
+        baseContentVersion: base.contentVersion,
+        baseContentHash: base.contentHash,
+      }),
+    }), params);
+
+  expect((await getSharedProfile(new NextRequest(url + "?bundle=1"), params)).status).toBe(401);
+  expect((await readBundle(outsiderToken)).status).toBe(404);
+  expect((await (await readBundle(recipientToken)).json()).authContent).toBe(template);
+  const published = await publish(auth, "gpt-5.5", profile);
+  expect(published.status).toBe(200);
+  const shared = await published.json();
+  expect(shared.contentVersion).toBe(profile.contentVersion + 1);
+  expect(shared.sharedWith).toEqual([recipient.dingUserId]);
+
+  const response = await readBundle(recipientToken);
   expect(response.status).toBe(200);
-  const body = await response.json();
-  expect(body).toMatchObject({
+  expect(response.headers.get("Cache-Control")).toContain("no-store");
+  expect(await response.json()).toMatchObject({
     id: profile.id,
-    contentVersion: profile.contentVersion,
-    contentHash: profile.contentHash,
-    authContent: '{"auth_mode":"chatgpt"}',
+    contentVersion: shared.contentVersion,
+    contentHash: shared.contentHash,
+    authContent: auth,
+    configContent: 'model = "gpt-5.5"',
   });
-  expect(body.configContent).toContain('model = "gpt-5.5"');
+  expect((await readBundle(outsiderToken)).status).toBe(404);
+  expect((await publish(template, "gpt-5.4", profile)).status).toBe(409);
+
+  const savedByOldClient = await publish(template, "gpt-5.4", shared);
+  expect(savedByOldClient.status).toBe(200);
+  expect(await (await readBundle(recipientToken)).json()).toMatchObject({
+    contentVersion: shared.contentVersion + 1,
+    authContent: auth,
+    configContent: 'model = "gpt-5.4"',
+  });
 });
 
 test("legacy file writes require a revision and preserve the sharing policy", async () => {

@@ -5,6 +5,7 @@ import {
   shouldWriteBackSharedAuth,
   fetchSharedProfileBundle,
   networkProfileAuthContent,
+  sharedProfileAuthPreview,
 } from "../src/network-auth-sync";
 
 test("allows shared auth write back when the local remote version matches the cloud version", () => {
@@ -143,9 +144,25 @@ test("rejects a failed file download and a mixed legacy revision", async () => {
   }
 });
 
-test("publishes OAuth configuration as a local login descriptor", () => {
-  expect(networkProfileAuthContent('{"auth_mode":"chatgpt","tokens":{"refresh_token":"fixture"}}'))
-    .toBe('{"auth_mode":"chatgpt"}');
+const sharedOauthAuth = '{"auth_mode":"chatgpt","tokens":{"access_token":"access-fixture","id_token":"id-fixture","refresh_token":"refresh-fixture"}}';
+
+test("publishes complete OAuth authorization and refuses a local login descriptor", () => {
+  expect(networkProfileAuthContent(sharedOauthAuth)).toBe(sharedOauthAuth);
+  expect(() => networkProfileAuthContent('{"auth_mode":"chatgpt"}')).toThrow("缺少可共享的官方授权");
   expect(networkProfileAuthContent('{"OPENAI_API_KEY":"fixture"}')).toBe('{"OPENAI_API_KEY":"fixture"}');
   expect(() => networkProfileAuthContent("[]")).toThrow("JSON 对象");
+});
+
+test("passes authorized OAuth credentials through the bundle without displaying token values", async () => {
+  const fixture = { id: "fixture", contentVersion: 1, authContent: sharedOauthAuth, configContent: 'model = "fixture"' };
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(fixture))));
+  try {
+    const downloaded = await fetchSharedProfileBundle("https://example.invalid/profiles", "fixture", {},
+      (action) => new Error(action));
+    expect(downloaded.authJson).toBe(sharedOauthAuth);
+    expect(sharedProfileAuthPreview(downloaded.authJson)).toContain("应用时使用");
+    expect(sharedProfileAuthPreview(downloaded.authJson)).not.toContain("refresh-fixture");
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });

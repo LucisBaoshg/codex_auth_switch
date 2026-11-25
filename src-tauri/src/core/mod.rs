@@ -623,7 +623,7 @@ impl RemoteProfileRevision {
         }
 
         metadata.published_from_local = (same_profile && metadata.published_from_local)
-            || (publish && metadata.remote_profile_id.is_none());
+            || (publish && (same_profile || metadata.remote_profile_id.is_none()));
         metadata.remote_profile_id = Some(id.to_string());
         metadata.remote_content_version = self.version;
         metadata.remote_content_hash = self
@@ -1435,10 +1435,16 @@ impl ProfileManager {
                 .is_some_and(|profile| profile.id == profile_id);
         if let Some(revision) = revision {
             revision.apply(&mut existing, false)?;
-            if existing.published_from_local && is_official_oauth_auth(&input.auth_json)? {
-                let stored = fs::read_to_string(profile_dir.join("auth.json"))?;
-                if has_local_oauth_tokens(&stored) {
-                    input.auth_json = stored;
+            if is_official_oauth_auth(&input.auth_json)? {
+                if let Some(stored) = read_optional_profile_text(&profile_dir.join("auth.json"))? {
+                    let keep_local_login = existing.published_from_local
+                        && is_local_oauth_template(&input.auth_json)
+                        && has_local_oauth_tokens(&stored);
+                    if keep_local_login
+                        || is_newer_oauth_for_same_account(&stored, &input.auth_json)?
+                    {
+                        input.auth_json = stored;
+                    }
                 }
             }
         }
@@ -1446,7 +1452,7 @@ impl ProfileManager {
         validate_auth_json(&input.auth_json)?;
         let oauth = is_official_oauth_auth(&input.auth_json)?;
         let local_oauth_template =
-            oauth && existing.remote_profile_id.is_some() && !existing.published_from_local;
+            existing.remote_profile_id.is_some() && is_local_oauth_template(&input.auth_json);
         let current_auth = if apply_to_runtime {
             read_optional_profile_text(&self.target_auth_path())?
         } else {
@@ -1460,9 +1466,7 @@ impl ProfileManager {
         let live_oauth = current_auth
             .as_deref()
             .filter(|auth| has_local_oauth_tokens(auth));
-        if local_oauth_template {
-            input.auth_json = remote_profile_auth(&input.auth_json)?;
-        } else if let Some(live) = live_oauth {
+        if let Some(live) = live_oauth.filter(|_| !local_oauth_template) {
             if oauth && auth_match_hash(live)? == auth_match_hash(&input.auth_json)? {
                 input.auth_json = live.to_string();
             }
@@ -1606,14 +1610,22 @@ impl ProfileManager {
                     if remote_version == local_version
                         && detail.content_hash == local.remote_content_hash
                     {
-                        continue;
+                        let restore_shared_auth = has_local_oauth_tokens(&auth_json)
+                            && read_optional_profile_text(
+                                &self.profile_dir(&local.id)?.join("auth.json"),
+                            )?
+                            .as_deref()
+                            .is_some_and(is_local_oauth_template);
+                        if !restore_shared_auth {
+                            continue;
+                        }
                     }
                 } else if local.remote_content_version.is_some() {
                     continue;
                 }
             }
 
-            let auth_json = remote_profile_auth(&auth_json)?;
+            validate_auth_json(&auth_json)?;
             validate_config_toml(&repair_illegal_config_toml(&config_toml))?;
             let payload = ProfileInput {
                 name: detail.name.clone(),
@@ -1703,25 +1715,26 @@ impl ProfileManager {
             .as_deref()
             .filter(|auth| has_local_oauth_tokens(auth));
         let oauth = is_official_oauth_auth(&saved_auth)?;
-        let live_auth = if oauth
-            && metadata.remote_profile_id.is_some()
-            && !metadata.published_from_local
-        {
+        let from_shared_profile = metadata.remote_profile_id.is_some();
+        let shared_oauth = from_shared_profile && has_local_oauth_tokens(&saved_auth);
+        let live_auth = if from_shared_profile && is_local_oauth_template(&saved_auth) {
             Some(local_oauth.ok_or_else(|| {
                 AppError::Message("请先在本机 Codex 登录 ChatGPT，再应用这份共享配置。".into())
             })?)
+        } else if let Some(live) = local_oauth {
+            let use_live = if shared_oauth {
+                is_newer_oauth_for_same_account(live, &saved_auth)?
+            } else {
+                oauth && auth_match_hash(live)? == auth_match_hash(&saved_auth)?
+            };
+            use_live.then_some(live)
         } else {
-            match local_oauth {
-                Some(auth) if oauth && auth_match_hash(auth)? == auth_match_hash(&saved_auth)? => {
-                    Some(auth)
-                }
-                _ => None,
-            }
+            None
         };
         let archived_auth;
         let auth_source = if let Some(live_auth) = live_auth {
             live_auth
-        } else if oauth {
+        } else if oauth && !shared_oauth {
             archived_auth = self.newest_local_oauth(profile_id, saved_auth)?;
             archived_auth.as_str()
         } else {
@@ -1754,9 +1767,10 @@ impl ProfileManager {
 
         let backup_id =
             self.backup_runtime_profile(current_auth.as_deref(), current_config.as_deref())?;
-        let next_auth = match live_auth {
-            Some(auth) => auth.to_string(),
-            None => refresh_oauth_auth_json(auth_source)?,
+        let next_auth = if shared_oauth || live_auth.is_some() {
+            auth_source.to_string()
+        } else {
+            refresh_oauth_auth_json(auth_source)?
         };
         // Persist any rotated credential before committing the runtime files.
         self.sync_runtime_state_to_profile(profile_id, &next_auth, &next_config)?;
@@ -2361,8 +2375,14 @@ impl ProfileManager {
         let existing_metadata = self.read_profile_metadata(&profile_dir)?;
         let archived_config;
         let config_toml = if existing_metadata.remote_profile_id.is_some() {
-            if !existing_metadata.published_from_local || !is_official_oauth_auth(auth_json)? {
+            if !is_official_oauth_auth(auth_json)? {
                 return Ok(());
+            }
+            if !existing_metadata.published_from_local {
+                let archived_auth = fs::read_to_string(profile_dir.join("auth.json"))?;
+                if !is_newer_oauth_for_same_account(auth_json, &archived_auth)? {
+                    return Ok(());
+                }
             }
             // Capturing a local login must preserve any newer shared configuration staged here.
             archived_config = fs::read_to_string(profile_dir.join("config.toml"))?;

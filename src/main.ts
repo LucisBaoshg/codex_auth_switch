@@ -1835,9 +1835,8 @@ async function publishExistingSharedProfile(
     const revision = localVersion == null
       ? `本机尚未记录此档案的共享修订，云端当前修订 ${version}。`
       : `本机上次确认的共享修订 ${localVersion}，云端当前修订 ${version}，同步记录有差异。`;
-    const login = authContent === localOauthProfileAuth ? " 成员使用各自设备的 Codex 登录。" : "";
     const confirmed = await nativeConfirm(
-      `${revision} 是否用「${document.name}」的本机配置更新企业共享库？${login}`,
+      `${revision} 是否用「${document.name}」的本机配置更新企业共享库？`,
       "发布本机配置",
     );
     if (!confirmed) return null;

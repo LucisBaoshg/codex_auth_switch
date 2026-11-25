@@ -1226,9 +1226,10 @@ fn update_active_profile_rewrites_live_target_files() {
 }
 
 #[test]
-fn cloud_update_stages_files_and_uses_the_current_device_login_on_apply() {
+fn cloud_update_stages_shared_oauth_until_explicit_apply() {
     let (_app_dir, target_dir, mut manager) = temp_manager();
     let local_auth = oauth_auth_json("local@example.com", "user-local", "acct-local");
+    let shared_auth = oauth_auth_json("after@example.com", "user-after", "acct-after");
     let profile = manager
         .import_profile(ProfileInput {
             name: "Shared OAuth".into(),
@@ -1245,7 +1246,7 @@ fn cloud_update_stages_files_and_uses_the_current_device_login_on_apply() {
             ProfileInput {
                 name: "Shared OAuth".into(),
                 notes: "after cloud update".into(),
-                auth_json: oauth_auth_json("after@example.com", "user-after", "acct-after"),
+                auth_json: shared_auth.clone(),
                 config_toml: "model = \"gpt-5.5\"\nmodel_reasoning_effort = \"high\"\n".into(),
             },
             RemoteProfileRevision {
@@ -1261,13 +1262,17 @@ fn cloud_update_stages_files_and_uses_the_current_device_login_on_apply() {
     assert!(fs::read_to_string(&config_path)
         .unwrap()
         .contains("model = \"gpt-5\""));
+    assert_eq!(
+        fs::read_to_string(target_dir.path().join("auth.json")).unwrap(),
+        local_auth
+    );
     let result = manager.switch_profile(&profile.id).unwrap();
     let live_config = fs::read_to_string(&config_path).unwrap();
     assert!(live_config.contains("model = \"gpt-5.5\""));
     assert!(live_config.contains("[mcp_servers.playwright]"));
     assert_eq!(
         fs::read_to_string(target_dir.path().join("auth.json")).unwrap(),
-        local_auth
+        shared_auth
     );
     let backup = _app_dir.path().join("backups").join(result.backup_id);
     assert!(fs::read_to_string(backup.join("config.toml"))
@@ -1325,6 +1330,66 @@ fn shared_oauth_profile_cannot_apply_without_a_local_login() {
     let error = manager.switch_profile(&profile.id).unwrap_err().to_string();
     assert!(error.contains("请先在本机 Codex 登录"));
     assert!(!target.path().join("auth.json").exists());
+}
+
+#[test]
+fn shared_oauth_applies_the_shared_account_without_refreshing_during_switch() {
+    with_process_env_lock(|| {
+        let (_app_dir, target, mut manager) = temp_manager();
+        let _refresh_endpoint =
+            ScopedEnvVar::set("CODEX_REFRESH_TOKEN_URL_OVERRIDE", "http://127.0.0.1:1");
+        let local_auth = oauth_auth_json("local@example.com", "user-local", "acct-local");
+        fs::write(target.path().join("auth.json"), &local_auth).unwrap();
+        fs::write(
+            target.path().join("config.toml"),
+            official_config_toml("gpt-5"),
+        )
+        .unwrap();
+        let mut shared: serde_json::Value = serde_json::from_str(&oauth_auth_json(
+            "shared@example.com",
+            "user-shared",
+            "acct-shared",
+        ))
+        .unwrap();
+        shared["tokens"]["refresh_token"] = "simulated-rotating-refresh-token".into();
+        let shared_auth = shared.to_string();
+        let profile = manager
+            .import_profile(ProfileInput {
+                name: "Shared OAuth".into(),
+                notes: String::new(),
+                auth_json: shared_auth.clone(),
+                config_toml: official_config_toml("gpt-5.5"),
+            })
+            .unwrap();
+        manager
+            .set_profile_remote_metadata(
+                &profile.id,
+                RemoteProfileRevision {
+                    id: "remote-1".into(),
+                    version: Some(2),
+                    hash: None,
+                    updated_at: None,
+                },
+                false,
+            )
+            .unwrap();
+        let switched = manager.switch_profile(&profile.id).unwrap();
+        assert_eq!(
+            fs::read_to_string(target.path().join("auth.json")).unwrap(),
+            shared_auth
+        );
+        assert_eq!(
+            fs::read_to_string(
+                _app_dir
+                    .path()
+                    .join("backups")
+                    .join(switched.backup_id)
+                    .join("auth.json")
+            )
+            .unwrap(),
+            local_auth
+        );
+    });
 }
 
 #[test]
