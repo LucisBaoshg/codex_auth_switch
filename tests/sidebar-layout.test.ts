@@ -2245,7 +2245,12 @@ test("shares a local profile to selected known SSO users from the sharing center
   expect(profilePostBodies[0].get("sharedWith")).toBe(JSON.stringify(["Ding-B"]));
 });
 
-test("re-sharing an owned local profile updates the existing enterprise shared profile files", async () => {
+test.each([
+  { scenario: "confirms an older local baseline", localVersion: 26, decision: "confirm", writeStatus: 200 },
+  { scenario: "cancels an older local baseline", localVersion: 26, decision: "cancel", writeStatus: 200 },
+  { scenario: "rejects a change after confirmation", localVersion: 26, decision: "confirm", writeStatus: 409 },
+  { scenario: "publishes from a matching baseline", localVersion: 100, decision: null, writeStatus: 200 },
+])("publishing an owned shared profile $scenario", async ({ localVersion, decision, writeStatus }) => {
   Object.defineProperty(window, "__TAURI_INTERNALS__", {
     configurable: true,
     value: {},
@@ -2275,6 +2280,9 @@ test("re-sharing an owned local profile updates the existing enterprise shared p
         updatedAt: "2026-06-05T08:00:00Z",
         authHash: "auth-new",
         configHash: "config-new",
+        remoteProfileId: "remote-owned",
+        remoteContentVersion: localVersion,
+        remoteContentHash: `hash-v${localVersion}`,
         codexUsage: null,
         thirdPartyLatency: null,
         thirdPartyUsage: null,
@@ -2295,6 +2303,8 @@ test("re-sharing an owned local profile updates the existing enterprise shared p
       visibility: "selected",
       sharedWith: ["Ding-B"],
       sourceProfileId: "local-chatgpt-pro",
+      contentVersion: 99,
+      contentHash: "hash-v99",
     },
   ];
   const updateBodies: Record<string, unknown>[] = [];
@@ -2310,6 +2320,9 @@ test("re-sharing an owned local profile updates the existing enterprise shared p
         authTypeLabel: "官方 OAuth",
         createdAt: "2026-06-04T10:00:00Z",
         updatedAt: "2026-06-05T08:00:00Z",
+        remoteProfileId: "remote-owned",
+        remoteContentVersion: localVersion,
+        remoteContentHash: `hash-v${localVersion}`,
         authJson: '{"auth_mode":"chatgpt","tokens":{"access_token":"new-token"}}',
         configToml: 'model = "gpt-5.5"\n',
         loadedFromTarget: true,
@@ -2336,18 +2349,19 @@ test("re-sharing an owned local profile updates the existing enterprise shared p
         json: async () => ({ users: [{ dingUserId: "Ding-B", label: "Bob", mobile: "13900000002" }] }),
       };
     }
-    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-owned" && init?.method === "POST") {
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-owned") {
+      if (init?.method !== "POST") {
+        return new Response(JSON.stringify({ ...remoteProfiles[0], contentVersion: 100, contentHash: "hash-v100" }));
+      }
       updateBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({
+      return writeStatus === 409
+        ? new Response(JSON.stringify({ currentVersion: 101, currentHash: "other-content" }), { status: 409 })
+        : new Response(JSON.stringify({
           ...remoteProfiles[0],
           updatedAt: "2026-06-05T08:00:00Z",
-          contentVersion: 2,
+          contentVersion: 101,
           contentHash: "new-content-hash",
-        }),
-      };
+        }));
     }
     if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles") {
       return {
@@ -2371,35 +2385,56 @@ test("re-sharing an owned local profile updates the existing enterprise shared p
   await flushUi();
   await flushUi();
 
-  document
-    .querySelector<HTMLButtonElement>('[data-action="share-local-profile"]')
-    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-  await flushUi();
-  await flushUi();
-  await flushUi();
+  expect(document.querySelector("#btn-ok")).toBeNull();
+  const publishButton = document.querySelector<HTMLButtonElement>('[data-action="share-local-profile"]')!;
+  expect(publishButton.textContent).toContain("发布本机配置");
+  publishButton.click();
+  await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+    "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-owned",
+    { cache: "no-store", headers: { Authorization: "Bearer cas_test_token" } },
+  ));
 
-  expect(fetchMock).not.toHaveBeenCalledWith(
-    "https://codex-helper.ite.tool4seller.com/codex/api/profiles",
-    expect.objectContaining({ method: "POST" }),
-  );
-  expect(updateBodies).toHaveLength(1);
+  if (decision) {
+    await vi.waitFor(() => expect(document.querySelector("#btn-ok")?.textContent).toBe("发布本机配置"));
+    expect(document.body.textContent).toContain("本机上次确认的共享修订 26，云端当前修订 100");
+    expect(document.body.textContent).toContain("各自设备的 Codex 登录");
+    expect(updateBodies).toHaveLength(0);
+    document.querySelector<HTMLButtonElement>(decision === "confirm" ? "#btn-ok" : "#btn-cancel")!.click();
+  }
+
+  await vi.waitFor(() => expect(
+    document.querySelector<HTMLButtonElement>('[data-action="share-local-profile"]')?.disabled,
+  ).toBe(false));
+
+  expect(invokeMock).not.toHaveBeenCalledWith("update_profile_from_cloud", expect.anything());
+  expect(invokeMock).not.toHaveBeenCalledWith("restart_codex", undefined);
+  if (decision === "cancel") {
+    expect(updateBodies).toHaveLength(0);
+    expect(invokeMock).not.toHaveBeenCalledWith("set_profile_remote_metadata", expect.anything());
+    return;
+  }
+  expect(updateBodies).toEqual([{
+    name: "ChatGPT Pro",
+    description: "自动从当前 Codex 配置生成",
+    baseContentVersion: 100,
+    baseContentHash: "hash-v100",
+    authContent: '{"auth_mode":"chatgpt"}',
+    configContent: 'model = "gpt-5.5"\n',
+  }]);
+  if (writeStatus === 409) {
+    expect(document.body.textContent).toContain("云端配置刚刚发生变化");
+    expect(invokeMock).not.toHaveBeenCalledWith("set_profile_remote_metadata", expect.anything());
+    return;
+  }
   expect(invokeMock).toHaveBeenCalledWith("set_profile_remote_metadata", {
     profileId: "local-chatgpt-pro",
     publishedFromLocal: true,
-    revision: expect.objectContaining({ id: "remote-owned", version: 2, hash: "new-content-hash" }),
+    revision: expect.objectContaining({ id: "remote-owned", version: 101, hash: "new-content-hash" }),
   });
-  expect(updateBodies[0]).toEqual(expect.objectContaining({
-    name: "ChatGPT Pro",
-    description: "自动从当前 Codex 配置生成",
-    visibility: "selected",
-    sharedWith: ["Ding-B"],
-    sourceProfileId: "local-chatgpt-pro",
-    authContent: '{"auth_mode":"chatgpt"}',
-    configContent: 'model = "gpt-5.5"\n',
-  }));
+  expect(document.body.textContent).toContain("的本机配置发布到企业共享中心");
 });
 
-test("re-sharing warns when the enterprise backend does not return content version metadata", async () => {
+test("publishing blocks writes when the enterprise backend lacks content version metadata", async () => {
   Object.defineProperty(window, "__TAURI_INTERNALS__", {
     configurable: true,
     value: {},
@@ -2487,7 +2522,7 @@ test("re-sharing warns when the enterprise backend does not return content versi
         json: async () => ({ users: [{ dingUserId: "Ding-B", label: "Bob" }] }),
       };
     }
-    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-owned" && init?.method === "POST") {
+    if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-owned" && init?.method !== "POST") {
       return {
         ok: true,
         status: 200,
@@ -2526,6 +2561,10 @@ test("re-sharing warns when the enterprise backend does not return content versi
   await flushUi();
 
   expect(document.body.textContent).toContain("企业共享库服务端尚未升级");
+  expect(fetchMock).not.toHaveBeenCalledWith(
+    "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-owned",
+    expect.objectContaining({ method: "POST" }),
+  );
 });
 
 test("edits recipients for an owned shared profile and shows its share count in the library tab", async () => {

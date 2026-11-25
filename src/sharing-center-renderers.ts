@@ -457,7 +457,7 @@ function renderSharedProfileSummary(profile: NetworkProfile, input: LocalShareFo
         data-action="share-local-profile"
         ${input.busy ? "disabled" : ""}
       >
-        同步授权信息
+        发布本机配置
       </button>
       <button
         class="button button-secondary"

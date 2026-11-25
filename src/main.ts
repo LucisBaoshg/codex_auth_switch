@@ -159,7 +159,6 @@ import {
 } from "./sharing-center-renderers";
 import {
   createSharedProfileEditDraft,
-  resolveSharedProfileUpdateScope,
   resolveLocalShareFormState,
 } from "./sharing-center-state";
 import {
@@ -1482,12 +1481,18 @@ async function updateActiveSharedProfileFromCloud(
 }
 
 async function checkActiveSharedProfileUpdate(): Promise<void> {
-  if (!isTauriRuntime || remoteUpdateCheckInFlight) {
+  if (!isTauriRuntime || remoteUpdateCheckInFlight || state.networkUserLoading) {
     return;
   }
 
   const target = activeSharedProfileUpdateTarget();
   if (!target) {
+    return;
+  }
+  if (
+    target.remoteProfile.sourceProfileId === target.activeProfile.id &&
+    isOwnNetworkProfile(target.remoteProfile, state.networkUser)
+  ) {
     return;
   }
 
@@ -1791,6 +1796,72 @@ async function importCurrentNetworkProfileFromEditor(): Promise<void> {
   }
 }
 
+async function publishExistingSharedProfile(
+  profilesApi: string,
+  fetchOptions: RequestInit,
+  remoteProfileId: string,
+  document: ProfileDocument,
+  authContent: string,
+): Promise<Response | null> {
+  const url = `${profilesApi}/${encodeURIComponent(remoteProfileId)}`;
+  const response = await fetch(url, fetchOptions);
+  if (response.status === 401) {
+    throw networkUnauthorizedError("读取共享配置修订");
+  }
+  if (!response.ok) {
+    throw new Error(`无法读取共享配置修订（HTTP ${response.status}）。`);
+  }
+  const remote = await response.json() as NetworkProfile;
+  if (
+    remote?.id !== remoteProfileId ||
+    !isOwnNetworkProfile(remote, state.networkUser) ||
+    (remote.sourceProfileId ? remote.sourceProfileId !== document.id : !sameProfileName(remote.name, document.name))
+  ) {
+    throw new Error("共享档案的归属或来源有变化，请刷新企业共享库后重试。");
+  }
+
+  const version = remote.contentVersion;
+  const hash = typeof remote.contentHash === "string" ? remote.contentHash.trim() : "";
+  if (typeof version !== "number" || !Number.isSafeInteger(version) || version < 1 || !hash) {
+    throw new Error("企业共享库服务端尚未升级，无法核对发布修订。");
+  }
+  const linked = document.remoteProfileId?.trim() === remote.id;
+  const localVersion = linked ? document.remoteContentVersion : null;
+  const localHash = linked ? document.remoteContentHash?.trim() : null;
+  if (localVersion != null && localVersion > version) {
+    throw new Error("共享服务返回了较早的修订，请刷新企业共享库后重试。");
+  }
+  if (localVersion !== version || localHash !== hash) {
+    const revision = localVersion == null
+      ? `本机尚未记录此档案的共享修订，云端当前修订 ${version}。`
+      : `本机上次确认的共享修订 ${localVersion}，云端当前修订 ${version}，同步记录有差异。`;
+    const login = authContent === localOauthProfileAuth ? " 成员使用各自设备的 Codex 登录。" : "";
+    const confirmed = await nativeConfirm(
+      `${revision} 是否用「${document.name}」的本机配置更新企业共享库？${login}`,
+      "发布本机配置",
+    );
+    if (!confirmed) return null;
+  }
+
+  return fetch(url, {
+    ...fetchOptions,
+    method: "POST",
+    headers: {
+      ...fetchOptions.headers,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      name: document.name,
+      description: document.notes || "",
+      ...(remote.sourceProfileId ? {} : { sourceProfileId: document.id }),
+      baseContentVersion: version,
+      baseContentHash: hash,
+      authContent,
+      configContent: document.configToml,
+    }),
+  });
+}
+
 async function shareLocalProfileToNetwork(): Promise<void> {
   const profileId = state.shareDraft.profileId;
   const normalizedSelectedUserIds = normalizeShareTargets(state.shareDraft.selectedUserIds);
@@ -1815,15 +1886,9 @@ async function shareLocalProfileToNetwork(): Promise<void> {
       ? await desktopInvoke<ProfileDocument>("get_profile_document", { profileId })
       : createMockProfileDocument(summary);
     const existingProfile = findOwnedNetworkProfileForLocalProfile(profileId, document.name);
-    if (existingProfile && sharedProfileHasNewerRemote(document, existingProfile)) {
-      throw new Error("共享配置已有更新，请先同步对应的远端版本。");
-    }
-    const { visibility, sharedWith } = resolveSharedProfileUpdateScope(
-      existingProfile,
-      state.shareDraft.visibility,
-      normalizedSelectedUserIds,
-    );
-    if (visibility === "selected" && sharedWith.length === 0) {
+    const visibility = state.shareDraft.visibility;
+    const sharedWith = visibility === "selected" ? normalizedSelectedUserIds : [];
+    if (!existingProfile && visibility === "selected" && sharedWith.length === 0) {
       setFlash("error", "请选择至少一位共享对象，或切换为全部员工可见。");
       return;
     }
@@ -1831,30 +1896,19 @@ async function shareLocalProfileToNetwork(): Promise<void> {
     if (!(await validateConfigUsageBeforeSync(document.authJson, document.configToml, "共享配置"))) {
       return;
     }
-    const headers = networkAuthHeaders(state.networkSharing);
+    const profilesApi = networkProfilesApiUrl(state.networkSharing);
+    const fetchOptions = networkFetchOptions(state.networkSharing);
     const response = existingProfile
-      ? await fetch(`${networkProfilesApiUrl(state.networkSharing)}/${existingProfile.id}`, {
+      ? await publishExistingSharedProfile(
+          profilesApi,
+          fetchOptions,
+          existingProfile.id,
+          document,
+          authContent,
+        )
+      : await fetch(profilesApi, {
+          ...fetchOptions,
           method: "POST",
-          cache: "no-store",
-          headers: {
-            "Content-Type": "application/json",
-            ...(headers ?? {}),
-          },
-          body: JSON.stringify({
-            name: document.name,
-            description: document.notes || "",
-            visibility,
-            sharedWith,
-            sourceProfileId: profileId,
-            ...sharedAuthWriteBackBase(document, existingProfile),
-            authContent,
-            configContent: document.configToml,
-          }),
-        })
-      : await fetch(networkProfilesApiUrl(state.networkSharing), {
-          method: "POST",
-          cache: "no-store",
-          ...(headers ? { headers } : {}),
           body: (() => {
             const formData = new FormData();
             formData.append("name", document.name);
@@ -1868,8 +1922,12 @@ async function shareLocalProfileToNetwork(): Promise<void> {
           })(),
         });
 
+    if (!response) return;
     if (response.status === 401) {
       throw networkUnauthorizedError("共享配置");
+    }
+    if (existingProfile && response.status === 409) {
+      throw new Error("云端配置刚刚发生变化，请再次点「发布本机配置」核对新修订。");
     }
     if (!response.ok) {
       const body = await response.json().catch(() => ({})) as { error?: string };
@@ -1892,7 +1950,7 @@ async function shareLocalProfileToNetwork(): Promise<void> {
     if (linkedSnapshot) setSnapshot(linkedSnapshot);
 
     setFlash("success", existingProfile
-      ? `已同步「${document.name}」的授权信息到企业共享中心。`
+      ? `已将「${document.name}」的本机配置发布到企业共享中心。`
       : `已共享「${document.name}」到企业共享中心。`);
     await fetchNetworkProfiles();
   } catch (error) {

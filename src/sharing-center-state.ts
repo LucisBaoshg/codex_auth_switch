@@ -1,9 +1,5 @@
 import type { ProfileSummary } from "./desktop-types";
-import {
-  networkProfileVisibility,
-  type NetworkProfile,
-  type ShareVisibility,
-} from "./network-profile-utils";
+import { networkProfileVisibility, type NetworkProfile } from "./network-profile-utils";
 import type {
   LocalShareDraft,
   SharedProfileEditDraft,
@@ -50,24 +46,4 @@ export function createSharedProfileEditDraft(
     visibility,
     selectedUserIds: visibility === "selected" ? [...(profile.sharedWith ?? [])] : [],
   };
-}
-
-export type SharedProfileUpdateScope = {
-  visibility: ShareVisibility;
-  sharedWith: string[];
-};
-
-export function resolveSharedProfileUpdateScope(
-  existingProfile: Pick<NetworkProfile, "visibility" | "sharedWith"> | null,
-  draftVisibility: ShareVisibility,
-  selectedUserIds: readonly string[],
-): SharedProfileUpdateScope {
-  const visibility = existingProfile ? networkProfileVisibility(existingProfile) : draftVisibility;
-  const sharedWith = visibility === "selected"
-    ? (existingProfile && selectedUserIds.length === 0
-        ? [...(existingProfile.sharedWith ?? [])]
-        : [...selectedUserIds])
-    : [];
-
-  return { visibility, sharedWith };
 }

@@ -114,7 +114,7 @@ codex-auth-switch-cli switch <profile-id-or-name>
 安装最新 Linux CLI：
 
 ```bash
-VERSION=2.0.19
+VERSION=2.0.20
 curl -L \
   -o /tmp/codex-auth-switch-cli.tar.gz \
   "https://github.com/LucisBaoshg/codex_auth_switch/releases/download/v${VERSION}/codex-auth-switch-cli_${VERSION}_linux_x64.tar.gz"
@@ -163,8 +163,8 @@ npm run build:mac:release-local
 正式发布通过 Git tag 触发：
 
 ```bash
-git tag -a v2.0.19 -m "release: v2.0.19"
-git push origin v2.0.19
+git tag -a v2.0.20 -m "release: v2.0.20"
+git push origin v2.0.20
 ```
 
 `publish-release.yml` 会：
