@@ -2,8 +2,8 @@ use codex_auth_switch_lib::core::{ProfileInput, ProfileManager};
 use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
-use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -36,6 +36,24 @@ fn temp_manager() -> (TempDir, TempDir, ProfileManager) {
     (app_dir, target_dir, manager)
 }
 
+fn read_request_path(stream: &mut TcpStream) -> Option<String> {
+    stream.set_nonblocking(false).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).ok()?;
+    let path = line.split_whitespace().nth(1)?.to_string();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).ok()? == 0 {
+            return None;
+        }
+        if line == "\r\n" || line == "\n" {
+            return Some(path);
+        }
+    }
+}
+
 struct TestServer {
     base_url: String,
     responses: Arc<Mutex<HashMap<String, (String, String)>>>,
@@ -59,23 +77,14 @@ impl TestServer {
             while !thread_shutdown.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        let mut buffer = [0_u8; 4096];
-                        let bytes_read = stream.read(&mut buffer).unwrap_or(0);
-                        if bytes_read == 0 {
+                        let Some(path) = read_request_path(&mut stream) else {
                             continue;
-                        }
-
-                        let request = String::from_utf8_lossy(&buffer[..bytes_read]);
-                        let path = request
-                            .lines()
-                            .next()
-                            .and_then(|line| line.split_whitespace().nth(1))
-                            .unwrap_or("/");
+                        };
 
                         let response = thread_responses
                             .lock()
                             .expect("lock responses")
-                            .get(path)
+                            .get(&path)
                             .cloned();
 
                         let (status, content_type, body) = match response {
@@ -327,4 +336,35 @@ fn resolve_profile_selector_supports_profile_id_and_exact_name() {
         .resolve_profile_selector("Tapcash Main")
         .expect("resolve by name");
     assert_eq!(by_name.id, profile.id);
+}
+
+#[test]
+fn mock_server_reads_split_http_request_headers_before_responding() {
+    let server = TestServer::start();
+    server.set_text("/profiles", "fixture");
+    let address = server.base_url.trim_start_matches("http://");
+    let mut client = TcpStream::connect(address).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    client.write_all(b"GET /profiles HTTP/1.1\r\n").unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    let error = client.peek(&mut [0]).unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    ));
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    client
+        .write_all(b"Host: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .unwrap();
+
+    let mut response = String::new();
+    client.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response:?}");
+    assert!(response.ends_with("\r\n\r\nfixture"));
 }
