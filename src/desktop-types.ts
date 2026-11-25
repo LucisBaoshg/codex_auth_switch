@@ -47,6 +47,7 @@ export type ProfileDocument = {
   createdAt: string;
   updatedAt: string;
   authJson: string;
+  authContentHash?: string;
   configToml: string;
   thirdPartyDraft?: ThirdPartyConfigDraft | null;
   loadedFromTarget: boolean;
@@ -76,6 +77,8 @@ export type ConfigRecoveryNotice = {
 export type MenuBarUsageWindow = "fiveHour" | "weekly";
 
 export type AppSnapshot = {
+  importedProfileId?: string;
+  switchWarning?: string | null;
   targetDir: string;
   usingDefaultTargetDir: boolean;
   targetExists: boolean;

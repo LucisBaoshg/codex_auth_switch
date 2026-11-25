@@ -428,3 +428,18 @@ test("shows DingTalk SSO login inside the sharing center", async () => {
     body: null,
   });
 });
+
+test("retains a saved token only for the sharing server where it was entered", async () => {
+  const { loadNetworkSharingSettings, networkAuthHeaders, saveNetworkSharingSettings, setNetworkAccessToken } =
+    await import("../src/network-sharing");
+  const settings = loadNetworkSharingSettings();
+  settings.profilesApi = "https://share-a.example/codex/api/profiles";
+  setNetworkAccessToken(settings, "fixture-1");
+  saveNetworkSharingSettings(settings);
+  expect(networkAuthHeaders(loadNetworkSharingSettings())).toEqual({ Authorization: "Bearer fixture-1" });
+
+  settings.profilesApi = "https://share-b.example/codex/api/profiles";
+  expect(networkAuthHeaders(settings)).toBeUndefined();
+  saveNetworkSharingSettings(settings);
+  expect(loadNetworkSharingSettings().token).toBe("");
+});

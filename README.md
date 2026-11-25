@@ -105,14 +105,16 @@ codex-auth-switch-cli switch <profile-id-or-name>
 
 环境变量：
 
-- `CODEX_AUTH_SWITCH_TARGET_DIR`：指定目标 Codex 配置目录，默认 `~/.codex`
+- `CODEX_AUTH_SWITCH_TARGET_DIR` 指定目标配置目录。缺省时采用 `CODEX_HOME` 或 `~/.codex`。
 - `CODEX_AUTH_SWITCH_REMOTE_BASE_URL`：覆盖远程 profiles 地址
 - `CODEX_AUTH_SWITCH_REMOTE_TOKEN`：远程接口 Bearer Token
+
+拉取同步只更新本地档案。执行 `switch` 后才会应用到运行环境。使用官方 OAuth 或共生共享档案前，请先在当前设备上的 Codex 登录 ChatGPT，再应用共享配置。
 
 安装最新 Linux CLI：
 
 ```bash
-VERSION=1.4.25
+VERSION=2.0.19
 curl -L \
   -o /tmp/codex-auth-switch-cli.tar.gz \
   "https://github.com/LucisBaoshg/codex_auth_switch/releases/download/v${VERSION}/codex-auth-switch-cli_${VERSION}_linux_x64.tar.gz"
@@ -161,8 +163,8 @@ npm run build:mac:release-local
 正式发布通过 Git tag 触发：
 
 ```bash
-git tag -a v2.0.18 -m "release: v2.0.18"
-git push origin v2.0.18
+git tag -a v2.0.19 -m "release: v2.0.19"
+git push origin v2.0.19
 ```
 
 `publish-release.yml` 会：

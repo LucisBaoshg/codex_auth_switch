@@ -64,9 +64,12 @@ fn run() -> Result<(), String> {
             let profile = manager
                 .resolve_profile_selector(&selector)
                 .map_err(|error| error.to_string())?;
-            manager
+            let result = manager
                 .switch_profile(&profile.id)
                 .map_err(|error| error.to_string())?;
+            if let Some(warning) = result.session_repair_warning {
+                eprintln!("{warning}");
+            }
             println!("switched={} {}", profile.id, profile.name);
         }
         "list" => {
@@ -157,7 +160,7 @@ fn print_usage() {
     println!("codex-auth-switch-cli");
     println!();
     println!("Commands:");
-    println!("  sync-remote            Pull remote profiles into local storage");
+    println!("  sync-remote            Pull remote profiles without applying them");
     println!("  switch <id-or-name>    Switch to a local profile");
     println!("  list                   List local profiles with cached Codex usage");
     println!("  usage enable           Enable Codex usage queries via ChatGPT private endpoint");

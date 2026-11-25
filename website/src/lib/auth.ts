@@ -53,6 +53,17 @@ function sign(value: string) {
   return crypto.createHmac("sha256", sessionSecret()).update(value).digest("base64url");
 }
 
+export function decodeReturnTo(state: string) {
+  try {
+    const parsed = JSON.parse(Buffer.from(state, "base64url").toString("utf-8")) as {
+      returnTo?: string;
+    };
+    return parsed.returnTo && /^\/(?![\\/])/.test(parsed.returnTo) ? parsed.returnTo : "/profiles";
+  } catch {
+    return "/profiles";
+  }
+}
+
 export function createSessionCookieValue(principal: ProfilePrincipal) {
   const payload = base64UrlJson(principal);
   return `${payload}.${sign(payload)}`;

@@ -1,7 +1,7 @@
 use chrono::{SecondsFormat, TimeZone, Utc};
 use codex_auth_switch_lib::core::{
     codex_restart_plan_for_platform, restart_codex_script, CodexRestartPlatform,
-    ConfigRecoveryKind, ProfileInput, ProfileManager,
+    ConfigRecoveryKind, ProfileInput, ProfileManager, RemoteProfileRevision,
 };
 use filetime::{set_file_mtime, FileTime};
 use rusqlite::Connection;
@@ -43,7 +43,8 @@ fn oauth_auth_json(email: &str, user_id: &str, account_id: &str) -> String {
         "auth_mode": "chatgpt",
         "OPENAI_API_KEY": null,
         "tokens": {
-            "id_token": format!("header.{encoded_payload}.signature")
+            "id_token": format!("header.{encoded_payload}.signature"),
+            "access_token": format!("fixture-{user_id}")
         }
     })
     .to_string()
@@ -1225,50 +1226,105 @@ fn update_active_profile_rewrites_live_target_files() {
 }
 
 #[test]
-fn update_active_profile_from_cloud_preserves_local_mcp_config() {
+fn cloud_update_stages_files_and_uses_the_current_device_login_on_apply() {
     let (_app_dir, target_dir, mut manager) = temp_manager();
-
+    let local_auth = oauth_auth_json("local@example.com", "user-local", "acct-local");
     let profile = manager
         .import_profile(ProfileInput {
             name: "Shared OAuth".into(),
             notes: "before cloud update".into(),
-            auth_json: oauth_auth_json("before@example.com", "user-before", "acct-before"),
+            auth_json: local_auth.clone(),
             config_toml: official_config_toml("gpt-5"),
         })
-        .expect("import");
+        .unwrap();
+    manager.switch_profile(&profile.id).unwrap();
 
     manager
-        .switch_profile(&profile.id)
-        .expect("switch active profile");
-
-    manager
-        .update_profile_preserving_runtime_config(
+        .stage_remote_profile_update(
             &profile.id,
             ProfileInput {
                 name: "Shared OAuth".into(),
                 notes: "after cloud update".into(),
                 auth_json: oauth_auth_json("after@example.com", "user-after", "acct-after"),
-                config_toml: r#"model = "gpt-5.5"
-model_reasoning_effort = "high"
-"#
-                .into(),
+                config_toml: "model = \"gpt-5.5\"\nmodel_reasoning_effort = \"high\"\n".into(),
+            },
+            RemoteProfileRevision {
+                id: "remote-1".into(),
+                version: Some(4),
+                hash: Some("fixture".into()),
+                updated_at: None,
             },
         )
-        .expect("update active profile from cloud");
+        .unwrap();
 
-    let live_config =
-        fs::read_to_string(target_dir.path().join("config.toml")).expect("read live config");
+    let config_path = target_dir.path().join("config.toml");
+    assert!(fs::read_to_string(&config_path)
+        .unwrap()
+        .contains("model = \"gpt-5\""));
+    let result = manager.switch_profile(&profile.id).unwrap();
+    let live_config = fs::read_to_string(&config_path).unwrap();
     assert!(live_config.contains("model = \"gpt-5.5\""));
-    assert!(live_config.contains("model_reasoning_effort = \"high\""));
     assert!(live_config.contains("[mcp_servers.playwright]"));
-    assert!(live_config.contains("[projects.\"/tmp/demo\"]"));
-    assert!(live_config.contains("multi_agent = true"));
+    assert_eq!(
+        fs::read_to_string(target_dir.path().join("auth.json")).unwrap(),
+        local_auth
+    );
+    let backup = _app_dir.path().join("backups").join(result.backup_id);
+    assert!(fs::read_to_string(backup.join("config.toml"))
+        .unwrap()
+        .contains("model = \"gpt-5\""));
+}
 
-    let document = manager
-        .get_profile_document(&profile.id)
-        .expect("reload active document");
-    assert!(!document.has_target_changes);
-    assert!(document.config_toml.contains("[mcp_servers.playwright]"));
+#[test]
+fn reapplying_an_oauth_profile_preserves_a_newer_live_credential() {
+    let (_app_dir, target, mut manager) = temp_manager();
+    let saved = oauth_auth_json("local@example.com", "user-local", "acct-local");
+    let profile = manager
+        .import_profile(ProfileInput {
+            name: "Local OAuth".into(),
+            notes: String::new(),
+            auth_json: saved.clone(),
+            config_toml: official_config_toml("gpt-5"),
+        })
+        .unwrap();
+    manager.switch_profile(&profile.id).unwrap();
+    let mut refreshed: serde_json::Value = serde_json::from_str(&saved).unwrap();
+    refreshed["tokens"]["access_token"] = "newer-access-fixture".into();
+    let live = refreshed.to_string();
+    let path = target.path().join("auth.json");
+    fs::write(&path, &live).unwrap();
+
+    manager.switch_profile(&profile.id).unwrap();
+    assert_eq!(fs::read_to_string(path).unwrap(), live);
+}
+
+#[test]
+fn shared_oauth_profile_cannot_apply_without_a_local_login() {
+    let (_app_dir, target, mut manager) = temp_manager();
+    let profile = manager
+        .import_profile(ProfileInput {
+            name: "Shared OAuth".into(),
+            notes: String::new(),
+            auth_json: r#"{"auth_mode":"chatgpt"}"#.into(),
+            config_toml: official_config_toml("gpt-5"),
+        })
+        .unwrap();
+    manager
+        .set_profile_remote_metadata(
+            &profile.id,
+            RemoteProfileRevision {
+                id: "remote-1".into(),
+                version: Some(2),
+                hash: None,
+                updated_at: None,
+            },
+            false,
+        )
+        .unwrap();
+
+    let error = manager.switch_profile(&profile.id).unwrap_err().to_string();
+    assert!(error.contains("请先在本机 Codex 登录"));
+    assert!(!target.path().join("auth.json").exists());
 }
 
 #[test]
@@ -2909,4 +2965,42 @@ fn test_get_codex_session_messages_parsing() {
     // 7. legacy message
     assert_eq!(messages[6].role, "assistant");
     assert_eq!(messages[6].text, "done");
+}
+
+#[test]
+fn older_local_oauth_copy_uses_the_latest_same_account_credential() {
+    let (_app_dir, target, mut manager) = temp_manager();
+    let base: serde_json::Value = serde_json::from_str(&oauth_auth_json(
+        "local@example.com",
+        "same-user",
+        "same-account",
+    ))
+    .unwrap();
+    let mut old = base.clone();
+    old["last_refresh"] = "2026-01-01T00:00:00Z".into();
+    let mut new = base;
+    new["last_refresh"] = "2026-01-02T00:00:00Z".into();
+    new["tokens"]["access_token"] = "latest-fixture".into();
+    let old_profile = manager
+        .import_profile(ProfileInput {
+            name: "Old local copy".into(),
+            notes: String::new(),
+            auth_json: old.to_string(),
+            config_toml: official_config_toml("gpt-5"),
+        })
+        .unwrap();
+    manager
+        .import_profile(ProfileInput {
+            name: "Newer local copy".into(),
+            notes: String::new(),
+            auth_json: new.to_string(),
+            config_toml: official_config_toml("gpt-5"),
+        })
+        .unwrap();
+
+    manager.switch_profile(&old_profile.id).unwrap();
+    assert_eq!(
+        fs::read_to_string(target.path().join("auth.json")).unwrap(),
+        new.to_string()
+    );
 }

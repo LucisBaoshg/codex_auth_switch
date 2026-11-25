@@ -50,6 +50,76 @@ pub(super) fn atomic_write_sensitive(path: &Path, contents: &[u8]) -> Result<(),
     atomic_write_bytes(path, contents, Some(0o600))
 }
 
+pub(super) fn read_optional_profile_file(path: &Path) -> Result<Option<Vec<u8>>, AppError> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(super) fn read_optional_profile_text(path: &Path) -> Result<Option<String>, AppError> {
+    read_optional_profile_file(path)?
+        .map(|bytes| String::from_utf8(bytes).map_err(std::io::Error::other))
+        .transpose()
+        .map_err(Into::into)
+}
+
+pub(super) type ProfileFileUpdate = (PathBuf, Option<Vec<u8>>, Vec<u8>);
+
+pub(super) fn profile_file_update(
+    path: PathBuf,
+    next: Vec<u8>,
+) -> Result<ProfileFileUpdate, AppError> {
+    let previous = read_optional_profile_file(&path)?;
+    Ok((path, previous, next))
+}
+
+pub(super) fn commit_profile_files(writes: &[ProfileFileUpdate]) -> Result<(), AppError> {
+    let mut attempted = Vec::new();
+    let result = (|| {
+        for (path, previous, next) in writes {
+            if read_optional_profile_file(path)?.as_deref() != previous.as_deref() {
+                return Err(AppError::Message(
+                    "运行文件在操作期间发生变化，请重试。".into(),
+                ));
+            }
+            if previous.as_deref() == Some(next.as_slice()) {
+                continue;
+            }
+            attempted.push((path, previous, next));
+            atomic_write_sensitive(path, next)?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let mut rollback_errors = Vec::new();
+        for (path, previous, next) in attempted.into_iter().rev() {
+            match read_optional_profile_file(path) {
+                Ok(Some(current)) if current == *next => {
+                    let rollback = match previous {
+                        Some(previous) => atomic_write_sensitive(path, previous),
+                        None => fs::remove_file(path).map_err(Into::into),
+                    };
+                    if let Err(rollback) = rollback {
+                        rollback_errors.push(format!("{}：{rollback}", path.display()));
+                    }
+                }
+                Err(rollback) => rollback_errors.push(format!("{}：{rollback}", path.display())),
+                _ => {}
+            }
+        }
+        if !rollback_errors.is_empty() {
+            return Err(AppError::Message(format!(
+                "{error}。部分文件恢复失败：{}。请检查配置备份。",
+                rollback_errors.join("、")
+            )));
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
 fn atomic_write_bytes(
     path: &Path,
     contents: &[u8],
@@ -210,6 +280,30 @@ pub(super) fn stable_invalid_file_notice(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn conflicting_second_file_rolls_back_the_first_file() {
+        let root = tempfile::tempdir().unwrap();
+        let auth = root.path().join("auth.json");
+        let config = root.path().join("config.toml");
+        fs::write(&auth, b"auth-old").unwrap();
+        fs::write(&config, b"externally-changed").unwrap();
+        let changes = [
+            (
+                auth.clone(),
+                Some(b"auth-old".to_vec()),
+                b"auth-new".to_vec(),
+            ),
+            (
+                config.clone(),
+                Some(b"config-old".to_vec()),
+                b"config-new".to_vec(),
+            ),
+        ];
+        assert!(commit_profile_files(&changes).is_err());
+        assert_eq!(fs::read(&auth).unwrap(), b"auth-old");
+        assert_eq!(fs::read(&config).unwrap(), b"externally-changed");
+    }
+
     use super::*;
     use chrono::Utc;
     use tempfile::TempDir;

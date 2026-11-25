@@ -29,9 +29,10 @@ mod usage_stats;
 
 pub(crate) use auth_config::*;
 use config_recovery::{
-    acknowledge_pending_notices, atomic_write_json, atomic_write_sensitive, merge_recovery_notices,
-    quarantine_corrupt_file, read_pending_notices, record_pending_notices, recovery_dir,
-    stable_invalid_file_notice,
+    acknowledge_pending_notices, atomic_write_json, atomic_write_sensitive, commit_profile_files,
+    merge_recovery_notices, profile_file_update, quarantine_corrupt_file,
+    read_optional_profile_file, read_optional_profile_text, read_pending_notices,
+    record_pending_notices, recovery_dir, stable_invalid_file_notice, ProfileFileUpdate,
 };
 pub use config_recovery::{ConfigRecoveryKind, ConfigRecoveryNotice};
 pub use pac_proxy::{
@@ -367,6 +368,7 @@ pub struct ProfileDocument {
     pub updated_at: DateTime<Utc>,
     pub third_party_draft: Option<serde_json::Value>,
     pub auth_json: String,
+    pub auth_content_hash: String,
     pub config_toml: String,
     pub loaded_from_target: bool,
     pub has_target_changes: bool,
@@ -378,6 +380,7 @@ pub struct SwitchResult {
     pub profile_id: String,
     pub backup_id: String,
     pub switched_at: DateTime<Utc>,
+    pub session_repair_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -593,6 +596,43 @@ pub(crate) struct RemoteProfileRecord {
     content_updated_at: Option<DateTime<Utc>>,
     #[serde(default)]
     files: Vec<String>,
+    auth_content: Option<String>,
+    config_content: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteProfileRevision {
+    pub id: String,
+    pub version: Option<u64>,
+    pub hash: Option<String>,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+impl RemoteProfileRevision {
+    fn apply(self, metadata: &mut ProfileMetadata, publish: bool) -> Result<(), AppError> {
+        let id = self.id.trim();
+        if id.is_empty() {
+            return Err(AppError::Message("远端档案 ID 不能为空。".into()));
+        }
+        let same_profile = metadata.remote_profile_id.as_deref() == Some(id);
+        if same_profile && metadata.remote_content_version > self.version {
+            return Err(AppError::Message(
+                "共享服务返回了旧版本，请重新同步。".into(),
+            ));
+        }
+
+        metadata.published_from_local = (same_profile && metadata.published_from_local)
+            || (publish && metadata.remote_profile_id.is_none());
+        metadata.remote_profile_id = Some(id.to_string());
+        metadata.remote_content_version = self.version;
+        metadata.remote_content_hash = self
+            .hash
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        metadata.remote_updated_at = self.updated_at;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -631,6 +671,8 @@ struct ProfileMetadata {
     pub remote_content_hash: Option<String>,
     #[serde(default)]
     pub remote_updated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub published_from_local: bool,
     #[serde(default = "unknown_auth_type_label")]
     pub auth_type_label: String,
     #[serde(default)]
@@ -1348,6 +1390,7 @@ impl ProfileManager {
             remote_updated_at: metadata.remote_updated_at,
             created_at: metadata.created_at,
             updated_at: metadata.updated_at,
+            auth_content_hash: sha256_bytes(auth_json.as_bytes()),
             auth_json,
             config_toml,
             loaded_from_target,
@@ -1360,136 +1403,156 @@ impl ProfileManager {
         profile_id: &str,
         input: ProfileInput,
     ) -> Result<ProfileSummary, AppError> {
-        self.update_profile_internal(profile_id, input, false)
+        self.update_profile_internal(profile_id, input, None)
     }
 
-    pub fn update_profile_preserving_runtime_config(
+    pub fn stage_remote_profile_update(
         &self,
         profile_id: &str,
         input: ProfileInput,
+        revision: RemoteProfileRevision,
     ) -> Result<ProfileSummary, AppError> {
-        self.update_profile_internal(profile_id, input, true)
+        self.update_profile_internal(profile_id, input, Some(revision))
     }
 
     fn update_profile_internal(
         &self,
         profile_id: &str,
-        input: ProfileInput,
-        preserve_runtime_config: bool,
+        mut input: ProfileInput,
+        revision: Option<RemoteProfileRevision>,
     ) -> Result<ProfileSummary, AppError> {
+        let _lock = self.lock_profile_writes()?;
         let name = input.name.trim();
         if name.is_empty() {
             return Err(AppError::Message("Profile name cannot be empty.".into()));
         }
 
+        let profile_dir = self.profile_dir(profile_id)?;
+        let mut existing = self.read_profile_metadata(&profile_dir)?;
+        let apply_to_runtime = revision.is_none()
+            && self
+                .detect_active_profile()?
+                .is_some_and(|profile| profile.id == profile_id);
+        if let Some(revision) = revision {
+            revision.apply(&mut existing, false)?;
+            if existing.published_from_local && is_official_oauth_auth(&input.auth_json)? {
+                let stored = fs::read_to_string(profile_dir.join("auth.json"))?;
+                if has_local_oauth_tokens(&stored) {
+                    input.auth_json = stored;
+                }
+            }
+        }
+
         validate_auth_json(&input.auth_json)?;
-        let normalized_config = normalize_config_toml_for_auth(
+        let oauth = is_official_oauth_auth(&input.auth_json)?;
+        let local_oauth_template =
+            oauth && existing.remote_profile_id.is_some() && !existing.published_from_local;
+        let current_auth = if apply_to_runtime {
+            read_optional_profile_text(&self.target_auth_path())?
+        } else {
+            None
+        };
+        let current_config = if apply_to_runtime {
+            read_optional_profile_text(&self.target_config_path())?
+        } else {
+            None
+        };
+        let live_oauth = current_auth
+            .as_deref()
+            .filter(|auth| has_local_oauth_tokens(auth));
+        if local_oauth_template {
+            input.auth_json = remote_profile_auth(&input.auth_json)?;
+        } else if let Some(live) = live_oauth {
+            if oauth && auth_match_hash(live)? == auth_match_hash(&input.auth_json)? {
+                input.auth_json = live.to_string();
+            }
+        }
+
+        let normalized = normalize_config_toml_for_auth(
             &input.auth_json,
             &repair_illegal_config_toml(&input.config_toml),
         )?;
-        let normalized_config =
-            self.materialize_third_party_catalog(&input.auth_json, &normalized_config)?;
-        validate_config_toml(&normalized_config)?;
+        let config = self.materialize_third_party_catalog(&input.auth_json, &normalized)?;
+        validate_config_toml(&config)?;
 
-        let profile_dir = self.profile_dir(profile_id)?;
-        let existing_metadata = self.read_profile_metadata(&profile_dir)?;
-        let is_active_profile = self
-            .detect_active_profile()?
-            .is_some_and(|profile| profile.id == profile_id);
-        let effective_config =
-            if preserve_runtime_config && is_active_profile && self.target_config_path().exists() {
-                merge_profile_managed_config(
-                    &fs::read_to_string(self.target_config_path())?,
-                    &input.auth_json,
-                    &normalized_config,
-                )?
-            } else {
-                normalized_config
-            };
         let next_auth_hash = auth_match_hash(&input.auth_json)?;
-        let next_config_hash = managed_config_hash(&input.auth_json, &effective_config)?;
-        let preserved_codex_usage = if existing_metadata.auth_hash == next_auth_hash {
-            existing_metadata.codex_usage.clone()
-        } else {
-            None
-        };
-        let preserved_third_party_latency = if existing_metadata.auth_hash == next_auth_hash
-            && existing_metadata.config_hash == next_config_hash
-        {
-            existing_metadata.third_party_latency.clone()
-        } else {
-            None
-        };
-        let preserved_third_party_usage = if existing_metadata.auth_hash == next_auth_hash
-            && existing_metadata.config_hash == next_config_hash
-        {
-            existing_metadata.third_party_usage.clone()
-        } else {
-            None
-        };
-
-        atomic_write_sensitive(&profile_dir.join("auth.json"), input.auth_json.as_bytes())?;
-        atomic_write_sensitive(
-            &profile_dir.join("config.toml"),
-            effective_config.as_bytes(),
-        )?;
-        self.register_model_provider_from_profile(&input.auth_json, &effective_config, name)?;
-
-        let metadata = self.compose_profile_metadata(
-            existing_metadata.id,
+        let next_config_hash = managed_config_hash(&input.auth_json, &config)?;
+        let same_account = existing.auth_hash == next_auth_hash;
+        let same_config = existing.config_hash == next_config_hash;
+        let mut metadata = self.compose_profile_metadata(
+            existing.id,
             name.to_string(),
             input.notes.trim().to_string(),
-            existing_metadata.remote_profile_id.clone(),
-            existing_metadata.remote_content_version,
-            existing_metadata.remote_content_hash.clone(),
-            existing_metadata.remote_updated_at,
-            existing_metadata.created_at,
+            existing.remote_profile_id,
+            existing.remote_content_version,
+            existing.remote_content_hash,
+            existing.remote_updated_at,
+            existing.created_at,
             Utc::now(),
-            &fs::read_to_string(profile_dir.join("auth.json"))?,
-            &fs::read_to_string(profile_dir.join("config.toml"))?,
-            preserved_codex_usage,
-            preserved_third_party_latency,
-            preserved_third_party_usage,
+            &input.auth_json,
+            &config,
+            existing.codex_usage.filter(|_| same_account),
+            existing
+                .third_party_latency
+                .filter(|_| same_account && same_config),
+            existing
+                .third_party_usage
+                .filter(|_| same_account && same_config),
         )?;
+        metadata.published_from_local = existing.published_from_local;
 
-        self.write_profile_metadata(&profile_dir, &metadata)?;
-        if is_active_profile {
-            fs::create_dir_all(&self.target_dir)?;
-            atomic_write_sensitive(&self.target_auth_path(), input.auth_json.as_bytes())?;
-            atomic_write_sensitive(&self.target_config_path(), effective_config.as_bytes())?;
-            self.persist_target_marker(TargetMarkerFile {
-                profile_id: metadata.id.clone(),
-                auth_hash: metadata.auth_hash.clone(),
-                config_hash: metadata.config_hash.clone(),
-                updated_at: Utc::now(),
-            })?;
+        let mut writes = vec![
+            profile_file_update(
+                profile_dir.join("auth.json"),
+                input.auth_json.as_bytes().to_vec(),
+            )?,
+            profile_file_update(profile_dir.join("config.toml"), config.as_bytes().to_vec())?,
+            profile_file_update(
+                profile_dir.join("meta.json"),
+                serde_json::to_vec_pretty(&metadata)?,
+            )?,
+        ];
+        if apply_to_runtime {
+            if let Some(current) = &current_config {
+                require_file_credentials_store(current)?;
+            }
+            require_file_credentials_store(&config)?;
+            let runtime_auth = if local_oauth_template {
+                live_oauth.ok_or_else(|| {
+                    AppError::Message("请先在本机 Codex 登录 ChatGPT，再应用这份共享配置。".into())
+                })?
+            } else {
+                input.auth_json.as_str()
+            };
+            self.backup_runtime_profile(current_auth.as_deref(), current_config.as_deref())?;
+            writes.extend(self.runtime_profile_updates(
+                (current_auth.as_deref(), current_config.as_deref()),
+                (runtime_auth, &config),
+                TargetMarkerFile {
+                    profile_id: metadata.id.clone(),
+                    auth_hash: auth_match_hash(runtime_auth)?,
+                    config_hash: managed_config_hash(runtime_auth, &config)?,
+                    updated_at: Utc::now(),
+                },
+                None,
+            )?);
         }
+
+        self.register_model_provider_from_profile(&input.auth_json, &config, name)?;
+        commit_profile_files(&writes)?;
         Ok(ProfileSummary::from(metadata))
     }
 
     pub fn set_profile_remote_metadata(
         &self,
         profile_id: &str,
-        remote_profile_id: String,
-        remote_content_version: Option<u64>,
-        remote_content_hash: Option<String>,
-        remote_updated_at: Option<DateTime<Utc>>,
+        revision: RemoteProfileRevision,
+        published_from_local: bool,
     ) -> Result<ProfileSummary, AppError> {
-        let remote_profile_id = remote_profile_id.trim();
-        if remote_profile_id.is_empty() {
-            return Err(AppError::Message(
-                "Remote profile id cannot be empty.".into(),
-            ));
-        }
-
+        let _lock = self.lock_profile_writes()?;
         let profile_dir = self.profile_dir(profile_id)?;
         let mut metadata = self.read_profile_metadata(&profile_dir)?;
-        metadata.remote_profile_id = Some(remote_profile_id.to_string());
-        metadata.remote_content_version = remote_content_version;
-        metadata.remote_content_hash = remote_content_hash
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
-        metadata.remote_updated_at = remote_updated_at;
+        revision.apply(&mut metadata, published_from_local)?;
         self.write_profile_metadata(&profile_dir, &metadata)?;
         Ok(ProfileSummary::from(metadata))
     }
@@ -1524,47 +1587,61 @@ impl ProfileManager {
     pub fn sync_remote_profiles(&self, profiles_url: &str) -> Result<RemoteSyncResult, AppError> {
         let profiles_url = normalize_remote_profiles_url(profiles_url);
         let remote_profiles = fetch_remote_profile_index(&profiles_url)?;
-        let mut synced_profiles = Vec::new();
-        let mut imported = 0;
-        let mut updated = 0;
+        let mut downloaded = Vec::new();
 
         for remote_profile in remote_profiles {
             let detail_url = format!("{profiles_url}/{}", remote_profile.id);
-            let detail = fetch_remote_profile_detail(&detail_url)?;
-
-            if !detail.files.iter().any(|file| file == "auth.json")
-                || !detail.files.iter().any(|file| file == "config.toml")
-            {
-                continue;
+            let (detail, auth_json, config_toml) = fetch_remote_profile_bundle(&detail_url)?;
+            if detail.id != remote_profile.id {
+                return Err(AppError::Message("共享服务返回了其他档案。".into()));
+            }
+            let existing = self.find_profile_metadata_by_remote_id(&detail.id)?;
+            if let Some(local) = &existing {
+                if let (Some(local_version), Some(remote_version)) =
+                    (local.remote_content_version, detail.content_version)
+                {
+                    if remote_version < local_version {
+                        continue;
+                    }
+                    if remote_version == local_version
+                        && detail.content_hash == local.remote_content_hash
+                    {
+                        continue;
+                    }
+                } else if local.remote_content_version.is_some() {
+                    continue;
+                }
             }
 
-            let auth_json = fetch_remote_text_file(&format!("{detail_url}/auth.json"))?;
-            let config_toml = fetch_remote_text_file(&format!("{detail_url}/config.toml"))?;
-
+            let auth_json = remote_profile_auth(&auth_json)?;
+            validate_config_toml(&repair_illegal_config_toml(&config_toml))?;
             let payload = ProfileInput {
                 name: detail.name.clone(),
                 notes: detail.description.clone(),
                 auth_json,
                 config_toml,
             };
+            downloaded.push((detail, existing, payload));
+        }
 
-            let profile =
-                if let Some(existing) = self.find_profile_metadata_by_remote_id(&detail.id)? {
-                    updated += 1;
-                    self.update_profile_preserving_runtime_config(&existing.id, payload)?
-                } else {
-                    imported += 1;
-                    self.import_remote_profile(&detail.id, payload)?
-                };
-            let remote_updated_at = detail.content_updated_at.or(detail.updated_at);
-            let profile = self.set_profile_remote_metadata(
-                &profile.id,
-                detail.id.clone(),
-                detail.content_version,
-                detail.content_hash.clone(),
-                remote_updated_at,
-            )?;
-
+        let mut synced_profiles = Vec::new();
+        let mut imported = 0;
+        let mut updated = 0;
+        for (detail, existing, payload) in downloaded {
+            let revision = RemoteProfileRevision {
+                id: detail.id,
+                version: detail.content_version,
+                hash: detail.content_hash,
+                updated_at: detail.content_updated_at.or(detail.updated_at),
+            };
+            let profile = if let Some(existing) = existing {
+                updated += 1;
+                self.stage_remote_profile_update(&existing.id, payload, revision)?
+            } else {
+                imported += 1;
+                let created = self.import_profile(payload)?;
+                self.set_profile_remote_metadata(&created.id, revision, false)?
+            };
             synced_profiles.push(profile);
         }
 
@@ -1609,90 +1686,211 @@ impl ProfileManager {
     }
 
     pub fn switch_profile(&mut self, profile_id: &str) -> Result<SwitchResult, AppError> {
-        self.ensure_target_profile_registered()?;
-        let profile_dir = self.profile_dir(profile_id)?;
+        let _lock = self.lock_profile_writes()?;
         fs::create_dir_all(&self.target_dir)?;
+        let profile_dir = self.profile_dir(profile_id)?;
+        let metadata = self.read_profile_metadata(&profile_dir)?;
+        let saved_auth = fs::read_to_string(profile_dir.join("auth.json"))?;
+        let profile_config = fs::read_to_string(profile_dir.join("config.toml"))?;
+        validate_auth_json(&saved_auth)?;
 
-        let backup_id = format!(
-            "{}-{}",
-            Utc::now().format("%Y%m%d-%H%M%S"),
-            &Uuid::new_v4().simple().to_string()[..8]
-        );
-        let backup_dir = self.backups_dir().join(&backup_id);
-        fs::create_dir_all(&backup_dir)?;
-
-        self.backup_if_exists(&self.target_auth_path(), backup_dir.join("auth.json"))?;
-        self.backup_if_exists(&self.target_config_path(), backup_dir.join("config.toml"))?;
-
-        let current_auth_json = if self.target_auth_path().exists() {
-            Some(fs::read_to_string(self.target_auth_path())?)
+        let current_auth = read_optional_profile_text(&self.target_auth_path())?;
+        let current_config = read_optional_profile_text(&self.target_config_path())?;
+        if let Some(config) = &current_config {
+            require_file_credentials_store(config)?;
+        }
+        let local_oauth = current_auth
+            .as_deref()
+            .filter(|auth| has_local_oauth_tokens(auth));
+        let oauth = is_official_oauth_auth(&saved_auth)?;
+        let live_auth = if oauth
+            && metadata.remote_profile_id.is_some()
+            && !metadata.published_from_local
+        {
+            Some(local_oauth.ok_or_else(|| {
+                AppError::Message("请先在本机 Codex 登录 ChatGPT，再应用这份共享配置。".into())
+            })?)
         } else {
-            None
+            match local_oauth {
+                Some(auth) if oauth && auth_match_hash(auth)? == auth_match_hash(&saved_auth)? => {
+                    Some(auth)
+                }
+                _ => None,
+            }
         };
-        let current_config_toml = if self.target_config_path().exists() {
-            Some(fs::read_to_string(self.target_config_path())?)
+        let archived_auth;
+        let auth_source = if let Some(live_auth) = live_auth {
+            live_auth
+        } else if oauth {
+            archived_auth = self.newest_local_oauth(profile_id, saved_auth)?;
+            archived_auth.as_str()
         } else {
-            None
+            saved_auth.as_str()
         };
+        if oauth && !has_local_oauth_tokens(auth_source) {
+            return Err(AppError::Message(
+                "官方 OAuth 凭据不完整，请重新在 Codex 登录。".into(),
+            ));
+        }
+
+        let profile_config = repair_illegal_config_toml(&profile_config);
+        let next_config = match &current_config {
+            Some(config) => merge_profile_managed_config(config, auth_source, &profile_config)?,
+            None => normalize_config_toml_for_auth(auth_source, &profile_config)?,
+        };
+        let next_config = self.materialize_third_party_catalog(auth_source, &next_config)?;
+        require_file_credentials_store(&next_config)?;
+        let provider = session_model_provider_key_from_config_toml(&next_config)?;
+
+        self.ensure_target_profile_registered()?;
         let active_profile = self.detect_active_profile()?;
-
-        if let (Some(current_auth_json), Some(current_config_toml), Some(active_profile)) = (
-            current_auth_json.as_ref(),
-            current_config_toml.as_ref(),
-            active_profile.as_ref(),
-        ) {
-            if active_profile.id != profile_id {
-                self.sync_runtime_state_to_profile(
-                    &active_profile.id,
-                    current_auth_json,
-                    current_config_toml,
-                )?;
+        if let (Some(auth), Some(config), Some(active)) =
+            (&current_auth, &current_config, active_profile)
+        {
+            if active.id != profile_id {
+                self.sync_runtime_state_to_profile(&active.id, auth, config)?;
             }
         }
 
-        let next_auth_json = refresh_oauth_auth_json_for_switch(&fs::read_to_string(
-            profile_dir.join("auth.json"),
-        )?)?;
-        let next_profile_config = fs::read_to_string(profile_dir.join("config.toml"))?;
-        let next_config_toml = match current_config_toml {
-            Some(current_config_toml) => merge_profile_managed_config(
-                &current_config_toml,
-                &next_auth_json,
-                &next_profile_config,
-            )?,
-            None => normalize_config_toml_for_auth(
-                &next_auth_json,
-                &repair_illegal_config_toml(&next_profile_config),
-            )?,
+        let backup_id =
+            self.backup_runtime_profile(current_auth.as_deref(), current_config.as_deref())?;
+        let next_auth = match live_auth {
+            Some(auth) => auth.to_string(),
+            None => refresh_oauth_auth_json(auth_source)?,
         };
-        let next_config_toml =
-            self.materialize_third_party_catalog(&next_auth_json, &next_config_toml)?;
-        let next_session_model_provider =
-            session_model_provider_key_from_config_toml(&next_config_toml)?;
-
-        atomic_write_sensitive(&self.target_auth_path(), next_auth_json.as_bytes())?;
-        atomic_write_sensitive(&self.target_config_path(), next_config_toml.as_bytes())?;
-        let _ = self.repair_codex_sessions_internal(false, false)?;
-        let _ = self.repair_session_model_provider_for_switch(&next_session_model_provider)?;
-        self.sync_runtime_state_to_profile(profile_id, &next_auth_json, &next_config_toml)?;
-
+        // Persist any rotated credential before committing the runtime files.
+        self.sync_runtime_state_to_profile(profile_id, &next_auth, &next_config)?;
         let switched_at = Utc::now();
-        self.state.last_selected_profile_id = Some(profile_id.to_string());
-        self.state.last_switch_profile_id = Some(profile_id.to_string());
-        self.state.last_switched_at = Some(switched_at);
-        self.persist_target_marker(TargetMarkerFile {
-            profile_id: profile_id.to_string(),
-            auth_hash: auth_match_hash(&next_auth_json)?,
-            config_hash: managed_config_hash(&next_auth_json, &next_config_toml)?,
-            updated_at: switched_at,
-        })?;
-        self.persist_state()?;
+        let next_state = StateFile {
+            last_selected_profile_id: Some(profile_id.to_string()),
+            last_switch_profile_id: Some(profile_id.to_string()),
+            last_switched_at: Some(switched_at),
+            ..self.state.clone()
+        };
+        let writes = self.runtime_profile_updates(
+            (current_auth.as_deref(), current_config.as_deref()),
+            (&next_auth, &next_config),
+            TargetMarkerFile {
+                profile_id: profile_id.to_string(),
+                auth_hash: auth_match_hash(&next_auth)?,
+                config_hash: managed_config_hash(&next_auth, &next_config)?,
+                updated_at: switched_at,
+            },
+            Some(&next_state),
+        )?;
+        commit_profile_files(&writes)?;
+        self.state = next_state;
+
+        let session_repair_warning = self
+            .repair_codex_sessions_internal(false, false)
+            .map(|_| ())
+            .and_then(|()| {
+                self.repair_session_model_provider_for_switch(&provider)
+                    .map(|_| ())
+            })
+            .err()
+            .map(|err| format!("配置已应用，会话修复未完成：{err}"));
 
         Ok(SwitchResult {
             profile_id: profile_id.to_string(),
             backup_id,
             switched_at,
+            session_repair_warning,
         })
+    }
+
+    fn newest_local_oauth(&self, profile_id: &str, mut auth: String) -> Result<String, AppError> {
+        let account = auth_match_hash(&auth)?;
+        let mut refreshed_at = oauth_last_refresh(&auth);
+        for profile in self.list_profiles()? {
+            if profile.id == profile_id || profile.auth_hash != account {
+                continue;
+            }
+            let dir = self.profile_dir(&profile.id)?;
+            let metadata = self.read_profile_metadata(&dir)?;
+            if metadata.remote_profile_id.is_some() && !metadata.published_from_local {
+                continue;
+            }
+            let Ok(candidate) = fs::read_to_string(dir.join("auth.json")) else {
+                continue;
+            };
+            let candidate_time = oauth_last_refresh(&candidate);
+            if candidate_time > refreshed_at
+                && has_local_oauth_tokens(&candidate)
+                && auth_match_hash(&candidate)? == account
+            {
+                auth = candidate;
+                refreshed_at = candidate_time;
+            }
+        }
+        Ok(auth)
+    }
+
+    fn lock_profile_writes(&self) -> Result<fs::File, AppError> {
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.app_data_dir.join(".profile-write.lock"))?;
+        file.lock()?;
+        Ok(file)
+    }
+
+    fn backup_runtime_profile(
+        &self,
+        auth: Option<&str>,
+        config: Option<&str>,
+    ) -> Result<String, AppError> {
+        let backup_id = format!(
+            "{}-{}",
+            Utc::now().format("%Y%m%d-%H%M%S"),
+            &Uuid::new_v4().simple().to_string()[..8]
+        );
+        let dir = self.backups_dir().join(&backup_id);
+        fs::create_dir_all(&dir)?;
+        for (filename, contents) in [("auth.json", auth), ("config.toml", config)] {
+            if let Some(contents) = contents {
+                atomic_write_sensitive(&dir.join(filename), contents.as_bytes())?;
+            }
+        }
+        Ok(backup_id)
+    }
+
+    fn runtime_profile_updates(
+        &self,
+        previous: (Option<&str>, Option<&str>),
+        next: (&str, &str),
+        marker: TargetMarkerFile,
+        state: Option<&StateFile>,
+    ) -> Result<Vec<ProfileFileUpdate>, AppError> {
+        let marker_path = self.target_marker_path();
+        let mut writes = vec![
+            (
+                self.target_auth_path(),
+                previous.0.map(|text| text.as_bytes().to_vec()),
+                next.0.as_bytes().to_vec(),
+            ),
+            (
+                self.target_config_path(),
+                previous.1.map(|text| text.as_bytes().to_vec()),
+                next.1.as_bytes().to_vec(),
+            ),
+            (
+                marker_path.clone(),
+                read_optional_profile_file(&marker_path)?,
+                serde_json::to_vec_pretty(&marker)?,
+            ),
+        ];
+        if let Some(state) = state {
+            let path = self.state_path();
+            writes.push((
+                path.clone(),
+                read_optional_profile_file(&path)?,
+                serde_json::to_vec_pretty(state)?,
+            ));
+        }
+        Ok(writes)
     }
 
     pub fn detect_active_profile(&self) -> Result<Option<ProfileSummary>, AppError> {
@@ -1965,13 +2163,6 @@ impl ProfileManager {
         atomic_write_json(&self.state_path(), &self.state)
     }
 
-    fn backup_if_exists(&self, source: &Path, destination: PathBuf) -> Result<(), AppError> {
-        if source.exists() {
-            fs::copy(source, destination)?;
-        }
-        Ok(())
-    }
-
     fn read_profile_metadata(&self, profile_dir: &Path) -> Result<ProfileMetadata, AppError> {
         let meta_path = profile_dir.join("meta.json");
         Ok(serde_json::from_str::<ProfileMetadata>(
@@ -2134,6 +2325,7 @@ impl ProfileManager {
             remote_content_version,
             remote_content_hash,
             remote_updated_at,
+            published_from_local: false,
             auth_type_label: detect_auth_type_label(auth_json, config_toml)?,
             model_provider_id: provider
                 .as_ref()
@@ -2167,6 +2359,17 @@ impl ProfileManager {
     ) -> Result<(), AppError> {
         let profile_dir = self.profile_dir(profile_id)?;
         let existing_metadata = self.read_profile_metadata(&profile_dir)?;
+        let archived_config;
+        let config_toml = if existing_metadata.remote_profile_id.is_some() {
+            if !existing_metadata.published_from_local || !is_official_oauth_auth(auth_json)? {
+                return Ok(());
+            }
+            // Capturing a local login must preserve any newer shared configuration staged here.
+            archived_config = fs::read_to_string(profile_dir.join("config.toml"))?;
+            archived_config.as_str()
+        } else {
+            config_toml
+        };
         let normalized_config =
             normalize_config_toml_for_auth(auth_json, &repair_illegal_config_toml(config_toml))?;
 
@@ -2203,18 +2406,13 @@ impl ProfileManager {
             None
         };
 
-        atomic_write_sensitive(&profile_dir.join("auth.json"), auth_json.as_bytes())?;
-        atomic_write_sensitive(
-            &profile_dir.join("config.toml"),
-            normalized_config.as_bytes(),
-        )?;
         self.register_model_provider_from_profile(
             auth_json,
             &normalized_config,
             &existing_metadata.name,
         )?;
 
-        let metadata = self.compose_profile_metadata(
+        let mut metadata = self.compose_profile_metadata(
             existing_metadata.id,
             existing_metadata.name,
             existing_metadata.notes,
@@ -2231,7 +2429,18 @@ impl ProfileManager {
             preserved_third_party_usage,
         )?;
 
-        self.write_profile_metadata(&profile_dir, &metadata)
+        metadata.published_from_local = existing_metadata.published_from_local;
+        commit_profile_files(&[
+            profile_file_update(profile_dir.join("auth.json"), auth_json.as_bytes().to_vec())?,
+            profile_file_update(
+                profile_dir.join("config.toml"),
+                normalized_config.into_bytes(),
+            )?,
+            profile_file_update(
+                profile_dir.join("meta.json"),
+                serde_json::to_vec_pretty(&metadata)?,
+            )?,
+        ])
     }
 
     fn profile_dir(&self, profile_id: &str) -> Result<PathBuf, AppError> {
@@ -2280,19 +2489,6 @@ impl ProfileManager {
         }
 
         Ok(None)
-    }
-
-    fn import_remote_profile(
-        &self,
-        remote_profile_id: &str,
-        input: ProfileInput,
-    ) -> Result<ProfileSummary, AppError> {
-        let imported = self.import_profile(input)?;
-        let profile_dir = self.profile_dir(&imported.id)?;
-        let mut metadata = self.read_profile_metadata(&profile_dir)?;
-        metadata.remote_profile_id = Some(remote_profile_id.to_string());
-        self.write_profile_metadata(&profile_dir, &metadata)?;
-        Ok(ProfileSummary::from(metadata))
     }
 
     fn profiles_dir(&self) -> PathBuf {

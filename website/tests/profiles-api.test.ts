@@ -1,9 +1,9 @@
 import { expect, test } from "vitest";
 import { NextRequest } from "next/server";
-import { createDesktopToken } from "../src/lib/auth";
+import { createDesktopToken, createSessionCookieValue, sessionCookieName } from "../src/lib/auth";
 import { POST as createSharedProfile } from "../src/app/api/profiles/route";
-import { DELETE as deleteSharedProfile, POST as updateSharedProfile } from "../src/app/api/profiles/[id]/route";
-import { GET as getSharedProfileFile } from "../src/app/api/profiles/[id]/[filename]/route";
+import { DELETE as deleteSharedProfile, GET as getSharedProfile, POST as updateSharedProfile } from "../src/app/api/profiles/[id]/route";
+import { GET as getSharedProfileFile, POST as putSharedProfileFile } from "../src/app/api/profiles/[id]/[filename]/route";
 import { sharedProfileContentHash } from "../src/lib/profile-store";
 
 async function useTempDataDir(prefix: string) {
@@ -347,6 +347,7 @@ test("updates shared profile files from a desktop bearer token", async () => {
         visibility: "selected",
         sharedWith: ["Ding-B"],
         sourceProfileId: "local-profile-1",
+        baseContentVersion: 1,
         authContent: '{"auth_mode":"chatgpt","tokens":{"access_token":"new"}}',
         configContent: 'model = "gpt-5.5"\nnotify = ["local"]',
       }),
@@ -423,6 +424,7 @@ test("preserves existing share metadata when file updates omit share fields", as
         name: "ChatGPT Pro",
         description: "shared auth",
         sourceProfileId: "local-profile-1",
+        baseContentVersion: 1,
         authContent: '{"auth_mode":"chatgpt","tokens":{"access_token":"new"}}',
         configContent: 'model = "gpt-5.5"\n',
       }),
@@ -738,4 +740,68 @@ test("downloads legacy stored config.toml through the share-safe sanitizer", asy
   expect(config).not.toContain("notify");
   expect(config).not.toContain("[projects");
   expect(config).not.toContain("private");
+});
+
+test("serves one version of a shared bundle with a device-local OAuth descriptor", async () => {
+  await useTempDataDir("codex-profile-bundle-");
+  const owner = { dingUserId: "Ding-A", active: true };
+  const { token } = await createDesktopToken(owner);
+  const auth = '{"auth_mode":"chatgpt","tokens":{"access_token":"test-only","refresh_token":"test-refresh"}}';
+  const form = new FormData();
+  form.append("name", "OAuth fixture");
+  form.append("file1", new File([auth], "auth.json"));
+  form.append("file2", new File(['model = "gpt-5.5"'], "config.toml"));
+  const created = await createSharedProfile(new NextRequest("http://localhost/api/profiles", {
+    method: "POST", headers: { authorization: "Bearer " + token }, body: form,
+  }));
+  expect(created.status).toBe(201);
+  const profile = await created.json();
+  const url = "http://localhost/api/profiles/" + profile.id + "?bundle=1";
+  const params = { params: Promise.resolve({ id: profile.id }) };
+  expect((await getSharedProfile(new NextRequest(url), params)).status).toBe(401);
+  const response = await getSharedProfile(new NextRequest(url, {
+    headers: { authorization: "Bearer " + token },
+  }), params);
+  expect(response.status).toBe(200);
+  const body = await response.json();
+  expect(body).toMatchObject({
+    id: profile.id,
+    contentVersion: profile.contentVersion,
+    contentHash: profile.contentHash,
+    authContent: '{"auth_mode":"chatgpt"}',
+  });
+  expect(body.configContent).toContain('model = "gpt-5.5"');
+});
+
+test("legacy file writes require a revision and preserve the sharing policy", async () => {
+  await useTempDataDir("codex-legacy-profile-write-");
+  const owner = { dingUserId: "Ding-A", active: true };
+  const { token } = await createDesktopToken(owner);
+  const form = new FormData();
+  form.append("name", "Public provider");
+  form.append("visibility", "public");
+  form.append("file1", new File(['{"OPENAI_API_KEY":"fixture"}'], "auth.json"));
+  form.append("file2", new File(['model = "gpt-5.5"'], "config.toml"));
+  const created = await createSharedProfile(new NextRequest("http://localhost/api/profiles", {
+    method: "POST", headers: { authorization: "Bearer " + token }, body: form,
+  }));
+  const profile = await created.json();
+  const params = { params: Promise.resolve({ id: profile.id, filename: "auth.json" }) };
+  const write = (body: unknown) => putSharedProfileFile(new NextRequest(
+    "http://localhost/api/profiles/" + profile.id + "/auth.json",
+    {
+      method: "POST",
+      headers: { cookie: sessionCookieName + "=" + createSessionCookieValue(owner) },
+      body: JSON.stringify(body),
+    },
+  ), params);
+
+  expect((await write({ content: '{"OPENAI_API_KEY":"other"}' })).status).toBe(409);
+  expect((await write({
+    content: '{"auth_mode":"chatgpt","tokens":{"access_token":"fixture"}}',
+    baseContentVersion: 1,
+  })).status).toBe(400);
+  const result = await write({ content: '{"OPENAI_API_KEY":"other"}', baseContentVersion: 1 });
+  expect(result.status).toBe(200);
+  expect((await result.json()).contentVersion).toBe(2);
 });

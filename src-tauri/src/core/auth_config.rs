@@ -8,13 +8,50 @@ pub(crate) fn is_official_oauth_auth(auth_json: &str) -> Result<bool, AppError> 
         .get("auth_mode")
         .and_then(|value| value.as_str())
         .is_some_and(|value| value == "chatgpt")
-        || auth.get("tokens").is_some())
+        || auth.get("tokens").is_some_and(serde_json::Value::is_object))
 }
 
 pub(crate) fn validate_auth_json(contents: &str) -> Result<(), AppError> {
-    serde_json::from_str::<serde_json::Value>(contents)
-        .map(|_| ())
-        .map_err(|error| AppError::InvalidAuthJson(error.to_string()))
+    let value = serde_json::from_str::<serde_json::Value>(contents)
+        .map_err(|error| AppError::InvalidAuthJson(error.to_string()))?;
+    if !value.is_object() {
+        return Err(AppError::InvalidAuthJson("必须是 JSON 对象。".into()));
+    }
+    Ok(())
+}
+
+pub(crate) fn require_file_credentials_store(config: &str) -> Result<(), AppError> {
+    let table = parse_toml_table(config)?;
+    match table.get("cli_auth_credentials_store") {
+        None => Ok(()),
+        Some(toml::Value::String(mode)) if mode == "file" => Ok(()),
+        _ => Err(AppError::Message(
+            "此 Codex 配置使用非文件或自动凭据存储。请确认运行时使用 auth.json 后再应用。".into(),
+        )),
+    }
+}
+
+pub(crate) fn has_local_oauth_tokens(auth_json: &str) -> bool {
+    is_official_oauth_auth(auth_json).unwrap_or(false)
+        && oauth_access_token(auth_json).is_some_and(|token| !token.trim().is_empty())
+        && oauth_id_token(auth_json).is_some_and(|token| !token.trim().is_empty())
+}
+
+pub(crate) fn oauth_last_refresh(auth_json: &str) -> Option<DateTime<Utc>> {
+    let auth = serde_json::from_str::<serde_json::Value>(auth_json).ok()?;
+    let timestamp = auth.get("last_refresh")?.as_str()?;
+    DateTime::parse_from_rfc3339(timestamp)
+        .ok()
+        .map(|time| time.with_timezone(&Utc))
+}
+
+pub(crate) fn remote_profile_auth(auth_json: &str) -> Result<String, AppError> {
+    validate_auth_json(auth_json)?;
+    if is_official_oauth_auth(auth_json)? {
+        Ok(r#"{"auth_mode":"chatgpt"}"#.into())
+    } else {
+        Ok(auth_json.into())
+    }
 }
 
 pub(crate) fn validate_config_toml(contents: &str) -> Result<(), AppError> {
@@ -786,18 +823,6 @@ pub(crate) fn refresh_oauth_auth_json(auth_json: &str) -> Result<String, AppErro
         })?;
 
     persist_refreshed_oauth_auth_json(auth_json, refreshed)
-}
-
-pub(crate) fn refresh_oauth_auth_json_for_switch(auth_json: &str) -> Result<String, AppError> {
-    match refresh_oauth_auth_json(auth_json) {
-        Ok(refreshed_auth_json) => Ok(refreshed_auth_json),
-        Err(_)
-            if oauth_access_token(auth_json).is_some() && oauth_id_token(auth_json).is_some() =>
-        {
-            Ok(auth_json.to_string())
-        }
-        Err(error) => Err(error),
-    }
 }
 
 pub(crate) fn suggested_profile_name(

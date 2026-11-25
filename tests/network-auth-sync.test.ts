@@ -1,8 +1,10 @@
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import {
   sharedProfileHasNewerRemote,
   sharedAuthWriteBackBase,
   shouldWriteBackSharedAuth,
+  fetchSharedProfileBundle,
+  networkProfileAuthContent,
 } from "../src/network-auth-sync";
 
 test("allows shared auth write back when the local remote version matches the cloud version", () => {
@@ -115,4 +117,35 @@ test("detects a newer shared center profile by version or hash", () => {
       contentHash: "hash-v3",
     },
   )).toBe(false);
+});
+
+test("rejects a failed file download and a mixed legacy revision", async () => {
+  const detail = { id: "fixture", contentVersion: 1, files: ["auth.json", "config.toml"] };
+  const fetcher = vi.fn();
+  vi.stubGlobal("fetch", fetcher);
+  try {
+    fetcher
+      .mockResolvedValueOnce(new Response(JSON.stringify(detail)))
+      .mockResolvedValueOnce(new Response(null, { status: 503 }))
+      .mockResolvedValueOnce(new Response('model = "fixture"'));
+    const read = () => fetchSharedProfileBundle("https://example.invalid/profiles", "fixture", {},
+      (action) => new Error(action));
+    await expect(read()).rejects.toThrow("HTTP 503");
+
+    fetcher
+      .mockResolvedValueOnce(new Response(JSON.stringify(detail)))
+      .mockResolvedValueOnce(new Response('{"OPENAI_API_KEY":"fixture"}'))
+      .mockResolvedValueOnce(new Response('model = "fixture"'))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...detail, contentVersion: 2 })));
+    await expect(read()).rejects.toThrow("下载期间共享配置发生变化");
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+test("publishes OAuth configuration as a local login descriptor", () => {
+  expect(networkProfileAuthContent('{"auth_mode":"chatgpt","tokens":{"refresh_token":"fixture"}}'))
+    .toBe('{"auth_mode":"chatgpt"}');
+  expect(networkProfileAuthContent('{"OPENAI_API_KEY":"fixture"}')).toBe('{"OPENAI_API_KEY":"fixture"}');
+  expect(() => networkProfileAuthContent("[]")).toThrow("JSON 对象");
 });

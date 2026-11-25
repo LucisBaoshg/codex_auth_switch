@@ -11,6 +11,7 @@ export type NetworkProfile = {
   sourceProfileId?: string;
   contentVersion?: number;
   contentHash?: string;
+  authContentHash?: string;
   contentUpdatedAt?: string;
   ownerDingUserId?: string;
   ownerName?: string;

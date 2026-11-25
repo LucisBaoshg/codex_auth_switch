@@ -40,6 +40,49 @@ pub(crate) fn fetch_remote_profile_detail(url: &str) -> Result<RemoteProfileReco
         })
 }
 
+pub(crate) fn fetch_remote_profile_bundle(
+    detail_url: &str,
+) -> Result<(RemoteProfileRecord, String, String), AppError> {
+    let mut detail = match remote_request(detail_url).query("bundle", "1").call() {
+        Ok(response) => response
+            .into_json::<RemoteProfileRecord>()
+            .map_err(|error| {
+                AppError::Message(format!("Failed to parse remote profile bundle: {error}"))
+            })?,
+        Err(ureq::Error::Status(404, _)) => fetch_remote_profile_detail(detail_url)?,
+        Err(error) => {
+            return Err(AppError::Message(format!(
+                "Failed to fetch remote profile bundle: {error}"
+            )));
+        }
+    };
+    match (detail.auth_content.take(), detail.config_content.take()) {
+        (Some(auth), Some(config)) => return Ok((detail, auth, config)),
+        (None, None) => {}
+        _ => return Err(AppError::Message("共享服务返回了不完整的配置文件。".into())),
+    }
+
+    if !["auth.json", "config.toml"]
+        .iter()
+        .all(|file| detail.files.iter().any(|name| name == file))
+    {
+        return Err(AppError::Message("共享配置缺少授权文件或配置文件。".into()));
+    }
+    let auth = fetch_remote_text_file(&format!("{detail_url}/auth.json"))?;
+    let config = fetch_remote_text_file(&format!("{detail_url}/config.toml"))?;
+    let latest = fetch_remote_profile_detail(detail_url)?;
+    if latest.id != detail.id
+        || latest.content_version != detail.content_version
+        || latest.content_hash != detail.content_hash
+        || latest.updated_at != detail.updated_at
+    {
+        return Err(AppError::Message(
+            "下载期间共享配置发生变化，请重新下载。".into(),
+        ));
+    }
+    Ok((detail, auth, config))
+}
+
 pub(crate) fn fetch_remote_text_file(url: &str) -> Result<String, AppError> {
     let response = remote_request(url)
         .call()
@@ -67,6 +110,9 @@ pub fn default_cli_app_data_dir() -> Result<PathBuf, AppError> {
 }
 
 pub fn default_codex_target_dir() -> Result<PathBuf, AppError> {
+    if let Some(path) = std::env::var_os("CODEX_HOME").filter(|path| !path.is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
     let home_dir = dirs::home_dir()
         .ok_or_else(|| AppError::Message("Unable to resolve the user home directory.".into()))?;
     Ok(home_dir.join(".codex"))

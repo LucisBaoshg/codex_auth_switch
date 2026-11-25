@@ -6,7 +6,9 @@ import {
   ProfileShareSafetyError,
   deleteProfile,
   getVisibleProfile,
+  getVisibleProfileBundle,
   normalizeProfileVisibility,
+  publicProfile,
   publicProfileWithAuthType,
   syncProfileAuthContent,
   updateProfileMetadata,
@@ -30,13 +32,18 @@ export async function GET(
   }
 
   try {
-    const profile = await getVisibleProfile(id, principal);
+    const includeFiles = request.nextUrl.searchParams.get("bundle") === "1";
+    const profile = includeFiles
+      ? await getVisibleProfileBundle(id, principal)
+      : await getVisibleProfile(id, principal);
 
     if (!profile) {
       return NextResponse.json({ error: "Profile not found" }, { status: 404, headers: noStoreHeaders });
     }
 
-    return NextResponse.json(await publicProfileWithAuthType(profile), { headers: noStoreHeaders });
+    return NextResponse.json(includeFiles ? profile : await publicProfileWithAuthType(profile), {
+      headers: noStoreHeaders,
+    });
   } catch (error) {
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500, headers: noStoreHeaders });
   }
@@ -112,7 +119,7 @@ export async function POST(
           return NextResponse.json({ error: "Profile not found" }, { status: 404, headers: noStoreHeaders });
         }
 
-        return NextResponse.json(await publicProfileWithAuthType(synced), { headers: noStoreHeaders });
+        return NextResponse.json(publicProfile(synced), { headers: noStoreHeaders });
       } catch (error) {
         if (error instanceof ProfileContentConflictError) {
           return NextResponse.json(
@@ -158,7 +165,7 @@ export async function POST(
       return NextResponse.json({ error: "Profile not found" }, { status: 404, headers: noStoreHeaders });
     }
 
-    return NextResponse.json(await publicProfileWithAuthType(updated), { headers: noStoreHeaders });
+    return NextResponse.json(publicProfile(updated), { headers: noStoreHeaders });
   } catch (error) {
     if (error instanceof ProfileContentConflictError) {
       return NextResponse.json(

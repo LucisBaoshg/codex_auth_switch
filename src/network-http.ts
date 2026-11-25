@@ -12,7 +12,6 @@ export function networkUnauthorizedError(actionLabel: string): Error {
     return new Error("请先使用钉钉 SSO 登录企业共享中心。");
   }
 
-  state.networkAuthRequired = false;
   return new Error(`${actionLabel}未通过服务端权限校验，已保留当前登录状态。请刷新共享中心或重新登录后再试。`);
 }
 

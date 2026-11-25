@@ -468,7 +468,7 @@ fn switch_profile_refreshes_oauth_tokens_before_writing_target_files() {
 }
 
 #[test]
-fn switch_profile_continues_with_saved_oauth_tokens_when_refresh_is_rejected() {
+fn switch_profile_preserves_runtime_files_when_refresh_is_rejected() {
     let _guard = env_lock().lock().expect("lock env");
     let server = TestServer::start();
     server.set_status_json(
@@ -500,22 +500,25 @@ fn switch_profile_continues_with_saved_oauth_tokens_when_refresh_is_rejected() {
         })
         .expect("import profile");
 
-    manager
-        .switch_profile(&profile.id)
-        .expect("switch profile should keep saved auth when refresh is rejected");
+    let original_auth = api_key_auth_json("original-api-fixture");
+    let original_config = official_config_toml("original-model");
+    fs::write(target_dir.path().join("auth.json"), &original_auth).unwrap();
+    fs::write(target_dir.path().join("config.toml"), &original_config).unwrap();
+
+    let error = manager.switch_profile(&profile.id).unwrap_err();
+    assert!(error.to_string().contains("401"));
 
     let requests = server.requests();
     assert_eq!(requests.len(), 1);
     assert!(requests[0].contains("POST /oauth/token HTTP/1.1"));
-
-    let active_auth =
-        fs::read_to_string(target_dir.path().join("auth.json")).expect("read active auth");
-    assert!(active_auth.contains("access-token-saved"));
-    assert!(active_auth.contains("refresh-token-rejected"));
-    let active_config =
-        fs::read_to_string(target_dir.path().join("config.toml")).expect("read active config");
-    assert!(active_config.contains(r#"model_provider = "ylscode""#));
-    assert!(active_config.contains("requires_openai_auth = true"));
+    assert_eq!(
+        fs::read_to_string(target_dir.path().join("auth.json")).unwrap(),
+        original_auth
+    );
+    assert_eq!(
+        fs::read_to_string(target_dir.path().join("config.toml")).unwrap(),
+        original_config
+    );
 
     std::env::remove_var("CODEX_REFRESH_TOKEN_URL_OVERRIDE");
 }

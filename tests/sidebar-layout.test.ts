@@ -2316,6 +2316,7 @@ test("re-sharing an owned local profile updates the existing enterprise shared p
         hasTargetChanges: true,
       };
     }
+    if (command === "set_profile_remote_metadata") return snapshot;
     throw new Error(`unexpected command: ${command}`);
   });
 
@@ -2382,13 +2383,18 @@ test("re-sharing an owned local profile updates the existing enterprise shared p
     expect.objectContaining({ method: "POST" }),
   );
   expect(updateBodies).toHaveLength(1);
+  expect(invokeMock).toHaveBeenCalledWith("set_profile_remote_metadata", {
+    profileId: "local-chatgpt-pro",
+    publishedFromLocal: true,
+    revision: expect.objectContaining({ id: "remote-owned", version: 2, hash: "new-content-hash" }),
+  });
   expect(updateBodies[0]).toEqual(expect.objectContaining({
     name: "ChatGPT Pro",
     description: "自动从当前 Codex 配置生成",
     visibility: "selected",
     sharedWith: ["Ding-B"],
     sourceProfileId: "local-chatgpt-pro",
-    authContent: '{"auth_mode":"chatgpt","tokens":{"access_token":"new-token"}}',
+    authContent: '{"auth_mode":"chatgpt"}',
     configContent: 'model = "gpt-5.5"\n',
   }));
 });
@@ -3053,7 +3059,7 @@ test("preserves sharing center scroll position for in-page recipient changes", a
 test("opens network shared profile details in readonly mode without browser cache", async () => {
   localStorage.setItem("codex-auth-switch.networkProfileToken", "cas_test_token");
   const fetchMock = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
-    const url = input.toString();
+    const url = input.toString().replace("?bundle=1", "");
 
     if (url === "https://codex-helper.ite.tool4seller.com/codex/api/profiles") {
       return {
@@ -3194,6 +3200,7 @@ test("imports a network shared profile detail as an editable local profile", asy
   };
   const importedSnapshot = {
     ...emptySnapshot,
+    importedProfileId: "local-imported-1",
     profiles: [
       {
         id: "local-imported-1",
@@ -3227,10 +3234,8 @@ test("imports a network shared profile detail as an editable local profile", asy
     if (command === "set_profile_remote_metadata") {
       expect(args).toEqual({
         profileId: "local-imported-1",
-        remoteProfileId: "remote-1",
-        remoteContentVersion: null,
-        remoteContentHash: null,
-        remoteUpdatedAt: "2026-04-16T00:00:00Z",
+        revision: { id: "remote-1", version: null, hash: null, updatedAt: "2026-04-16T00:00:00Z" },
+        publishedFromLocal: false,
       });
       return importedSnapshot;
     }
@@ -3238,7 +3243,7 @@ test("imports a network shared profile detail as an editable local profile", asy
   });
 
   const fetchMock = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
-    const url = input.toString();
+    const url = input.toString().replace("?bundle=1", "");
     if (url === "https://codex-helper.ite.tool4seller.com/codex/api/auth/me") {
       return {
         ok: true,
@@ -3330,7 +3335,9 @@ test("imports a network shared profile detail as an editable local profile", asy
   await flushUi();
   await flushUi();
 
-  expect(document.querySelector('[data-page="editor"]')).not.toBeNull();
+  await vi.waitFor(() => {
+    expect(document.querySelector('[data-page="editor"]'), document.querySelector('[data-role="flash"]')?.textContent).not.toBeNull();
+  });
   expect(document.querySelector<HTMLButtonElement>('[data-action="import-current-network-profile"]')).not.toBeNull();
   document
     .querySelector<HTMLButtonElement>('[data-action="import-current-network-profile"]')
@@ -3350,10 +3357,8 @@ test("imports a network shared profile detail as an editable local profile", asy
   });
   expect(invokeMock).toHaveBeenCalledWith("set_profile_remote_metadata", {
     profileId: "local-imported-1",
-    remoteProfileId: "remote-1",
-    remoteContentVersion: null,
-    remoteContentHash: null,
-    remoteUpdatedAt: "2026-04-16T00:00:00Z",
+    revision: { id: "remote-1", version: null, hash: null, updatedAt: "2026-04-16T00:00:00Z" },
+    publishedFromLocal: false,
   });
 
   document
@@ -3431,19 +3436,11 @@ test("prompts to update and restarts Codex when the active shared profile has a 
           authJson: '{"token":"new-cloud-token"}',
           configToml: 'model = "gpt-5.5"\n',
         },
+        revision: { id: "remote-1", version: 2, hash: "new-content", updatedAt: "2026-06-05T08:00:00Z" },
       });
       return updatedSnapshot;
     }
-    if (command === "set_profile_remote_metadata") {
-      expect(args).toEqual({
-        profileId: "local-shared-1",
-        remoteProfileId: "remote-1",
-        remoteContentVersion: 2,
-        remoteContentHash: "new-content",
-        remoteUpdatedAt: "2026-06-05T08:00:00Z",
-      });
-      return updatedSnapshot;
-    }
+
     if (command === "switch_profile") {
       expect(args).toEqual({ profileId: "local-shared-1" });
       return updatedSnapshot;
@@ -3453,7 +3450,7 @@ test("prompts to update and restarts Codex when the active shared profile has a 
   });
 
   const fetchMock = vi.fn(async (input: string | URL | Request) => {
-    const url = input.toString();
+    const url = input.toString().replace("?bundle=1", "");
     if (url === "https://codex-helper.ite.tool4seller.com/codex/api/auth/me") {
       return {
         ok: true,
@@ -3550,7 +3547,7 @@ test("prompts to update and restarts Codex when the active shared profile has a 
   await flushUi();
 
   expect(invokeMock).toHaveBeenCalledWith("update_profile_from_cloud", expect.objectContaining({ profileId: "local-shared-1" }));
-  expect(invokeMock).toHaveBeenCalledWith("set_profile_remote_metadata", expect.objectContaining({ profileId: "local-shared-1" }));
+  expect(invokeMock).not.toHaveBeenCalledWith("set_profile_remote_metadata", expect.anything());
   expect(invokeMock).toHaveBeenCalledWith("switch_profile", { profileId: "local-shared-1" });
   expect(invokeMock).toHaveBeenCalledWith("restart_codex", undefined);
   expect(document.body.textContent).toContain("已更新并重启 Codex");
@@ -3671,27 +3668,19 @@ test("shows a stale shared profile version notice in local profile details and u
         payload: {
           name: "ChatGPT Pro",
           notes: "共享官方 OAuth",
-          authJson: '{"auth_mode":"chatgpt","tokens":{"refresh_token":"new-refresh"}}',
+          authJson: '{"auth_mode":"chatgpt"}',
           configToml: 'model = "gpt-5.5"\n',
         },
+        revision: { id: "remote-oauth", version: 2, hash: "hash-v2", updatedAt: "2026-06-24T11:00:00Z" },
       });
       return updatedSnapshot;
     }
-    if (command === "set_profile_remote_metadata") {
-      expect(args).toEqual({
-        profileId: "local-shared-oauth",
-        remoteProfileId: "remote-oauth",
-        remoteContentVersion: 2,
-        remoteContentHash: "hash-v2",
-        remoteUpdatedAt: "2026-06-24T11:00:00Z",
-      });
-      return updatedSnapshot;
-    }
+
     throw new Error(`unexpected command: ${command}`);
   });
 
   const fetchMock = vi.fn(async (input: string | URL | Request) => {
-    const url = input.toString();
+    const url = input.toString().replace("?bundle=1", "");
     if (url === "https://codex-helper.ite.tool4seller.com/codex/api/auth/me") {
       return {
         ok: true,
@@ -3780,15 +3769,12 @@ test("shows a stale shared profile version notice in local profile details and u
   await flushUi();
   await flushUi();
 
-  expect(invokeMock).toHaveBeenCalledWith("validate_profile_config_usage", {
-    authJson: '{"auth_mode":"chatgpt","tokens":{"refresh_token":"new-refresh"}}',
-    configToml: 'model = "gpt-5.5"\n',
-  });
+  expect(invokeMock).not.toHaveBeenCalledWith("validate_profile_config_usage", expect.anything());
   expect(
     document.querySelector('[data-role="shared-version-verify-result"]')?.getAttribute("data-state"),
-  ).toBe("valid");
+  ).toBe("skipped");
   expect(document.querySelector('[data-role="shared-version-verify-result"]')?.textContent).toContain(
-    "新版本配置有效",
+    "应用时将使用本机 Codex 登录。",
   );
 
   document
@@ -3805,9 +3791,7 @@ test("shows a stale shared profile version notice in local profile details and u
   expect(invokeMock).toHaveBeenCalledWith("update_profile_from_cloud", expect.objectContaining({
     profileId: "local-shared-oauth",
   }));
-  expect(invokeMock).toHaveBeenCalledWith("set_profile_remote_metadata", expect.objectContaining({
-    profileId: "local-shared-oauth",
-  }));
+  expect(invokeMock).not.toHaveBeenCalledWith("set_profile_remote_metadata", expect.anything());
   expect(invokeMock).not.toHaveBeenCalledWith("restart_codex", undefined);
   expect(document.body.textContent).toContain("已更新共享配置");
 });
@@ -4030,27 +4014,19 @@ test("relinks a missing shared profile to the unique same-name cloud profile whe
         payload: {
           name: "ChatGPT Pro",
           notes: "共享官方 OAuth",
-          authJson: '{"auth_mode":"chatgpt","tokens":{"refresh_token":"new-refresh"}}',
+          authJson: '{"auth_mode":"chatgpt"}',
           configToml: 'model = "gpt-5.5"\n',
         },
-      });
-      return updatedSnapshot;
-    }
-    if (command === "set_profile_remote_metadata") {
-      expect(args).toEqual({
-        profileId: "local-shared-oauth",
-        remoteProfileId: "remote-new",
-        remoteContentVersion: 1,
-        remoteContentHash: "hash-new",
-        remoteUpdatedAt: "2026-06-24T11:00:00Z",
+        revision: { id: "remote-new", version: 1, hash: "hash-new", updatedAt: "2026-06-24T11:00:00Z" },
       });
       return metadataSnapshot;
     }
+
     throw new Error(`unexpected command: ${command}`);
   });
 
   const fetchMock = vi.fn(async (input: string | URL | Request) => {
-    const url = input.toString();
+    const url = input.toString().replace("?bundle=1", "");
     if (url === "https://codex-helper.ite.tool4seller.com/codex/api/auth/me") {
       return {
         ok: true,
@@ -4132,13 +4108,7 @@ test("relinks a missing shared profile to the unique same-name cloud profile whe
     await flushUi();
   }
 
-  expect(invokeMock).toHaveBeenCalledWith("set_profile_remote_metadata", {
-    profileId: "local-shared-oauth",
-    remoteProfileId: "remote-new",
-    remoteContentVersion: 1,
-    remoteContentHash: "hash-new",
-    remoteUpdatedAt: "2026-06-24T11:00:00Z",
-  });
+  expect(invokeMock).not.toHaveBeenCalledWith("set_profile_remote_metadata", expect.anything());
   expect(invokeMock).not.toHaveBeenCalledWith("restart_codex", undefined);
   expect(document.body.textContent).toContain("已更新共享配置");
 });
@@ -4258,7 +4228,7 @@ test("lays out local profile details in a tabbed overview / config view", async 
   expect(document.querySelector('[data-role="editor-summary-section"]')).toBeNull();
 });
 
-test("writes back refreshed shared auth on startup when the active target changed", async () => {
+test("acknowledges a newer shared API key without rewriting the runtime files", async () => {
   Object.defineProperty(window, "__TAURI_INTERNALS__", {
     configurable: true,
     value: {},
@@ -4272,7 +4242,7 @@ test("writes back refreshed shared auth on startup when the active target change
     targetAuthExists: true,
     targetConfigExists: true,
     targetUpdatedAt: "2026-06-24T10:00:00Z",
-    targetAuthTypeLabel: "官方 OAuth",
+    targetAuthTypeLabel: "第三方 API",
     activeProfileId: "local-shared-oauth",
     lastSelectedProfileId: "local-shared-oauth",
     lastSwitchProfileId: "local-shared-oauth",
@@ -4282,8 +4252,8 @@ test("writes back refreshed shared auth on startup when the active target change
       {
         id: "local-shared-oauth",
         name: "ChatGPT Pro",
-        notes: "共享官方 OAuth",
-        authTypeLabel: "官方 OAuth",
+        notes: "共享第三方授权",
+        authTypeLabel: "第三方 API",
         createdAt: "2026-06-24T09:00:00Z",
         updatedAt: "2026-06-24T10:00:00Z",
         authHash: "auth-old",
@@ -4301,7 +4271,7 @@ test("writes back refreshed shared auth on startup when the active target change
   const updatedNetworkProfile = {
     id: "remote-oauth",
     name: "ChatGPT Pro",
-    description: "共享官方 OAuth",
+    description: "共享第三方授权",
     createdAt: "2026-06-24T09:00:00Z",
     updatedAt: "2026-06-24T10:05:00Z",
     contentVersion: 4,
@@ -4347,18 +4317,19 @@ test("writes back refreshed shared auth on startup when the active target change
       return {
         id: "local-shared-oauth",
         name: "ChatGPT Pro",
-        notes: "共享官方 OAuth",
-        authTypeLabel: "官方 OAuth",
+        notes: "共享第三方授权",
+        authTypeLabel: "第三方 API",
         createdAt: "2026-06-24T09:00:00Z",
         updatedAt: "2026-06-24T10:05:00Z",
         remoteProfileId: "remote-oauth",
         remoteContentVersion: 3,
         remoteContentHash: "hash-v3",
         remoteUpdatedAt: "2026-06-24T09:30:00Z",
-        authJson: '{"auth_mode":"chatgpt","tokens":{"refresh_token":"new-refresh"}}',
+        authJson: '{"OPENAI_API_KEY":"new-fixture-key"}',
         configToml: 'model = "gpt-5"\n',
         loadedFromTarget: true,
-        hasTargetChanges: true,
+        hasTargetChanges: false,
+        authContentHash: "auth-new",
         readOnly: false,
       };
     }
@@ -4370,7 +4341,7 @@ test("writes back refreshed shared auth on startup when the active target change
         body: JSON.stringify({
           baseContentVersion: 3,
           baseContentHash: "hash-v3",
-          authContent: '{"auth_mode":"chatgpt","tokens":{"refresh_token":"new-refresh"}}',
+          authContent: '{"OPENAI_API_KEY":"new-fixture-key"}',
         }),
       });
       return {
@@ -4378,25 +4349,11 @@ test("writes back refreshed shared auth on startup when the active target change
         body: JSON.stringify(updatedNetworkProfile),
       };
     }
-    if (command === "update_profile") {
-      expect(args).toEqual({
-        profileId: "local-shared-oauth",
-        payload: {
-          name: "ChatGPT Pro",
-          notes: "共享官方 OAuth",
-          authJson: '{"auth_mode":"chatgpt","tokens":{"refresh_token":"new-refresh"}}',
-          configToml: 'model = "gpt-5"\n',
-        },
-      });
-      return updatedSnapshot;
-    }
     if (command === "set_profile_remote_metadata") {
       expect(args).toEqual({
         profileId: "local-shared-oauth",
-        remoteProfileId: "remote-oauth",
-        remoteContentVersion: 4,
-        remoteContentHash: "hash-v4",
-        remoteUpdatedAt: "2026-06-24T10:05:00Z",
+        revision: { id: "remote-oauth", version: 4, hash: "hash-v4", updatedAt: "2026-06-24T10:05:00Z" },
+        publishedFromLocal: false,
       });
       return updatedSnapshot;
     }
@@ -4421,6 +4378,7 @@ test("writes back refreshed shared auth on startup when the active target change
             ...updatedNetworkProfile,
             contentVersion: 3,
             contentHash: "hash-v3",
+            authContentHash: "auth-old",
             contentUpdatedAt: "2026-06-24T09:30:00Z",
           },
         ],
@@ -4445,6 +4403,8 @@ test("writes back refreshed shared auth on startup when the active target change
     method: "POST",
     url: "https://codex-helper.ite.tool4seller.com/codex/api/profiles/remote-oauth",
   }));
+  expect(invokeMock).toHaveBeenCalledWith("set_profile_remote_metadata", expect.anything());
+  expect(invokeMock).not.toHaveBeenCalledWith("update_profile", expect.anything());
   expect(document.body.textContent).not.toContain("请先更新到最新版");
 });
 

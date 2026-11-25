@@ -17,7 +17,6 @@ use crate::menu_bar::{
     install_menu_bar, menu_bar_refresh_target, sync_menu_bar_pac_proxy, sync_menu_bar_usage,
     MenuBarRefreshKind,
 };
-use chrono::{DateTime, Utc};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::thread;
@@ -110,13 +109,27 @@ fn list_model_providers(app: AppHandle) -> Result<Vec<ModelProviderSummary>, Str
         .map_err(|error| error.to_string())
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportedProfileSnapshot {
+    #[serde(flatten)]
+    snapshot: AppSnapshot,
+    imported_profile_id: String,
+}
+
 #[tauri::command]
-fn import_profile(app: AppHandle, payload: ProfileInput) -> Result<AppSnapshot, String> {
+fn import_profile(
+    app: AppHandle,
+    payload: ProfileInput,
+) -> Result<ImportedProfileSnapshot, String> {
     let manager = manager_from_app(&app)?;
-    manager
+    let profile = manager
         .import_profile(payload)
         .map_err(|error| error.to_string())?;
-    snapshot_and_sync(&app, &manager)
+    Ok(ImportedProfileSnapshot {
+        snapshot: snapshot_and_sync(&app, &manager)?,
+        imported_profile_id: profile.id,
+    })
 }
 
 #[tauri::command]
@@ -164,10 +177,11 @@ fn update_profile_from_cloud(
     app: AppHandle,
     profile_id: String,
     payload: ProfileInput,
+    revision: core::RemoteProfileRevision,
 ) -> Result<AppSnapshot, String> {
     let manager = manager_from_app(&app)?;
     manager
-        .update_profile_preserving_runtime_config(&profile_id, payload)
+        .stage_remote_profile_update(&profile_id, payload, revision)
         .map_err(|error| error.to_string())?;
     snapshot_and_sync(&app, &manager)
 }
@@ -176,20 +190,12 @@ fn update_profile_from_cloud(
 fn set_profile_remote_metadata(
     app: AppHandle,
     profile_id: String,
-    remote_profile_id: String,
-    remote_content_version: Option<u64>,
-    remote_content_hash: Option<String>,
-    remote_updated_at: Option<DateTime<Utc>>,
+    revision: core::RemoteProfileRevision,
+    published_from_local: Option<bool>,
 ) -> Result<AppSnapshot, String> {
     let manager = manager_from_app(&app)?;
     manager
-        .set_profile_remote_metadata(
-            &profile_id,
-            remote_profile_id,
-            remote_content_version,
-            remote_content_hash,
-            remote_updated_at,
-        )
+        .set_profile_remote_metadata(&profile_id, revision, published_from_local.unwrap_or(false))
         .map_err(|error| error.to_string())?;
     snapshot_and_sync(&app, &manager)
 }
@@ -275,13 +281,24 @@ fn network_request(
     }
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SwitchedProfileSnapshot {
+    #[serde(flatten)]
+    snapshot: AppSnapshot,
+    switch_warning: Option<String>,
+}
+
 #[tauri::command]
-fn switch_profile(app: AppHandle, profile_id: String) -> Result<AppSnapshot, String> {
+fn switch_profile(app: AppHandle, profile_id: String) -> Result<SwitchedProfileSnapshot, String> {
     let mut manager = manager_from_app(&app)?;
-    manager
+    let switched = manager
         .switch_profile(&profile_id)
         .map_err(|error| error.to_string())?;
-    snapshot_and_sync(&app, &manager)
+    Ok(SwitchedProfileSnapshot {
+        snapshot: snapshot_and_sync(&app, &manager)?,
+        switch_warning: switched.session_repair_warning,
+    })
 }
 
 #[tauri::command]
@@ -870,7 +887,7 @@ mod tests {
             profile_id: None,
             summary: "state.json 损坏".into(),
             action: "检查目标目录".into(),
-            occurred_at: Utc::now(),
+            occurred_at: chrono::Utc::now(),
         }
     }
 

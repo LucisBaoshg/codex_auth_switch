@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   createSessionCookieValue,
+  decodeReturnTo,
   requireSsoEnv,
   secureCookiesForRedirectUri,
   sessionCookieName,
@@ -8,17 +9,6 @@ import {
 import { withBasePath } from "@/lib/base-path";
 import type { ProfilePrincipal } from "@/lib/profile-store";
 import { recordKnownUser } from "@/lib/user-store";
-
-export function decodeReturnTo(state: string) {
-  try {
-    const parsed = JSON.parse(Buffer.from(state, "base64url").toString("utf-8")) as {
-      returnTo?: string;
-    };
-    return parsed.returnTo && /^\/(?![\\/])/.test(parsed.returnTo) ? parsed.returnTo : "/profiles";
-  } catch {
-    return "/profiles";
-  }
-}
 
 export async function GET(request: NextRequest) {
   const code = request.nextUrl.searchParams.get("code");

@@ -6,6 +6,7 @@ import {
   filterProfilesForPrincipal,
   normalizeProfileVisibility,
   ProfileShareSafetyError,
+  publicProfile,
   publicProfileWithAuthType,
   readProfiles,
 } from "@/lib/profile-store";
@@ -68,7 +69,7 @@ export async function POST(req: NextRequest) {
       configContent: sanitizeSharedConfigToml(await file2.text()),
     }, principal);
 
-    return NextResponse.json(await publicProfileWithAuthType(newProfile), { status: 201, headers: noStoreHeaders });
+    return NextResponse.json(publicProfile(newProfile), { status: 201, headers: noStoreHeaders });
   } catch (error) {
     if (error instanceof ProfileShareSafetyError) {
       return NextResponse.json({ error: error.message }, { status: 400, headers: noStoreHeaders });

@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "crypto";
 import path from "path";
 import { getDataDir } from "./data-paths";
 import { atomicWriteFile, ensureFile, withFileStoreLock } from "./file-store";
+import { sanitizeSharedConfigToml } from "./shared-profile-config";
 
 export type ProfilePrincipal = {
   dingUserId: string;
@@ -29,6 +30,7 @@ export type StoredProfile = {
   sourceProfileId?: string;
   contentVersion?: number;
   contentHash?: string;
+  authContentHash?: string;
   contentUpdatedAt?: string;
   ownerDingUserId?: string;
   ownerName?: string | null;
@@ -72,7 +74,8 @@ const profilesFileName = "profiles.json";
 
 function parseAuthContent(authContent: string): Record<string, unknown> | null {
   try {
-    return JSON.parse(authContent) as Record<string, unknown>;
+    const value = JSON.parse(authContent);
+    return value && typeof value === "object" && !Array.isArray(value) ? value : null;
   } catch {
     return null;
   }
@@ -84,7 +87,7 @@ export function hasOfficialOauthTokens(authContent: string): boolean {
 
   return (
     auth.auth_mode === "chatgpt" ||
-    typeof auth.tokens === "object" ||
+    (auth.tokens !== null && typeof auth.tokens === "object") ||
     typeof auth.refresh_token === "string" ||
     typeof auth.id_token === "string" ||
     typeof auth.access_token === "string"
@@ -231,19 +234,57 @@ export function publicProfile(profile: StoredProfile): StoredProfile {
   };
 }
 
-export async function publicProfileWithAuthType(profile: StoredProfile): Promise<StoredProfile> {
-  const derivedAuthTypeLabel = detectSharedProfileAuthType(
-    await readProfileFile(profile.id, "auth.json"),
-    await readProfileFile(profile.id, "config.toml"),
-  );
-  const authTypeLabel = derivedAuthTypeLabel === "未知"
-    ? profile.authTypeLabel ?? derivedAuthTypeLabel
-    : derivedAuthTypeLabel;
-
+function presentProfile(profile: StoredProfile, authContent: string, configContent: string): StoredProfile {
+  const label = detectSharedProfileAuthType(authContent, configContent);
   return {
     ...publicProfile(profile),
-    authTypeLabel,
+    authTypeLabel: label === "未知" ? profile.authTypeLabel ?? label : label,
+    contentVersion: profile.contentVersion ?? 1,
+    contentHash: sharedProfileContentHash(authContent, configContent),
+    authContentHash: createHash("sha256").update(authContent).digest("hex"),
   };
+}
+
+export async function publicProfileWithAuthType(profile: StoredProfile): Promise<StoredProfile> {
+  const [authContent, configContent] = await Promise.all([
+    readProfileFile(profile.id, "auth.json"),
+    readProfileFile(profile.id, "config.toml"),
+  ]);
+  return presentProfile(profile, authContent, configContent);
+}
+
+export async function getVisibleProfileBundle(id: string, principal: ProfilePrincipal) {
+  return withFileStoreLock(profilesFilePath(), async () => {
+    const profile = await getVisibleProfile(id, principal);
+    if (!profile) return null;
+
+    const folder = path.join(profileFilesDir(), profile.id);
+    const [authContent, configContent] = await Promise.all([
+      fs.readFile(path.join(folder, "auth.json"), "utf-8"),
+      fs.readFile(path.join(folder, "config.toml"), "utf-8"),
+    ]);
+    return {
+      ...presentProfile(profile, authContent, configContent),
+      authContent: hasOfficialOauthTokens(authContent) ? '{"auth_mode":"chatgpt"}' : authContent,
+      configContent: sanitizeSharedConfigToml(configContent),
+    };
+  });
+}
+
+function assertContentRevision(
+  revision: { baseContentVersion?: number | null; baseContentHash?: string | null },
+  currentVersion: number,
+  currentHash: string,
+) {
+  const version = revision.baseContentVersion;
+  const hash = revision.baseContentHash?.trim();
+  if (
+    (version == null && !hash) ||
+    (version != null && version !== currentVersion) ||
+    (hash && hash !== currentHash)
+  ) {
+    throw new ProfileContentConflictError(currentVersion, currentHash);
+  }
 }
 
 export function profilesFilePath() {
@@ -394,17 +435,10 @@ async function updateProfileMetadataUnlocked(
     previousConfigForRollback = previousConfig;
     const nextAuth = updates.authContent ?? previousAuth;
     const nextConfig = updates.configContent ?? previousConfig;
-    const previousHash = profiles[index].contentHash ?? sharedProfileContentHash(previousAuth, previousConfig);
+    const previousHash = sharedProfileContentHash(previousAuth, previousConfig);
     const previousVersion = profiles[index].contentVersion ?? 1;
-    const baseHash = updates.baseContentHash?.trim();
     assertShareSafeAuthVisibility(nextAuth, profiles[index].visibility ?? "private");
-
-    if (
-      (typeof updates.baseContentVersion === "number" && updates.baseContentVersion !== previousVersion) ||
-      (baseHash && baseHash !== previousHash)
-    ) {
-      throw new ProfileContentConflictError(previousVersion, previousHash);
-    }
+    assertContentRevision(updates, previousVersion, previousHash);
 
     const nextHash = sharedProfileContentHash(nextAuth, nextConfig);
 
@@ -482,15 +516,8 @@ async function syncProfileAuthContentUnlocked(
   const previousAuth = await readProfileFile(profile.id, "auth.json");
   const previousConfig = await readProfileFile(profile.id, "config.toml");
   const currentVersion = profile.contentVersion ?? 1;
-  const currentHash = profile.contentHash ?? sharedProfileContentHash(previousAuth, previousConfig);
-  const baseHash = updates.baseContentHash?.trim();
-
-  if (
-    (typeof updates.baseContentVersion === "number" && updates.baseContentVersion !== currentVersion) ||
-    (baseHash && baseHash !== currentHash)
-  ) {
-    throw new ProfileContentConflictError(currentVersion, currentHash);
-  }
+  const currentHash = sharedProfileContentHash(previousAuth, previousConfig);
+  assertContentRevision(updates, currentVersion, currentHash);
 
   const now = new Date().toISOString();
   const nextAuth = updates.authContent;

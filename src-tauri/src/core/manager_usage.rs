@@ -137,8 +137,14 @@ impl ProfileManager {
 
         let usage = fetch_codex_usage_snapshot(&source.auth_json)?;
 
+        let _lock = self.lock_profile_writes()?;
         if source.should_sync_runtime_state {
-            self.sync_runtime_state_to_profile(profile_id, &source.auth_json, &source.config_toml)?;
+            let live = self.resolve_codex_usage_auth_source(profile_id)?;
+            if live.should_sync_runtime_state
+                && auth_match_hash(&live.auth_json)? == auth_match_hash(&source.auth_json)?
+            {
+                self.sync_runtime_state_to_profile(profile_id, &live.auth_json, &live.config_toml)?;
+            }
         }
 
         let mut metadata = self.read_profile_metadata(&profile_dir)?;
@@ -152,6 +158,7 @@ impl ProfileManager {
         profile_id: &str,
         error: String,
     ) -> Result<ProfileSummary, AppError> {
+        let _lock = self.lock_profile_writes()?;
         let profile_dir = self.profile_dir(profile_id)?;
         let mut metadata = self.read_profile_metadata(&profile_dir)?;
         if metadata.auth_type_label != "官方 OAuth" {

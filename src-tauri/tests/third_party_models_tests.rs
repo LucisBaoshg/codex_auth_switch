@@ -250,7 +250,7 @@ fn catalog_survives_portable_import_and_official_switch_restores_local_settings(
     let original = "model = \"official-test\"\napproval_policy = \"on-request\"\nsandbox_mode = \"workspace-write\"\n[mcp_servers.test]\ncommand = \"test-tool\"\n";
     fs::write(
         target.path().join("auth.json"),
-        r#"{"auth_mode":"chatgpt"}"#,
+        r#"{"auth_mode":"chatgpt","tokens":{"id_token":"fixture-id","access_token":"fixture-access"}}"#,
     )
     .unwrap();
     fs::write(target.path().join("config.toml"), original).unwrap();
@@ -387,7 +387,7 @@ fn restores_an_official_custom_catalog_and_keeps_old_generated_catalogs_for_back
         .import_profile(ProfileInput {
             name: "官方自定义目录".into(),
             notes: String::new(),
-            auth_json: r#"{"auth_mode":"chatgpt"}"#.into(),
+            auth_json: r#"{"auth_mode":"chatgpt","tokens":{"id_token":"fixture-id","access_token":"fixture-access"}}"#.into(),
             config_toml: format!(
                 "model = \"official-test\"\nmodel_catalog_json = {}",
                 serde_json::to_string(&official_catalog).unwrap()

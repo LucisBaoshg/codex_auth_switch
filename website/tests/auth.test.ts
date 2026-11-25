@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   consumeDesktopLoginToken,
   createSessionCookieValue,
+  decodeReturnTo,
   createDesktopLoginSession,
   getDesktopLoginConfirmation,
   normalizeSsoRedirectUri,
@@ -9,7 +10,6 @@ import {
 } from "../src/lib/auth";
 import { POST as confirmDesktopLogin } from "../src/app/api/auth/desktop-login/[id]/confirm/route";
 import { GET as startSsoLogin } from "../src/app/api/auth/login/route";
-import { decodeReturnTo } from "../src/app/api/auth/callback/route";
 import { NextRequest } from "next/server";
 
 describe("auth cookie security", () => {

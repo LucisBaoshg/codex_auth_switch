@@ -274,17 +274,33 @@ fn sync_remote_profiles_imports_and_updates_existing_remote_profiles() {
         updated_document.remote_content_hash.as_deref(),
         Some("hash-v2")
     );
-    assert!(updated_document.auth_json.contains("sk-remote-2"));
-    assert!(updated_document.config_toml.contains("gpt-5.5"));
-    assert!(updated_document
-        .config_toml
-        .contains("[mcp_servers.local-only]"));
-    assert!(updated_document
-        .config_toml
-        .contains("command = \"local-mcp\""));
+    assert!(updated_document.auth_json.contains("sk-remote-1"));
+    let archived = _app_dir
+        .path()
+        .join("profiles")
+        .join(&updated_profiles[0].id);
+    assert!(fs::read_to_string(archived.join("auth.json"))
+        .unwrap()
+        .contains("sk-remote-2"));
+    let config_path = target_dir.path().join("config.toml");
+    assert!(fs::read_to_string(&config_path)
+        .unwrap()
+        .contains("gpt-5.4"));
 
-    let active_config = fs::read_to_string(target_dir.path().join("config.toml"))
-        .expect("read active config after remote sync");
+    server.set_json(
+        "/profiles/remote-1",
+        json!({
+            "id": "remote-1", "name": "Older remote",
+            "files": ["auth.json", "config.toml"], "contentVersion": 1
+        }),
+    );
+    let stale = manager
+        .sync_remote_profiles(&format!("{}/profiles", server.base_url))
+        .unwrap();
+    assert_eq!(stale.synced, 0);
+
+    manager.switch_profile(&updated_profiles[0].id).unwrap();
+    let active_config = fs::read_to_string(config_path).unwrap();
     assert!(active_config.contains("gpt-5.5"));
     assert!(active_config.contains("[mcp_servers.local-only]"));
 }

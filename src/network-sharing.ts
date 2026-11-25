@@ -1,6 +1,7 @@
 export type NetworkSharingSettings = {
   profilesApi: string;
   token: string;
+  tokenOrigin?: string;
 };
 
 export const CANONICAL_NETWORK_PROFILES_HOST = "codex-helper.ite.tool4seller.com";
@@ -9,13 +10,16 @@ export const DEFAULT_NETWORK_PROFILES_API = `https://${CANONICAL_NETWORK_PROFILE
 
 const networkProfilesApiStorageKey = "codex-auth-switch.networkProfilesApi";
 const networkProfileTokenStorageKey = "codex-auth-switch.networkProfileToken";
+const networkTokenOriginStorageKey = "codex-auth-switch.networkTokenOrigin";
 
 export function loadNetworkSharingSettings(storage: Storage = window.localStorage): NetworkSharingSettings {
+  const profilesApi = normalizeNetworkProfilesApiUrl(
+    storage.getItem(networkProfilesApiStorageKey)?.trim() || DEFAULT_NETWORK_PROFILES_API,
+  );
   return {
-    profilesApi: normalizeNetworkProfilesApiUrl(
-      storage.getItem(networkProfilesApiStorageKey)?.trim() || DEFAULT_NETWORK_PROFILES_API,
-    ),
+    profilesApi,
     token: storage.getItem(networkProfileTokenStorageKey)?.trim() || "",
+    tokenOrigin: storage.getItem(networkTokenOriginStorageKey) ?? networkOrigin(profilesApi),
   };
 }
 
@@ -24,8 +28,10 @@ export function saveNetworkSharingSettings(
   storage: Storage = window.localStorage,
 ): void {
   settings.profilesApi = normalizeNetworkProfilesApiUrl(settings.profilesApi);
+  setNetworkAccessToken(settings, networkAccessToken(settings));
   storage.setItem(networkProfilesApiStorageKey, settings.profilesApi);
-  storage.setItem(networkProfileTokenStorageKey, settings.token.trim());
+  storage.setItem(networkProfileTokenStorageKey, settings.token);
+  storage.setItem(networkTokenOriginStorageKey, settings.tokenOrigin ?? "");
 }
 
 export function normalizeNetworkProfilesApiUrl(value: string): string {
@@ -73,8 +79,30 @@ export function networkUsersApiUrl(settings: NetworkSharingSettings): string {
   return `${networkPortalBaseUrl(settings)}/api/users`;
 }
 
+function networkOrigin(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.origin : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function setNetworkAccessToken(settings: NetworkSharingSettings, token: string) {
+  settings.token = token.trim();
+  settings.tokenOrigin = networkOrigin(networkProfilesApiUrl(settings));
+}
+
+export function networkAccessToken(settings: NetworkSharingSettings): string {
+  const origin = networkOrigin(networkProfilesApiUrl(settings));
+  if (!origin || (settings.tokenOrigin !== undefined && settings.tokenOrigin !== origin)) {
+    return "";
+  }
+  return settings.token.trim();
+}
+
 export function networkAuthHeaders(settings: NetworkSharingSettings): Record<string, string> | undefined {
-  const token = settings.token.trim();
+  const token = networkAccessToken(settings);
   if (!token) return undefined;
   return {
     Authorization: `Bearer ${token}`,
@@ -96,5 +124,5 @@ export function networkFetchOptions(settings: NetworkSharingSettings): RequestIn
 }
 
 export function hasNetworkAccessToken(settings: NetworkSharingSettings): boolean {
-  return Boolean(settings.token.trim());
+  return Boolean(networkAccessToken(settings));
 }

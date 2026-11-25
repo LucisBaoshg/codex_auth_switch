@@ -8,5 +8,8 @@ export async function OPTIONS() {
 
 export async function GET(request: NextRequest) {
   const principal = await principalFromRequest(request);
-  return NextResponse.json({ user: principal }, { headers: noStoreHeaders });
+  return NextResponse.json({ user: principal }, {
+    status: principal ? 200 : 401,
+    headers: noStoreHeaders,
+  });
 }
